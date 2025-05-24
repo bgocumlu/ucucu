@@ -78,55 +78,68 @@ export function ChatMessage({ message, currentUser }: ChatMessageProps & { curre
           >
             {message.type === "text" && <p className="text-sm whitespace-pre-wrap break-words">{message.content}</p>}
 
-            {message.type === "file" && (
-              <div className="flex items-center space-x-2">
-                <FileText className="h-4 w-4" />
-                <span className="text-sm">{message.fileName || message.content}</span>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className={`h-6 w-6 p-0 ${message.isOwn ? "text-white hover:bg-blue-600" : "text-gray-600 hover:bg-gray-200"}`}
-                  onClick={() => {
-                    if (typeof message.fileData === 'string') {
-                      // Use Blob and createObjectURL for better mobile support
-                      const dataUrl = message.fileData;
-                      const arr = dataUrl.split(",");
-                      if (arr.length === 2) {
-                        const mimeMatch = arr[0].match(/:(.*?);/);
-                        if (!mimeMatch) {
-                          alert('Invalid file data.');
-                          return;
+            {message.type === "file" && (() => {
+              // Only show preview if file is an image
+              const isImage = typeof message.fileData === 'string' && message.fileData.startsWith('data:image/');
+              return (
+                <div className="flex flex-col items-start space-y-2">
+                  {isImage && (
+                    <img
+                      src={message.fileData}
+                      alt={message.fileName || message.content || 'image'}
+                      className="max-w-xs max-h-60 rounded border border-gray-200 mb-1"
+                      style={{ objectFit: 'contain' }}
+                    />
+                  )}
+                  <div className="flex items-center space-x-2">
+                    <FileText className="h-4 w-4" />
+                    <span className="text-sm">{message.fileName || message.content}</span>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className={`h-6 w-6 p-0 ${message.isOwn ? "text-white hover:bg-blue-600" : "text-gray-600 hover:bg-gray-200"}`}
+                      onClick={() => {
+                        if (typeof message.fileData === 'string') {
+                          const dataUrl = message.fileData;
+                          const arr = dataUrl.split(",");
+                          if (arr.length === 2) {
+                            const mimeMatch = arr[0].match(/:(.*?);/);
+                            if (!mimeMatch) {
+                              alert('Invalid file data.');
+                              return;
+                            }
+                            const mime = mimeMatch[1];
+                            const bstr = atob(arr[1]);
+                            let n = bstr.length;
+                            const u8arr = new Uint8Array(n);
+                            while (n--) {
+                              u8arr[n] = bstr.charCodeAt(n);
+                            }
+                            const blob = new Blob([u8arr], { type: mime });
+                            const url = URL.createObjectURL(blob);
+                            const a = document.createElement('a');
+                            a.href = url;
+                            a.download = message.fileName || message.content || 'file';
+                            document.body.appendChild(a);
+                            a.click();
+                            setTimeout(() => {
+                              URL.revokeObjectURL(url);
+                              document.body.removeChild(a);
+                            }, 100);
+                          } else {
+                            alert('Invalid file data.');
+                          }
+                        } else {
+                          alert('File data is missing or invalid.');
                         }
-                        const mime = mimeMatch[1];
-                        const bstr = atob(arr[1]);
-                        let n = bstr.length;
-                        const u8arr = new Uint8Array(n);
-                        while (n--) {
-                          u8arr[n] = bstr.charCodeAt(n);
-                        }
-                        const blob = new Blob([u8arr], { type: mime });
-                        const url = URL.createObjectURL(blob);
-                        const a = document.createElement('a');
-                        a.href = url;
-                        a.download = message.fileName || message.content || 'file';
-                        document.body.appendChild(a);
-                        a.click();
-                        setTimeout(() => {
-                          URL.revokeObjectURL(url);
-                          document.body.removeChild(a);
-                        }, 100);
-                      } else {
-                        alert('Invalid file data.');
-                      }
-                    } else {
-                      alert('File data is missing or invalid.');
-                    }
-                  }}
-                >
-                  <Download className="h-3 w-3" />
-                </Button>
-              </div>
-            )}
+                      }}
+                    >
+                      <Download className="h-3 w-3" />
+                    </Button>
+                  </div>
+                </div>
+              );
+            })()}
 
             {message.type === "audio" && (
               <div className="flex items-center space-x-2">
