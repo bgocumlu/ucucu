@@ -82,18 +82,37 @@ export default function ChatPage() {
       )
     }
     if (lastMessage.type === "newMessage" && lastMessage.roomId === roomId) {
-      const msg = lastMessage.message as { username: string; text: string; timestamp: number; system?: boolean }
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: msg.timestamp.toString(),
-          type: msg.system ? "system" : "text",
-          username: msg.username,
-          content: msg.text,
-          timestamp: new Date(msg.timestamp),
-          isOwn: msg.username === currentUser,
-        },
-      ])
+      type IncomingMsg =
+        | { username: string; text: string; timestamp: number; system?: boolean; type?: undefined }
+        | { username: string; fileName: string; fileType: string; fileData: string; timestamp: number; type: "file" };
+      const msg = lastMessage.message as IncomingMsg;
+      if (msg.type === "file") {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: (msg.timestamp || Date.now()).toString(),
+            type: "file",
+            username: msg.username,
+            content: msg.fileName || "File",
+            timestamp: new Date(msg.timestamp),
+            isOwn: msg.username === currentUser,
+            fileData: msg.fileData,
+            fileName: msg.fileName,
+          },
+        ]);
+      } else {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: msg.timestamp.toString(),
+            type: msg.system ? "system" : "text",
+            username: msg.username,
+            content: msg.text,
+            timestamp: new Date(msg.timestamp),
+            isOwn: msg.username === currentUser,
+          },
+        ]);
+      }
     }
     // Prefer roomInfo for participants if available
     if (lastMessage.type === "roomInfo" && lastMessage.room && (lastMessage.room as RoomInfoMsg).id === roomId) {
@@ -160,19 +179,26 @@ export default function ChatPage() {
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
+    console.log('File input changed', file)
     if (!file) return
 
-    const newMessage: Message = {
-      id: Date.now().toString(),
-      type: "file",
-      username: currentUser,
-      content: file.name,
-      timestamp: new Date(),
-      isOwn: true,
+    const reader = new FileReader()
+    reader.onload = () => {
+      const base64 = reader.result as string
+      console.log('About to send file over WebSocket', { fileName: file.name, fileType: file.type, base64Length: base64.length })
+      send({
+        type: "sendFile",
+        roomId,
+        username: currentUser,
+        fileName: file.name,
+        fileType: file.type,
+        fileData: base64,
+        timestamp: Date.now(),
+      })
+      // Reset file input so the same file can be selected again
+      if (fileInputRef.current) fileInputRef.current.value = ""
     }
-
-    setMessages((prev) => [...prev, newMessage])
-    setIsAtBottom(true)
+    reader.readAsDataURL(file)
   }
 
   const toggleRecording = () => {

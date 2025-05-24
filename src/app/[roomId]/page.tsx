@@ -279,7 +279,7 @@ export default function RoomPage() {
                 <Label htmlFor="username">Your Username</Label>
                 <Input
                   id="username"
-                  placeholder="Enter your username (3-20 characters)"
+                  placeholder="Enter your username (1-20 characters)"
                   value={formData.username}
                   onChange={(e) => setFormData((prev) => ({ ...prev, username: e.target.value }))}
                   className={errors.username ? "border-red-500" : ""}

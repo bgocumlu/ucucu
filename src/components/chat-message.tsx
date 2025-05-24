@@ -9,6 +9,8 @@ interface Message {
   content: string
   timestamp: Date
   isOwn: boolean
+  fileData?: string // base64 data
+  fileName?: string // optional file name
 }
 
 interface ChatMessageProps {
@@ -79,11 +81,21 @@ export function ChatMessage({ message, currentUser }: ChatMessageProps & { curre
             {message.type === "file" && (
               <div className="flex items-center space-x-2">
                 <FileText className="h-4 w-4" />
-                <span className="text-sm">{message.content}</span>
+                <span className="text-sm">{message.fileName || message.content}</span>
                 <Button
                   variant="ghost"
                   size="sm"
                   className={`h-6 w-6 p-0 ${message.isOwn ? "text-white hover:bg-blue-600" : "text-gray-600 hover:bg-gray-200"}`}
+                  onClick={() => {
+                    if (typeof message.fileData === 'string') {
+                      const a = document.createElement('a');
+                      a.href = message.fileData;
+                      a.download = message.fileName || message.content || 'file';
+                      a.click();
+                    } else {
+                      alert('File data is missing or invalid.');
+                    }
+                  }}
                 >
                   <Download className="h-3 w-3" />
                 </Button>

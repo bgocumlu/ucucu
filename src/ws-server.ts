@@ -8,7 +8,7 @@ import bcrypt from 'bcryptjs';
 const PORT = 3001;
 
 // In-memory store for rooms and messages
-const rooms: Record<string, { name: string; users: Set<string>; messages: unknown[]; locked: boolean; maxParticipants: number; visibility: 'public' | 'private'; owner?: string; password?: string }> = {};
+const rooms: Record<string, { name: string; users: Set<string>; locked: boolean; maxParticipants: number; visibility: 'public' | 'private'; owner?: string; password?: string }> = {};
 
 const server = createServer();
 const wss = new WebSocketServer({ server });
@@ -70,7 +70,7 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
           // Create new room
           const hashedPassword = password ? bcrypt.hashSync(password, 8) : undefined;
           const displayName = typeof msg.displayName === 'string' && msg.displayName.trim().length > 0 ? msg.displayName.trim() : `${roomId}`;
-          rooms[roomId] = { name: displayName, users: new Set(), messages: [], locked: !!password, maxParticipants: 10, visibility: 'public', owner: username, password: hashedPassword };
+          rooms[roomId] = { name: displayName, users: new Set(), locked: !!password, maxParticipants: 10, visibility: 'public', owner: username, password: hashedPassword };
           broadcastRooms(); // Broadcast new room list
         }
         // Prevent duplicate usernames
@@ -97,9 +97,8 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
         ws.joinedRoom = roomId;
         ws.joinedUser = username;
         broadcastRooms(); // Broadcast participant count change
-        // Send join notification message
+        // Send join notification message (system message, only broadcast, not stored)
         const joinMsg = { username: '', text: `${username} joined the chat.`, timestamp: Date.now(), system: true };
-        rooms[roomId].messages.push(joinMsg);
         // Only broadcast to clients in this room
         const usersArr = Array.from(rooms[roomId].users);
         getClientsInRoom(roomId).forEach((client) => {
@@ -111,14 +110,24 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
         });
         // Also send roomInfo to the joining client (in case not included above)
         ws.send(JSON.stringify({ type: 'roomInfo', room: { id: roomId, name: rooms[roomId].name, count: rooms[roomId].users.size, maxParticipants: rooms[roomId].maxParticipants, locked: rooms[roomId].locked, exists: true, owner: rooms[roomId].owner, users: usersArr } }));
-        ws.send(JSON.stringify({ type: 'messages', roomId, messages: rooms[roomId].messages }));
       } else if (msg.type === 'sendMessage') {
         const { roomId, username, text } = msg;
         const message = { username, text, timestamp: Date.now() };
         if (rooms[roomId]) {
-          rooms[roomId].messages.push(message);
           getClientsInRoom(roomId).forEach((client) => {
             if (client.readyState === 1) {
+              client.send(JSON.stringify({ type: 'newMessage', roomId, message }));
+            }
+          });
+        }
+      } else if (msg.type === 'sendFile') {
+        const { roomId, username, fileName, fileType, fileData, timestamp } = msg;
+        console.log('[ws-server] Received sendFile:', { roomId, username, fileName, fileType, timestamp, fileDataLength: fileData?.length });
+        const message = { username, fileName, fileType, fileData, timestamp, type: 'file' };
+        if (rooms[roomId]) {
+          getClientsInRoom(roomId).forEach((client) => {
+            if (client.readyState === 1) {
+              console.log('[ws-server] Broadcasting file message to client in room:', roomId);
               client.send(JSON.stringify({ type: 'newMessage', roomId, message }));
             }
           });
@@ -126,8 +135,15 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
       } else if (msg.type === 'updateRoomSettings') {
         const { roomId, username, name, maxParticipants, locked, password } = msg;
         if (rooms[roomId] && rooms[roomId].owner === username) {
+          // Prevent setting maxParticipants lower than current user count
+          if (typeof maxParticipants === 'number') {
+            if (maxParticipants < rooms[roomId].users.size) {
+              ws.send(JSON.stringify({ type: 'error', error: `Cannot set max participants below current user count (${rooms[roomId].users.size}).` }));
+              return;
+            }
+            rooms[roomId].maxParticipants = maxParticipants;
+          }
           if (typeof name === 'string') rooms[roomId].name = name;
-          if (typeof maxParticipants === 'number') rooms[roomId].maxParticipants = maxParticipants;
           if (typeof locked === 'boolean') rooms[roomId].locked = locked;
           if (typeof password === 'string' && password.length > 0) {
             rooms[roomId].password = bcrypt.hashSync(password, 8);
@@ -155,8 +171,17 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
   });
 
   ws.on('close', () => {
-    if (joinedRoom && joinedUser && rooms[joinedRoom]) {
+    if (typeof joinedRoom === 'string' && joinedUser && joinedRoom in rooms && rooms[joinedRoom]) {
       rooms[joinedRoom].users.delete(joinedUser);
+      // Broadcast leave notification message (system message, only to clients in the room)
+      const leaveMsg = { username: '', text: `${joinedUser} left the chat.`, timestamp: Date.now(), system: true };
+      const usersArr = Array.from(rooms[joinedRoom].users);
+      getClientsInRoom(joinedRoom).forEach((client) => {
+        if (client.readyState === 1 && joinedRoom) {
+          client.send(JSON.stringify({ type: 'newMessage', roomId: joinedRoom, message: leaveMsg }));
+          client.send(JSON.stringify({ type: 'roomInfo', room: { id: joinedRoom, name: rooms[joinedRoom].name, count: rooms[joinedRoom].users.size, maxParticipants: rooms[joinedRoom].maxParticipants, locked: rooms[joinedRoom].locked, exists: true, owner: rooms[joinedRoom].owner, users: usersArr } }));
+        }
+      });
       broadcastRooms(); // Broadcast participant count change
       // Delete room if no participants left
       if (rooms[joinedRoom].users.size === 0) {

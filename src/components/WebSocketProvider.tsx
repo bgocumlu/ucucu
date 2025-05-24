@@ -73,7 +73,10 @@ export const WebSocketProvider = ({ children }: { children: React.ReactNode }) =
 
   const send = useCallback((msg: WSMessage) => {
     if (wsRef.current && wsRef.current.readyState === 1) {
+      console.log('[WebSocketProvider] Sending message:', msg)
       wsRef.current.send(JSON.stringify(msg));
+    } else {
+      console.warn('[WebSocketProvider] Tried to send but WebSocket not open', wsRef.current?.readyState)
     }
   }, []);
 

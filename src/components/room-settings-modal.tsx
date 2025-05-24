@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -30,6 +30,20 @@ export function RoomSettingsModal({ open, onOpenChange, roomId, participants, cu
   const [maxParticipants, setMaxParticipants] = useState("5")
   const [newPassword, setNewPassword] = useState("")
   const [visibility, setVisibility] = useState<string>('public')
+
+  // Sync local state with props when modal opens or when owner/roomId/participants change
+  useEffect(() => {
+    if (open) {
+      // Find the current room info from participants/owner
+      // (Assume owner and participants are always up to date)
+      setRoomName(owner ? roomId : "Study Group") // fallback if no custom name logic
+      // If you have room name/maxParticipants/visibility as props, use them here
+      // For now, just reset to defaults or use props if available
+      // setRoomName(roomNameProp)
+      // setMaxParticipants(maxParticipantsProp)
+      // setVisibility(visibilityProp)
+    }
+  }, [open, roomId, owner])
 
   const currentUserData = participants.find((p) => p.username === currentUser)
   const isOwner = owner ? currentUser === owner : currentUserData?.isOwner || false
