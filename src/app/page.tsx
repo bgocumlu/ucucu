@@ -119,9 +119,8 @@ export default function HomePage() {
 
   const filteredRooms = rooms.filter(
     (room) =>
-      (room.visibility === 'public') &&
-      (room.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        room.id.toLowerCase().includes(searchQuery.toLowerCase()))
+      room.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      room.id.toLowerCase().includes(searchQuery.toLowerCase()) || room.visibility == 'public',
   )
 
   const getInitials = (name: string) => {
@@ -158,58 +157,38 @@ export default function HomePage() {
       return
     }
 
-    // Check if room exists using WebSocket
-    let timeoutId: NodeJS.Timeout | null = null
-    let ws: WebSocket | null = null
-    setCheckingRoom(true)
-
-    timeoutId = setTimeout(() => {
-      ws = new WebSocket("ws://192.168.1.223:3001")
-      ws.onopen = () => {
-        ws!.send(JSON.stringify({ type: "getRooms" }))
-      }
-      ws.onmessage = (event) => {
-        console.log("WebSocket message received:", event.data)
-        try {
-          const msg = JSON.parse(event.data)
-          if (msg.type === "rooms") {
-            const cleanRoomName = roomName.trim().toLowerCase().replace(/[^a-zA-Z0-9-_]/g, "-")
-            // Use type assertion instead of any
-            const existingRoom = (msg.rooms as Room[]).find((room) => room.id === cleanRoomName)
-            if (existingRoom) {
-              setRoomStatus({
-                exists: true,
-                name: existingRoom.name,
-                count: existingRoom.count,
-                maxParticipants: existingRoom.maxParticipants,
-                locked: existingRoom.locked,
-              })
-            } else {
-              setRoomStatus({ exists: false })
-            }
-            setCheckingRoom(false)
-            ws!.close()
-          }
-        } catch {
-          setRoomStatus(null)
-          setCheckingRoom(false)
-          // eslint-disable-next-line @typescript-eslint/no-unused-expressions
-          ws && ws.close()
-        }
-      }
-      ws.onerror = () => {
-        setRoomStatus(null)
-        setCheckingRoom(false)
-        // eslint-disable-next-line @typescript-eslint/no-unused-expressions
-        ws && ws.close()
-      }
-    }, 500)
-
-    return () => {
-      if (timeoutId) clearTimeout(timeoutId)
-      if (ws) ws.close()
+    // Check if room exists using the existing WebSocket connection
+    if (!isConnected) {
+      setRoomStatus(null)
+      setCheckingRoom(false)
+      return
     }
-  }, [roomName, showRoomInput])
+
+    setCheckingRoom(true)
+    // Use the existing WebSocket connection to get rooms
+    send({ type: "getRooms" })
+  }, [roomName, showRoomInput, isConnected, send])
+
+  // Handle room status updates from WebSocket messages
+  useEffect(() => {
+    if (lastMessage?.type === "rooms" && checkingRoom && roomName.trim()) {
+      const cleanRoomName = roomName.trim().toLowerCase().replace(/[^a-zA-Z0-9-_]/g, "-")
+      const existingRoom = (lastMessage.rooms as Room[]).find((room) => room.id === cleanRoomName)
+      
+      if (existingRoom) {
+        setRoomStatus({
+          exists: true,
+          name: existingRoom.name,
+          count: existingRoom.count,
+          maxParticipants: existingRoom.maxParticipants,
+          locked: existingRoom.locked,
+        })
+      } else {
+        setRoomStatus({ exists: false })
+      }
+      setCheckingRoom(false)
+    }
+  }, [lastMessage, checkingRoom, roomName])
 
   return (
     <div className="min-h-screen bg-gray-50">

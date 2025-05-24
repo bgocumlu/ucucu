@@ -91,14 +91,13 @@ export const WebSocketProvider = ({ children }: { children: React.ReactNode }) =
     setOnMessage,
     isConnected,
   }), [send, lastMessage, setOnMessage, isConnected]);
-
   useEffect(() => {
     // Expose wsRef for bfcache workaround
     if (typeof window !== "undefined") {
       // @ts-expect-error: __ws is not a standard property, used for bfcache workaround
       window.__ws = wsRef.current;
     }
-  });
+  }, [isConnected]); // Add dependency to prevent running on every render
 
   return (
     <WebSocketContext.Provider value={contextValue}>

@@ -20,6 +20,8 @@ interface Message {
   content: string
   timestamp: Date
   isOwn: boolean
+  fileData?: string
+  fileName?: string
 }
 
 interface Participant {
@@ -281,65 +283,314 @@ export default function ChatPage() {
     };
   }, [chatContainerRef, send, roomId, currentUser]);
 
-  // --- Audio recording logic ---
+  // --- iOS Safari Compatible Audio Recording ---
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
-  const mediaStreamRef = useRef<MediaStream | null>(null); // <--- Add this line
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const processorNodeRef = useRef<ScriptProcessorNode | null>(null);
+  const recordedBuffersRef = useRef<Float32Array[]>([]);
+  const recordingStartTimeRef = useRef<number>(0);
+  // Check if MediaRecorder is supported (iOS Safari often doesn't support it)
+  const isMediaRecorderSupported = (): boolean => {
+    if (typeof window === 'undefined' || typeof MediaRecorder === 'undefined') {
+      return false;
+    }
+    
+    try {
+      // Try to create a MediaRecorder with a dummy stream to test support
+      // First check if isTypeSupported exists and works
+      if (MediaRecorder.isTypeSupported) {
+        return MediaRecorder.isTypeSupported('audio/webm') || 
+               MediaRecorder.isTypeSupported('audio/mp4') || 
+               MediaRecorder.isTypeSupported('audio/wav') ||
+               MediaRecorder.isTypeSupported('audio/ogg') ||
+               MediaRecorder.isTypeSupported('audio/mpeg');
+      }
+      
+      // Fallback: just check if MediaRecorder constructor exists
+      return true;
+    } catch {
+      return false;
+    }
+  };
 
-  const toggleRecording = async () => {
+  // Convert Float32Array to WAV format for iOS Safari compatibility
+  const encodeWAV = (samples: Float32Array, sampleRate: number): Blob => {
+    const buffer = new ArrayBuffer(44 + samples.length * 2);
+    const view = new DataView(buffer);
+    
+    // WAV header
+    const writeString = (offset: number, string: string): void => {
+      for (let i = 0; i < string.length; i++) {
+        view.setUint8(offset + i, string.charCodeAt(i));
+      }
+    };
+    
+    writeString(0, 'RIFF');
+    view.setUint32(4, 36 + samples.length * 2, true);
+    writeString(8, 'WAVE');
+    writeString(12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, 1, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * 2, true);
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
+    writeString(36, 'data');
+    view.setUint32(40, samples.length * 2, true);
+    
+    // Convert samples to 16-bit PCM
+    let offset = 44;
+    for (let i = 0; i < samples.length; i++) {
+      const sample = Math.max(-1, Math.min(1, samples[i]));
+      view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7FFF, true);
+      offset += 2;
+    }
+    
+    return new Blob([view], { type: 'audio/wav' });
+  };
+  // Web Audio API recording (fallback for iOS Safari)
+  const startWebAudioRecording = async (stream: MediaStream): Promise<void> => {
+    try {
+      // Support both standard and webkit prefixed AudioContext
+      const AudioContextClass = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      if (!AudioContextClass) {
+        throw new Error('AudioContext not supported');
+      }
+      
+      const audioContext = new AudioContextClass();
+      audioContextRef.current = audioContext;
+      
+      const input = audioContext.createMediaStreamSource(stream);
+      const processor = audioContext.createScriptProcessor(4096, 1, 1);
+      processorNodeRef.current = processor;
+      recordedBuffersRef.current = [];
+      recordingStartTimeRef.current = Date.now();
+      
+      processor.onaudioprocess = (e: AudioProcessingEvent) => {
+        const inputData = e.inputBuffer.getChannelData(0);
+        recordedBuffersRef.current.push(new Float32Array(inputData));
+      };
+      
+      input.connect(processor);
+      processor.connect(audioContext.destination);
+    } catch (error) {
+      console.error('Web Audio API setup failed:', error);
+      throw error;
+    }
+  };
+
+  const stopWebAudioRecording = (): void => {
+    try {
+      if (processorNodeRef.current) {
+        processorNodeRef.current.disconnect();
+        processorNodeRef.current = null;
+      }
+      
+      if (audioContextRef.current) {
+        const sampleRate = audioContextRef.current.sampleRate;
+        audioContextRef.current.close();
+        
+        // Combine all recorded buffers
+        const totalLength = recordedBuffersRef.current.reduce((acc, buffer) => acc + buffer.length, 0);
+        const combined = new Float32Array(totalLength);
+        let offset = 0;
+        
+        for (const buffer of recordedBuffersRef.current) {
+          combined.set(buffer, offset);
+          offset += buffer.length;
+        }
+        
+        // Convert to WAV and send
+        const audioBlob = encodeWAV(combined, sampleRate);
+        
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          const base64 = reader.result as string;
+          send({
+            type: "sendFile",
+            roomId,
+            username: currentUser,
+            fileName: `audio-message-${Date.now()}.wav`,
+            fileType: 'audio/wav',
+            fileData: base64,
+            timestamp: Date.now(),
+            asAudio: true,
+          });
+        };
+        reader.readAsDataURL(audioBlob);
+        
+        audioContextRef.current = null;
+      }
+    } catch (error) {
+      console.error('Error stopping Web Audio recording:', error);
+    }
+  };  const toggleRecording = async (): Promise<void> => {
     if (!isRecording) {
       // Start recording
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        alert('Audio recording is not supported in this browser.');
+      // Enhanced capability detection with detailed logging
+      const hasNavigator = typeof navigator !== 'undefined';
+      const hasMediaDevices = hasNavigator && !!navigator.mediaDevices;
+      const hasGetUserMedia = hasMediaDevices && !!navigator.mediaDevices.getUserMedia;
+      const isHttps = typeof window !== 'undefined' && window.location.protocol === 'https:';
+      const isLocalhost = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
+      
+      console.log('Media access check:', {
+        hasNavigator,
+        hasMediaDevices,
+        hasGetUserMedia,
+        isHttps,
+        isLocalhost,
+        protocol: typeof window !== 'undefined' ? window.location.protocol : 'unknown',
+        hostname: typeof window !== 'undefined' ? window.location.hostname : 'unknown',
+        userAgent: hasNavigator ? navigator.userAgent : 'unknown'
+      });
+      
+      // Check for basic audio recording capability
+      if (!hasGetUserMedia) {
+        if (!isHttps && !isLocalhost) {
+          alert('Microphone access requires HTTPS. Please access this page via HTTPS or localhost.');
+        } else {
+          alert('Microphone access is not supported in this browser. Please use a modern browser.');
+        }
         return;
       }
+
+      // Check if we have either MediaRecorder OR Web Audio API support
+      const hasWebAudioSupport = !!(window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext);
+      const hasMediaRecorderSupport = isMediaRecorderSupported();
+      
+      console.log('Audio capability check:', {
+        hasMediaRecorderSupport,
+        hasWebAudioSupport,
+        mediaRecorderExists: typeof MediaRecorder !== 'undefined',
+        audioContextExists: typeof AudioContext !== 'undefined',
+        webkitAudioContextExists: typeof (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext !== 'undefined'
+      });
+      
+      if (!hasMediaRecorderSupport && !hasWebAudioSupport) {
+        alert('Audio recording is not supported in this browser. Please update your browser or try a different one.');
+        return;
+      }
+      
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        mediaStreamRef.current = stream; // <--- Save stream
-        const mediaRecorder = new window.MediaRecorder(stream);
-        mediaRecorderRef.current = mediaRecorder;
-        audioChunksRef.current = [];
-        mediaRecorder.ondataavailable = (event) => {
-          if (event.data.size > 0) {
-            audioChunksRef.current.push(event.data);
+        // Request microphone with iOS-optimized settings
+        const stream = await navigator.mediaDevices.getUserMedia({ 
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+            sampleRate: 44100,
+            sampleSize: 16,
+            channelCount: 1
+          } 
+        });
+        mediaStreamRef.current = stream;
+        
+        // Try MediaRecorder first, fallback to Web Audio API for iOS Safari
+        if (isMediaRecorderSupported()) {
+          console.log('Using MediaRecorder API');
+          // MediaRecorder approach (for modern browsers)
+          const options: MediaRecorderOptions = {};
+          
+          // Prefer formats that work better on different platforms
+          if (MediaRecorder.isTypeSupported('audio/mp4')) {
+            options.mimeType = 'audio/mp4';
+          } else if (MediaRecorder.isTypeSupported('audio/wav')) {
+            options.mimeType = 'audio/wav';
+          } else if (MediaRecorder.isTypeSupported('audio/webm')) {
+            options.mimeType = 'audio/webm';
+          } else if (MediaRecorder.isTypeSupported('audio/ogg')) {
+            options.mimeType = 'audio/ogg';
           }
-        };
-        mediaRecorder.onstop = async () => {
-          const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-          const reader = new FileReader();
-          reader.onloadend = () => {
-            const base64 = reader.result as string;
-            send({
-              type: "sendFile",
-              roomId,
-              username: currentUser,
-              fileName: `audio-message-${Date.now()}.webm`,
-              fileType: 'audio/webm',
-              fileData: base64,
-              timestamp: Date.now(),
-              asAudio: true,
-            });
+          
+          const mediaRecorder = new MediaRecorder(stream, options);
+          mediaRecorderRef.current = mediaRecorder;
+          audioChunksRef.current = [];
+          
+          mediaRecorder.ondataavailable = (event) => {
+            if (event.data.size > 0) {
+              audioChunksRef.current.push(event.data);
+            }
           };
-          reader.readAsDataURL(audioBlob);
-          // --- Release microphone ---
+          
+          mediaRecorder.onstop = () => {
+            try {
+              const blobType = options.mimeType || 'audio/webm';
+              const audioBlob = new Blob(audioChunksRef.current, { type: blobType });
+              const reader = new FileReader();
+              reader.onloadend = () => {
+                const base64 = reader.result as string;
+                send({
+                  type: "sendFile",
+                  roomId,
+                  username: currentUser,
+                  fileName: `audio-message-${Date.now()}.${blobType.split('/')[1] || 'webm'}`,
+                  fileType: blobType,
+                  fileData: base64,
+                  timestamp: Date.now(),
+                  asAudio: true,
+                });
+              };
+              reader.readAsDataURL(audioBlob);
+              
+              // Release microphone
+              if (mediaStreamRef.current) {
+                mediaStreamRef.current.getTracks().forEach(track => track.stop());
+                mediaStreamRef.current = null;
+              }
+              setIsRecording(false);
+              setIsAtBottom(true);
+            } catch (error) {
+              console.error('Error processing MediaRecorder data:', error);
+              alert('Error processing audio recording.');
+            }
+          };
+          
+          mediaRecorder.onerror = (event) => {
+            console.error('MediaRecorder error:', event);
+            alert('Audio recording error occurred.');
+            setIsRecording(false);
+          };
+          
+          mediaRecorder.start(1000); // Collect data every second
+        } else {
+          console.log('Using Web Audio API fallback for iOS Safari');
+          // Web Audio API fallback (for iOS Safari)
+          await startWebAudioRecording(stream);
+        }
+        
+        setIsRecording(true);
+      } catch (err) {
+        console.error('Audio recording error:', err);
+        alert('Could not start audio recording. Please check microphone permissions and try again.');
+      }
+    } else {
+      // Stop recording
+      try {
+        if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+          mediaRecorderRef.current.stop();
+          mediaRecorderRef.current = null;
+        } else {
+          // Web Audio API stop
+          stopWebAudioRecording();
+          
+          // Release microphone
           if (mediaStreamRef.current) {
             mediaStreamRef.current.getTracks().forEach(track => track.stop());
             mediaStreamRef.current = null;
           }
           setIsRecording(false);
           setIsAtBottom(true);
-        };
-        mediaRecorder.start();
-        setIsRecording(true);
-      } catch (err) {
-        alert('Could not start audio recording.');
+        }
+      } catch (error) {
+        console.error('Error stopping recording:', error);
+        setIsRecording(false);
       }
-    } else {
-      // Stop recording
-      mediaRecorderRef.current?.stop();
-      setIsRecording(false);
     }
-  }
+  };
 
   const scrollToBottom = () => {
     setIsAtBottom(true)
