@@ -322,6 +322,19 @@ export default function ChatPage() {
     };
   }, [roomId, currentUser, send]);
 
+  // --- bfcache/iOS fix: reload page if restored from bfcache (e.g., after PDF preview on iOS) ---
+  useEffect(() => {
+    const handlePageShow = (event: PageTransitionEvent) => {
+      if (event.persisted) {
+        window.location.reload();
+      }
+    };
+    window.addEventListener('pageshow', handlePageShow);
+    return () => {
+      window.removeEventListener('pageshow', handlePageShow);
+    };
+  }, []);
+
   return (
     <div className="h-screen bg-white flex flex-col">
       {/* Header */}
@@ -365,9 +378,16 @@ export default function ChatPage() {
 
       {/* Messages */}
       <div ref={chatContainerRef} className="flex-1 overflow-y-auto px-4 py-4 space-y-4" onScroll={handleScroll}>
-        {messages.map((message) => (
-          <ChatMessage key={message.id + ('fileName' in message ? (message as { fileName?: string }).fileName ?? '' : '')} message={message} currentUser={currentUser} />
-        ))}
+        {messages.map((message, idx) => {
+          // Use a more robust unique key: combine id, type, username, and index fallback
+          let key = message.id + '-' + message.type + '-' + message.username;
+          if (messages.findIndex(m => m.id === message.id && m.type === message.type && m.username === message.username) !== idx) {
+            key += '-' + idx;
+          }
+          return (
+            <ChatMessage key={key} message={message} currentUser={currentUser} />
+          );
+        })}
 
         {/* Typing Indicator */}
         {isTyping && (
@@ -397,25 +417,25 @@ export default function ChatPage() {
       <div className="border-t border-gray-200 p-4 flex-shrink-0">
         <div className="flex items-end space-x-2">
           {/* File Upload */}
-          <Button variant="ghost" size="sm" onClick={() => fileInputRef.current?.click()} className="flex-shrink-0">
+          <Button variant="ghost" size="sm" onClick={() => fileInputRef.current?.click()} className="flex-shrink-0" disabled={!isConnected}>
             <Paperclip className="h-4 w-4" />
           </Button>
 
           {/* Text Input */}
           <div className="flex-1">
             <Input
-              placeholder="Type a message..."
+              placeholder={isConnected ? "Type a message..." : "Please refresh (connection lost)"}
               value={messageText}
               onChange={(e) => setMessageText(e.target.value)}
               onKeyPress={handleKeyPress}
               className="resize-none"
-              disabled={isRecording}
+              disabled={isRecording || !isConnected}
             />
           </div>
 
           {/* Audio Record / Send */}
           {messageText.trim() ? (
-            <Button onClick={sendMessage} size="sm" className="flex-shrink-0">
+            <Button onClick={sendMessage} size="sm" className="flex-shrink-0" disabled={!isConnected}>
               <Send className="h-4 w-4" />
             </Button>
           ) : (
@@ -424,13 +444,20 @@ export default function ChatPage() {
               size="sm"
               onClick={toggleRecording}
               className="flex-shrink-0"
+              disabled={!isConnected}
             >
               <Mic className="h-4 w-4" />
             </Button>
           )}
         </div>
 
-        {isRecording && (
+        {!isConnected && (
+          <div className="mt-2 flex items-center space-x-2 text-red-600 text-sm font-semibold">
+            <span>Connection lost. Please refresh the page.</span>
+          </div>
+        )}
+
+        {isRecording && isConnected && (
           <div className="mt-2 flex items-center space-x-2 text-red-600 text-sm">
             <div className="w-2 h-2 bg-red-600 rounded-full animate-pulse"></div>
             <span>Recording... Tap to stop</span>
