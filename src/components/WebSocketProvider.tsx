@@ -11,6 +11,8 @@ type WebSocketContextType = {
   isConnected: boolean;
 };
 
+const WS_URL = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:3001";
+
 const WebSocketContext = createContext<WebSocketContextType | undefined>(undefined);
 
 export const WebSocketProvider = ({ children }: { children: React.ReactNode }) => {
@@ -27,7 +29,7 @@ export const WebSocketProvider = ({ children }: { children: React.ReactNode }) =
         // Already connecting or open
         return;
       }
-      const ws = new WebSocket("ws://192.168.1.223:3001");
+      const ws = new WebSocket(WS_URL);
       wsRef.current = ws;
       ws.onopen = () => {
         setIsConnected(true);

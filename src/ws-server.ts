@@ -232,6 +232,11 @@ function broadcastRooms() {
   });
 }
 
+server.on('request', (req, res) => {
+  res.writeHead(404, { 'Content-Type': 'text/plain' });
+  res.end('WebSocket server does not serve HTTP content. Use WebSocket protocol.');
+});
+
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`WebSocket server running on ws://localhost:${PORT}`);
 });
