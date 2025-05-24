@@ -1,7 +1,8 @@
 "use client"
 import { Button } from "@/components/ui/button"
-import { Download, Play, FileText } from "lucide-react"
+import { Download, FileText } from "lucide-react"
 import Image from "next/image"
+import { useRef, useEffect } from "react"
 
 interface Message {
   id: string
@@ -80,9 +81,10 @@ export function ChatMessage({ message, currentUser }: ChatMessageProps & { curre
             {message.type === "text" && <p className="text-sm whitespace-pre-wrap break-words">{message.content}</p>}
 
             {message.type === "file" && (() => {
-              // Only show preview if file is an image or video
+              // Only show preview if file is an image, video, or audio
               const isImage = typeof message.fileData === 'string' && message.fileData.startsWith('data:image/');
               const isVideo = typeof message.fileData === 'string' && message.fileData.startsWith('data:video/');
+              const isAudio = typeof message.fileData === 'string' && message.fileData.startsWith('data:audio/');
               return (
                 <div className="flex flex-col items-start space-y-2">
                   {isImage && message.fileData && (
@@ -107,6 +109,11 @@ export function ChatMessage({ message, currentUser }: ChatMessageProps & { curre
                       >
                         Your browser does not support the video tag.
                       </video>
+                    </div>
+                  )}
+                  {isAudio && message.fileData && (
+                    <div className="max-w-xs rounded border border-gray-200 mb-1 overflow-hidden">
+                      <AudioWithLoad src={message.fileData} uniqueKey={message.id + (message.fileData || '')} />
                     </div>
                   )}
                   <div className="flex items-center space-x-2">
@@ -159,21 +166,57 @@ export function ChatMessage({ message, currentUser }: ChatMessageProps & { curre
               );
             })()}
 
-            {message.type === "audio" && (
-              <div className="flex items-center space-x-2">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className={`h-6 w-6 p-0 ${message.isOwn ? "text-white hover:bg-blue-600" : "text-gray-600 hover:bg-gray-200"}`}
-                >
-                  <Play className="h-3 w-3" />
-                </Button>
-                <div className="flex space-x-1">
-                  {Array.from({ length: 20 }).map((_, i) => (
-                    <div key={i} className={`w-1 bg-current opacity-60 ${Math.random() > 0.5 ? "h-2" : "h-3"}`} />
-                  ))}
+            {(message.type === "audio" && message.fileData) && (
+              <div className="flex flex-col items-start space-y-2">
+                <div className="max-w-xs rounded border border-gray-200 mb-1 overflow-hidden">
+                  <AudioWithLoad src={message.fileData} uniqueKey={message.id + (message.fileData || '')} />
                 </div>
-                <span className="text-xs opacity-75">0:03</span>
+                <div className="flex items-center space-x-2">
+                  <FileText className="h-4 w-4" />
+                  <span className="text-sm">{message.fileName || message.content || 'Voice message'}</span>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className={`h-6 w-6 p-0 ${message.isOwn ? "text-white hover:bg-blue-600" : "text-gray-600 hover:bg-gray-200"}`}
+                    onClick={() => {
+                      if (typeof message.fileData === 'string') {
+                        const dataUrl = message.fileData;
+                        const arr = dataUrl.split(",");
+                        if (arr.length === 2) {
+                          const mimeMatch = arr[0].match(/:(.*?);/);
+                          if (!mimeMatch) {
+                            alert('Invalid file data.');
+                            return;
+                          }
+                          const mime = mimeMatch[1];
+                          const bstr = atob(arr[1]);
+                          let n = bstr.length;
+                          const u8arr = new Uint8Array(n);
+                          while (n--) {
+                            u8arr[n] = bstr.charCodeAt(n);
+                          }
+                          const blob = new Blob([u8arr], { type: mime });
+                          const url = URL.createObjectURL(blob);
+                          const a = document.createElement('a');
+                          a.href = url;
+                          a.download = message.fileName || message.content || 'audio-message.webm';
+                          document.body.appendChild(a);
+                          a.click();
+                          setTimeout(() => {
+                            URL.revokeObjectURL(url);
+                            document.body.removeChild(a);
+                          }, 100);
+                        } else {
+                          alert('Invalid file data.');
+                        }
+                      } else {
+                        alert('File data is missing or invalid.');
+                      }
+                    }}
+                  >
+                    <Download className="h-3 w-3" />
+                  </Button>
+                </div>
               </div>
             )}
           </div>
@@ -184,4 +227,24 @@ export function ChatMessage({ message, currentUser }: ChatMessageProps & { curre
       </div>
     </div>
   )
+}
+
+function AudioWithLoad({ src, uniqueKey }: { src: string, uniqueKey: string }) {
+  const audioRef = useRef<HTMLAudioElement>(null);
+  useEffect(() => {
+    if (audioRef.current) {
+      audioRef.current.load();
+    }
+  }, [src, uniqueKey]);
+  return (
+    <audio
+      className="h-7 bg-red-50"
+      key={uniqueKey}
+      ref={audioRef}
+      src={src}
+      controls
+    >
+      Your browser does not support the audio tag.
+    </audio>
+  );
 }

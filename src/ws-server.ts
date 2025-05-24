@@ -121,9 +121,9 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
           });
         }
       } else if (msg.type === 'sendFile') {
-        const { roomId, username, fileName, fileType, fileData, timestamp } = msg;
+        const { roomId, username, fileName, fileType, fileData, timestamp, asAudio } = msg;
         console.log('[ws-server] Received sendFile:', { roomId, username, fileName, fileType, timestamp, fileDataLength: fileData?.length });
-        const message = { username, fileName, fileType, fileData, timestamp, type: 'file' };
+        const message = { username, fileName, fileType, fileData, timestamp, type: 'file', ...(asAudio ? { asAudio: true } : {}) };
         if (rooms[roomId]) {
           getClientsInRoom(roomId).forEach((client) => {
             if (client.readyState === 1) {

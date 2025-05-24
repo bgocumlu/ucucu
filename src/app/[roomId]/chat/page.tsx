@@ -84,9 +84,23 @@ export default function ChatPage() {
     if (lastMessage.type === "newMessage" && lastMessage.roomId === roomId) {
       type IncomingMsg =
         | { username: string; text: string; timestamp: number; system?: boolean; type?: undefined }
-        | { username: string; fileName: string; fileType: string; fileData: string; timestamp: number; type: "file" };
+        | { username: string; fileName: string; fileType: string; fileData: string; timestamp: number; type: "file"; asAudio?: boolean };
       const msg = lastMessage.message as IncomingMsg;
-      if (msg.type === "file") {
+      if (msg.type === "file" && (msg.asAudio || (msg.fileType && msg.fileType.startsWith('audio/')))) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: (msg.timestamp || Date.now()).toString(),
+            type: "audio",
+            username: msg.username,
+            content: msg.fileName || "Voice message",
+            timestamp: new Date(msg.timestamp),
+            isOwn: msg.username === currentUser,
+            fileData: msg.fileData,
+            fileName: msg.fileName,
+          },
+        ]);
+      } else if (msg.type === "file") {
         setMessages((prev) => [
           ...prev,
           {
@@ -190,15 +204,29 @@ export default function ChatPage() {
           const reader = new FileReader();
           reader.onload = () => {
             const base64 = reader.result as string;
-            send({
-              type: "sendFile",
-              roomId,
-              username: currentUser,
-              fileName: file.name,
-              fileType: file.type,
-              fileData: base64,
-              timestamp: Date.now(), // Use only Date.now() for valid date
-            });
+            // If audio file, send as audio message
+            if (file.type.startsWith('audio/')) {
+              send({
+                type: "sendFile",
+                roomId,
+                username: currentUser,
+                fileName: file.name,
+                fileType: file.type,
+                fileData: base64,
+                timestamp: Date.now(),
+                asAudio: true,
+              });
+            } else {
+              send({
+                type: "sendFile",
+                roomId,
+                username: currentUser,
+                fileName: file.name,
+                fileType: file.type,
+                fileData: base64,
+                timestamp: Date.now(),
+              });
+            }
             resolve();
           };
           reader.readAsDataURL(file);
@@ -253,25 +281,63 @@ export default function ChatPage() {
     };
   }, [chatContainerRef, send, roomId, currentUser]);
 
-  const toggleRecording = () => {
-    setIsRecording(!isRecording)
+  // --- Audio recording logic ---
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const mediaStreamRef = useRef<MediaStream | null>(null); // <--- Add this line
 
+  const toggleRecording = async () => {
     if (!isRecording) {
       // Start recording
-      setTimeout(() => {
-        // Simulate recording completion
-        const newMessage: Message = {
-          id: Date.now().toString(),
-          type: "audio",
-          username: currentUser,
-          content: "Voice message",
-          timestamp: new Date(),
-          isOwn: true,
-        }
-        setMessages((prev) => [...prev, newMessage])
-        setIsRecording(false)
-        setIsAtBottom(true)
-      }, 2000)
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        alert('Audio recording is not supported in this browser.');
+        return;
+      }
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mediaStreamRef.current = stream; // <--- Save stream
+        const mediaRecorder = new window.MediaRecorder(stream);
+        mediaRecorderRef.current = mediaRecorder;
+        audioChunksRef.current = [];
+        mediaRecorder.ondataavailable = (event) => {
+          if (event.data.size > 0) {
+            audioChunksRef.current.push(event.data);
+          }
+        };
+        mediaRecorder.onstop = async () => {
+          const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+          const reader = new FileReader();
+          reader.onloadend = () => {
+            const base64 = reader.result as string;
+            send({
+              type: "sendFile",
+              roomId,
+              username: currentUser,
+              fileName: `audio-message-${Date.now()}.webm`,
+              fileType: 'audio/webm',
+              fileData: base64,
+              timestamp: Date.now(),
+              asAudio: true,
+            });
+          };
+          reader.readAsDataURL(audioBlob);
+          // --- Release microphone ---
+          if (mediaStreamRef.current) {
+            mediaStreamRef.current.getTracks().forEach(track => track.stop());
+            mediaStreamRef.current = null;
+          }
+          setIsRecording(false);
+          setIsAtBottom(true);
+        };
+        mediaRecorder.start();
+        setIsRecording(true);
+      } catch (err) {
+        alert('Could not start audio recording.');
+      }
+    } else {
+      // Stop recording
+      mediaRecorderRef.current?.stop();
+      setIsRecording(false);
     }
   }
 
