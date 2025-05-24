@@ -1,5 +1,7 @@
 "use client"
 
+import type React from "react"
+
 import { useState, useEffect } from "react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
@@ -7,7 +9,8 @@ import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
 import { Plus, Users, Lock, Search } from "lucide-react"
 import Link from "next/link"
-import { CreateRoomModal } from "@/components/create-room-modal"
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import { useRouter } from "next/navigation"
 
 interface Room {
   id: string
@@ -21,8 +24,20 @@ interface Room {
 export default function HomePage() {
   const [rooms, setRooms] = useState<Room[]>([])
   const [searchQuery, setSearchQuery] = useState("")
-  const [showCreateModal, setShowCreateModal] = useState(false)
+  const [showRoomInput, setShowRoomInput] = useState(false)
+  const [roomName, setRoomName] = useState("")
   const [isOnline, setIsOnline] = useState(true)
+
+  const [roomStatus, setRoomStatus] = useState<{
+    exists: boolean
+    name?: string
+    count?: number
+    maxParticipants?: number
+    locked?: boolean
+  } | null>(null)
+  const [checkingRoom, setCheckingRoom] = useState(false)
+
+  const router = useRouter()
 
   // Simulate real-time room updates
   useEffect(() => {
@@ -62,6 +77,75 @@ export default function HomePage() {
       .slice(0, 2)
   }
 
+  const handleJoinOrCreateRoom = () => {
+    if (!roomName.trim()) return
+
+    const cleanRoomName = roomName
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-zA-Z0-9-_]/g, "-")
+    router.push(`/${cleanRoomName}`)
+    setShowRoomInput(false)
+    setRoomName("")
+  }
+
+  const handleKeyPress = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter") {
+      handleJoinOrCreateRoom()
+    }
+  }
+
+  // Check room existence when room name changes
+  useEffect(() => {
+    if (!roomName.trim() || !showRoomInput) {
+      setRoomStatus(null)
+      return
+    }
+
+    const checkRoomExists = async () => {
+      setCheckingRoom(true)
+
+      // Debounce the check
+      const timeoutId = setTimeout(async () => {
+        try {
+          const cleanRoomName = roomName
+            .trim()
+            .toLowerCase()
+            .replace(/[^a-zA-Z0-9-_]/g, "-")
+
+          // Mock API call to check if room exists
+          await new Promise((resolve) => setTimeout(resolve, 300))
+
+          // Check against existing rooms
+          const existingRoom = rooms.find((room) => room.id === cleanRoomName)
+
+          if (existingRoom) {
+            setRoomStatus({
+              exists: true,
+              name: existingRoom.name,
+              count: existingRoom.count,
+              maxParticipants: existingRoom.maxParticipants,
+              locked: existingRoom.locked,
+            })
+          } else {
+            setRoomStatus({
+              exists: false,
+            })
+          }
+        } catch (error) {
+          console.error("Failed to check room:", error)
+          setRoomStatus(null)
+        } finally {
+          setCheckingRoom(false)
+        }
+      }, 500)
+
+      return () => clearTimeout(timeoutId)
+    }
+
+    checkRoomExists()
+  }, [roomName, showRoomInput, rooms])
+
   return (
     <div className="min-h-screen bg-gray-50">
       {/* Header */}
@@ -94,7 +178,7 @@ export default function HomePage() {
           <Card className="mb-6 border-orange-200 bg-orange-50">
             <CardContent className="p-4">
               <p className="text-orange-800 text-sm">
-                You&#39;re offline. You can view rooms but can&#39;t join or create new ones.
+                You&apos;re offline. You can view rooms but can&apos;t join or create new ones.
               </p>
             </CardContent>
           </Card>
@@ -108,7 +192,7 @@ export default function HomePage() {
             <Card>
               <CardContent className="p-6 text-center">
                 <p className="text-gray-500 mb-4">No active rooms found</p>
-                <Button onClick={() => setShowCreateModal(true)} disabled={!isOnline} className="w-full">
+                <Button onClick={() => setShowRoomInput(true)} disabled={!isOnline} className="w-full">
                   <Plus className="h-4 w-4 mr-2" />
                   Create First Room
                 </Button>
@@ -155,15 +239,96 @@ export default function HomePage() {
         <Button
           size="lg"
           className="rounded-full h-14 w-14 shadow-lg"
-          onClick={() => setShowCreateModal(true)}
+          onClick={() => setShowRoomInput(true)}
           disabled={!isOnline}
         >
           <Plus className="h-6 w-6" />
         </Button>
       </div>
 
-      {/* Create Room Modal */}
-      <CreateRoomModal open={showCreateModal} onOpenChange={setShowCreateModal} />
+      {/* Room Name Input Dialog */}
+      <Dialog
+        open={showRoomInput}
+        onOpenChange={(open) => {
+          setShowRoomInput(open)
+          if (!open) {
+            setRoomName("")
+            setRoomStatus(null)
+            setCheckingRoom(false)
+          }
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Enter Room Name</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Input
+                placeholder="Enter room name..."
+                value={roomName}
+                onChange={(e) => setRoomName(e.target.value)}
+                onKeyPress={handleKeyPress}
+                autoFocus
+              />
+
+              {/* Room Status */}
+              {roomName.trim() && (
+                <div className="min-h-[60px]">
+                  {checkingRoom ? (
+                    <div className="flex items-center space-x-2 text-gray-500 text-sm">
+                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-gray-400"></div>
+                      <span>Checking room...</span>
+                    </div>
+                  ) : roomStatus ? (
+                    <div className="space-y-2">
+                      {roomStatus.exists ? (
+                        <div className="p-3 bg-blue-50 border border-blue-200 rounded-md">
+                          <div className="flex items-center justify-between">
+                            <div>
+                              <p className="text-sm font-medium text-blue-900">Room exists: {roomStatus.name}</p>
+                              <div className="flex items-center space-x-4 text-xs text-blue-700 mt-1">
+                                <span className="flex items-center space-x-1">
+                                  <Users className="h-3 w-3" />
+                                  <span>
+                                    {roomStatus.count}/{roomStatus.maxParticipants}
+                                  </span>
+                                </span>
+                                {roomStatus.locked && (
+                                  <span className="flex items-center space-x-1">
+                                    <Lock className="h-3 w-3" />
+                                    <span>Password required</span>
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="p-3 bg-green-50 border border-green-200 rounded-md">
+                          <p className="text-sm font-medium text-green-900">New room - you&apos;ll be the owner</p>
+                          <p className="text-xs text-green-700 mt-1">
+                            You can set password, participant limit, and visibility
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  ) : null}
+                </div>
+              )}
+            </div>
+
+            <div className="flex space-x-2">
+              <Button variant="outline" onClick={() => setShowRoomInput(false)} className="flex-1">
+                Cancel
+              </Button>
+              <Button onClick={handleJoinOrCreateRoom} disabled={!roomName.trim() || checkingRoom} className="flex-1">
+                {checkingRoom ? "Checking..." : roomStatus?.exists ? "Join Room" : "Create Room"}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

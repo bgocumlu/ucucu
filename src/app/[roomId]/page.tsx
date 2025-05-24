@@ -7,6 +7,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
+import { Switch } from "@/components/ui/switch"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { ArrowLeft, Users, Lock, Eye, EyeOff } from "lucide-react"
 import Link from "next/link"
 
@@ -29,10 +31,14 @@ export default function RoomPage() {
   const [formData, setFormData] = useState({
     username: "",
     password: "",
+    displayName: "",
+    maxParticipants: "10",
+    visibility: "public" as "public" | "private",
+    requirePassword: false,
   })
   const [showPassword, setShowPassword] = useState(false)
   const [errors, setErrors] = useState<Record<string, string>>({})
-  const [isJoining, setIsJoining] = useState(false)
+  const [isSubmitting, setIsSubmitting] = useState(false)
 
   useEffect(() => {
     // Simulate checking if room exists
@@ -43,16 +49,38 @@ export default function RoomPage() {
       await new Promise((resolve) => setTimeout(resolve, 500))
 
       // Mock room data - in real app, this would come from WebSocket/API
-      const mockRoom: RoomInfo = {
-        id: roomId,
-        name: roomId === "study-group" ? "Study Group" : `Room ${roomId}`,
-        count: 2,
-        maxParticipants: 5,
-        locked: roomId === "study-group",
-        exists: ["study-group", "gaming-chat", "work-team"].includes(roomId),
+      const existingRooms = ["study-group", "gaming-chat", "work-team"]
+      const roomExists = existingRooms.includes(roomId)
+
+      if (roomExists) {
+        const mockRoom: RoomInfo = {
+          id: roomId,
+          name: roomId === "study-group" ? "Study Group" : `Room ${roomId}`,
+          count: 2,
+          maxParticipants: 5,
+          locked: roomId === "study-group",
+          exists: true,
+        }
+        setRoomInfo(mockRoom)
+      } else {
+        setRoomInfo({
+          id: roomId,
+          name: "",
+          count: 0,
+          maxParticipants: 10,
+          locked: false,
+          exists: false,
+        })
+        // Pre-fill display name with formatted room ID
+        setFormData((prev) => ({
+          ...prev,
+          displayName: roomId
+            .split("-")
+            .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+            .join(" "),
+        }))
       }
 
-      setRoomInfo(mockRoom)
       setLoading(false)
     }
 
@@ -68,18 +96,22 @@ export default function RoomPage() {
       newErrors.username = "Username must be 3-20 characters"
     }
 
-    if (roomInfo?.locked && !formData.password) {
+    if (roomInfo?.exists && roomInfo.locked && !formData.password) {
       newErrors.password = "Password is required for this room"
+    }
+
+    if (!roomInfo?.exists && formData.requirePassword && !formData.password) {
+      newErrors.password = "Password is required when enabled"
     }
 
     setErrors(newErrors)
     return Object.keys(newErrors).length === 0
   }
 
-  const handleJoin = async () => {
+  const handleSubmit = async () => {
     if (!validateForm()) return
 
-    setIsJoining(true)
+    setIsSubmitting(true)
 
     try {
       // Simulate API call
@@ -88,11 +120,22 @@ export default function RoomPage() {
       // Navigate to chat
       router.push(`/${roomId}/chat`)
     } catch (error) {
-      console.error("Failed to join room:", error)
-      setErrors({ general: "Failed to join room. Please try again." })
+      console.error("Failed to join/create room:", error)
+      setErrors({ general: "Failed to process request. Please try again." })
     } finally {
-      setIsJoining(false)
+      setIsSubmitting(false)
     }
+  }
+
+  const generateRoomId = () => {
+    const adjectives = ["cool", "awesome", "epic", "fun", "chill", "cozy", "bright", "swift"]
+    const nouns = ["chat", "room", "space", "hub", "zone", "lounge", "corner", "spot"]
+    const randomAdj = adjectives[Math.floor(Math.random() * adjectives.length)]
+    const randomNoun = nouns[Math.floor(Math.random() * nouns.length)]
+    const randomNum = Math.floor(Math.random() * 1000)
+
+    const newRoomId = `${randomAdj}-${randomNoun}-${randomNum}`
+    router.push(`/${newRoomId}`)
   }
 
   const getInitials = (name: string) => {
@@ -128,12 +171,12 @@ export default function RoomPage() {
     )
   }
 
-  const isRoomFull = roomInfo.count >= roomInfo.maxParticipants
+  const isRoomFull = roomInfo.exists && roomInfo.count >= roomInfo.maxParticipants
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="h-screen bg-gray-50 flex flex-col">
       {/* Header */}
-      <header className="bg-white border-b border-gray-200 px-4 py-3">
+      <header className="bg-white border-b border-gray-200 px-4 py-3 flex-shrink-0">
         <div className="max-w-md mx-auto flex items-center space-x-3">
           <Link href="/">
             <Button variant="ghost" size="sm">
@@ -144,107 +187,216 @@ export default function RoomPage() {
         </div>
       </header>
 
-      {/* Main Content */}
-      <main className="max-w-md mx-auto px-4 py-6">
-        {/* Room Info Card */}
-        <Card className="mb-6">
-          <CardContent className="p-6">
-            <div className="flex items-center space-x-4 mb-4">
-              <div className="w-16 h-16 bg-blue-500 rounded-full flex items-center justify-center text-white font-medium text-lg">
-                {getInitials(roomInfo.name)}
-              </div>
-              <div className="flex-1">
-                <h2 className="text-xl font-semibold text-gray-900 flex items-center space-x-2">
-                  <span>{roomInfo.name}</span>
-                  {roomInfo.locked && <Lock className="h-5 w-5 text-gray-400" />}
-                </h2>
-                <p className="text-gray-500">/{roomInfo.id}</p>
-              </div>
-            </div>
-
-            {roomInfo.exists && (
-              <div className="flex items-center justify-between text-sm text-gray-600">
-                <div className="flex items-center space-x-1">
-                  <Users className="h-4 w-4" />
-                  <span>
-                    {roomInfo.count} of {roomInfo.maxParticipants} participants
-                  </span>
+      {/* Main Content - Scrollable */}
+      <main className="flex-1 overflow-y-auto">
+        <div className="max-w-md mx-auto px-4 py-6 space-y-6">
+          {/* Room Info Card */}
+          <Card className="mb-6">
+            <CardContent className="p-6">
+              <div className="flex items-center space-x-4 mb-4">
+                <div className="w-16 h-16 bg-blue-500 rounded-full flex items-center justify-center text-white font-medium text-lg">
+                  {getInitials(roomInfo.exists ? roomInfo.name : formData.displayName || roomInfo.id)}
                 </div>
-                {isRoomFull && <Badge variant="destructive">Full</Badge>}
+                <div className="flex-1">
+                  <h2 className="text-xl font-semibold text-gray-900 flex items-center space-x-2">
+                    <span>{roomInfo.exists ? roomInfo.name : formData.displayName || roomInfo.id}</span>
+                    {roomInfo.locked && <Lock className="h-5 w-5 text-gray-400" />}
+                  </h2>
+                  <p className="text-gray-500">/{roomInfo.id}</p>
+                </div>
               </div>
-            )}
-          </CardContent>
-        </Card>
 
-        {/* Join/Create Form */}
-        <Card>
-          <CardHeader>
-            <CardTitle>{roomInfo.exists ? "Join the conversation" : "Create this room"}</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            {/* Username */}
-            <div className="space-y-2">
-              <Label htmlFor="username">Your Username</Label>
-              <Input
-                id="username"
-                placeholder="Enter your username (3-20 characters)"
-                value={formData.username}
-                onChange={(e) => setFormData((prev) => ({ ...prev, username: e.target.value }))}
-                className={errors.username ? "border-red-500" : ""}
-                disabled={isRoomFull}
-              />
-              {errors.username && <p className="text-sm text-red-500">{errors.username}</p>}
-            </div>
+              {roomInfo.exists && (
+                <div className="flex items-center justify-between text-sm text-gray-600">
+                  <div className="flex items-center space-x-1">
+                    <Users className="h-4 w-4" />
+                    <span>
+                      {roomInfo.count} of {roomInfo.maxParticipants} participants
+                    </span>
+                  </div>
+                  {isRoomFull && <Badge variant="destructive">Full</Badge>}
+                </div>
+              )}
+            </CardContent>
+          </Card>
 
-            {/* Password (if room is locked) */}
-            {roomInfo.locked && (
+          {/* Form */}
+          <Card>
+            <CardHeader className="pb-4">
+              <CardTitle>{roomInfo.exists ? "Join the conversation" : "Set up your room"}</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4 pb-6">
+              {/* Room ID (only for create) */}
+              {!roomInfo.exists && (
+                <div className="space-y-2">
+                  <Label htmlFor="roomId">Room ID</Label>
+                  <div className="flex space-x-2">
+                    <Input id="roomId" value={roomInfo.id} disabled className="bg-gray-50" />
+                    <Button type="button" variant="outline" onClick={generateRoomId} className="shrink-0">
+                      Random
+                    </Button>
+                  </div>
+                </div>
+              )}
+
+              {/* Username */}
               <div className="space-y-2">
-                <Label htmlFor="password">Room Password</Label>
-                <div className="relative">
+                <Label htmlFor="username">Your Username</Label>
+                <Input
+                  id="username"
+                  placeholder="Enter your username (3-20 characters)"
+                  value={formData.username}
+                  onChange={(e) => setFormData((prev) => ({ ...prev, username: e.target.value }))}
+                  className={errors.username ? "border-red-500" : ""}
+                  disabled={isRoomFull}
+                />
+                {errors.username && <p className="text-sm text-red-500">{errors.username}</p>}
+              </div>
+
+              {/* Display Name (only for create) */}
+              {!roomInfo.exists && (
+                <div className="space-y-2">
+                  <Label htmlFor="displayName">Display Name (Optional)</Label>
                   <Input
-                    id="password"
-                    type={showPassword ? "text" : "password"}
-                    placeholder="Enter room password"
-                    value={formData.password}
-                    onChange={(e) => setFormData((prev) => ({ ...prev, password: e.target.value }))}
-                    className={errors.password ? "border-red-500" : ""}
-                    disabled={isRoomFull}
+                    id="displayName"
+                    placeholder="My Awesome Room"
+                    value={formData.displayName}
+                    onChange={(e) => setFormData((prev) => ({ ...prev, displayName: e.target.value }))}
                   />
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    className="absolute right-0 top-0 h-full px-3"
-                    onClick={() => setShowPassword(!showPassword)}
-                    disabled={isRoomFull}
-                  >
-                    {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                  </Button>
                 </div>
-                {errors.password && <p className="text-sm text-red-500">{errors.password}</p>}
-              </div>
-            )}
+              )}
 
-            {/* Error Message */}
-            {errors.general && (
-              <div className="p-3 bg-red-50 border border-red-200 rounded-md">
-                <p className="text-sm text-red-600">{errors.general}</p>
-              </div>
-            )}
+              {/* Password Toggle (only for create) */}
+              {!roomInfo.exists && (
+                <div className="flex items-center space-x-2">
+                  <Switch
+                    id="requirePassword"
+                    checked={formData.requirePassword}
+                    onCheckedChange={(checked) =>
+                      setFormData((prev) => ({
+                        ...prev,
+                        requirePassword: checked,
+                        password: checked ? prev.password : "",
+                      }))
+                    }
+                  />
+                  <Label htmlFor="requirePassword">Require Password</Label>
+                </div>
+              )}
 
-            {/* Room Full Message */}
-            {isRoomFull && (
-              <div className="p-3 bg-orange-50 border border-orange-200 rounded-md">
-                <p className="text-sm text-orange-600">This room is currently full. Please try again later.</p>
-              </div>
-            )}
+              {/* Password */}
+              {((roomInfo.exists && roomInfo.locked) || (!roomInfo.exists && formData.requirePassword)) && (
+                <div className="space-y-2">
+                  <Label htmlFor="password">{roomInfo.exists ? "Room Password" : "Password"}</Label>
+                  <div className="relative">
+                    <Input
+                      id="password"
+                      type={showPassword ? "text" : "password"}
+                      placeholder={roomInfo.exists ? "Enter room password" : "Enter room password"}
+                      value={formData.password}
+                      onChange={(e) => setFormData((prev) => ({ ...prev, password: e.target.value }))}
+                      className={errors.password ? "border-red-500" : ""}
+                      disabled={isRoomFull}
+                    />
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="absolute right-0 top-0 h-full px-3"
+                      onClick={() => setShowPassword(!showPassword)}
+                      disabled={isRoomFull}
+                    >
+                      {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                    </Button>
+                  </div>
+                  {errors.password && <p className="text-sm text-red-500">{errors.password}</p>}
+                </div>
+              )}
 
-            {/* Join/Create Button */}
-            <Button onClick={handleJoin} className="w-full" disabled={isJoining || isRoomFull}>
-              {isJoining ? "Joining..." : roomInfo.exists ? "Join Room" : "Create & Join Room"}
-            </Button>
-          </CardContent>
-        </Card>
+              {/* Max Participants (only for create) */}
+              {!roomInfo.exists && (
+                <div className="space-y-2">
+                  <Label htmlFor="maxParticipants">Max Participants</Label>
+                  <Select
+                    value={formData.maxParticipants}
+                    onValueChange={(value) => setFormData((prev) => ({ ...prev, maxParticipants: value }))}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="2">2 (1-to-1)</SelectItem>
+                      <SelectItem value="5">5</SelectItem>
+                      <SelectItem value="10">10</SelectItem>
+                      <SelectItem value="20">20</SelectItem>
+                      <SelectItem value="50">50</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
+
+              {/* Visibility (only for create) */}
+              {!roomInfo.exists && (
+                <div className="space-y-2">
+                  <Label>Visibility</Label>
+                  <div className="flex space-x-4">
+                    <label className="flex items-center space-x-2 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="visibility"
+                        value="public"
+                        checked={formData.visibility === "public"}
+                        onChange={(e) =>
+                          setFormData((prev) => ({ ...prev, visibility: e.target.value as "public" | "private" }))
+                        }
+                        className="text-blue-600"
+                      />
+                      <span className="text-sm">Public</span>
+                    </label>
+                    <label className="flex items-center space-x-2 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="visibility"
+                        value="private"
+                        checked={formData.visibility === "private"}
+                        onChange={(e) =>
+                          setFormData((prev) => ({ ...prev, visibility: e.target.value as "public" | "private" }))
+                        }
+                        className="text-blue-600"
+                      />
+                      <span className="text-sm">Private</span>
+                    </label>
+                  </div>
+                </div>
+              )}
+
+              {/* Error Message */}
+              {errors.general && (
+                <div className="p-3 bg-red-50 border border-red-200 rounded-md">
+                  <p className="text-sm text-red-600">{errors.general}</p>
+                </div>
+              )}
+
+              {/* Room Full Message */}
+              {isRoomFull && (
+                <div className="p-3 bg-orange-50 border border-orange-200 rounded-md">
+                  <p className="text-sm text-orange-600">This room is currently full. Please try again later.</p>
+                </div>
+              )}
+
+              {/* Submit Button */}
+              <Button onClick={handleSubmit} className="w-full h-12 text-base" disabled={isSubmitting || isRoomFull}>
+                {isSubmitting
+                  ? roomInfo.exists
+                    ? "Joining..."
+                    : "Creating..."
+                  : roomInfo.exists
+                    ? "Join Room"
+                    : "Create & Join Room"}
+              </Button>
+            </CardContent>
+          </Card>
+        </div>
       </main>
     </div>
   )
