@@ -6,7 +6,8 @@
     "dev:https": "next dev --turbopack --experimental-https",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "ws": "npx tsx src/ws-server.ts"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.14",
