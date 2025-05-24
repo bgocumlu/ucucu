@@ -177,29 +177,81 @@ export default function ChatPage() {
     }
   }
 
+  // --- File upload handler ---
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    console.log('File input changed', file)
-    if (!file) return
-
-    const reader = new FileReader()
-    reader.onload = () => {
-      const base64 = reader.result as string
-      console.log('About to send file over WebSocket', { fileName: file.name, fileType: file.type, base64Length: base64.length })
-      send({
-        type: "sendFile",
-        roomId,
-        username: currentUser,
-        fileName: file.name,
-        fileType: file.type,
-        fileData: base64,
-        timestamp: Date.now(),
-      })
-      // Reset file input so the same file can be selected again
-      if (fileInputRef.current) fileInputRef.current.value = ""
-    }
-    reader.readAsDataURL(file)
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+    const fileArray = Array.from(files);
+    // Send each file individually, reliably
+    const sendFiles = async () => {
+      for (let idx = 0; idx < fileArray.length; idx++) {
+        const file = fileArray[idx];
+        await new Promise<void>((resolve) => {
+          const reader = new FileReader();
+          reader.onload = () => {
+            const base64 = reader.result as string;
+            send({
+              type: "sendFile",
+              roomId,
+              username: currentUser,
+              fileName: file.name,
+              fileType: file.type,
+              fileData: base64,
+              timestamp: Date.now(), // Use only Date.now() for valid date
+            });
+            resolve();
+          };
+          reader.readAsDataURL(file);
+        });
+      }
+    };
+    sendFiles();
+    if (fileInputRef.current) fileInputRef.current.value = "";
   }
+
+  // --- Drag-and-drop file upload ---
+  useEffect(() => {
+    const chatDiv = chatContainerRef.current;
+    if (!chatDiv) return;
+    const handleDrop = (e: DragEvent) => {
+      e.preventDefault();
+      if (e.dataTransfer?.files) {
+        const fileArray = Array.from(e.dataTransfer.files);
+        const sendFiles = async () => {
+          for (let idx = 0; idx < fileArray.length; idx++) {
+            const file = fileArray[idx];
+            await new Promise<void>((resolve) => {
+              const reader = new FileReader();
+              reader.onload = () => {
+                const base64 = reader.result as string;
+                send({
+                  type: "sendFile",
+                  roomId,
+                  username: currentUser,
+                  fileName: file.name,
+                  fileType: file.type,
+                  fileData: base64,
+                  timestamp: Date.now(), // Use only Date.now() for valid date
+                });
+                resolve();
+              };
+              reader.readAsDataURL(file);
+            });
+          }
+        };
+        sendFiles();
+      }
+    };
+    const handleDragOver = (e: DragEvent) => {
+      e.preventDefault();
+    };
+    chatDiv.addEventListener('drop', handleDrop);
+    chatDiv.addEventListener('dragover', handleDragOver);
+    return () => {
+      chatDiv.removeEventListener('drop', handleDrop);
+      chatDiv.removeEventListener('dragover', handleDragOver);
+    };
+  }, [chatContainerRef, send, roomId, currentUser]);
 
   const toggleRecording = () => {
     setIsRecording(!isRecording)
@@ -314,7 +366,7 @@ export default function ChatPage() {
       {/* Messages */}
       <div ref={chatContainerRef} className="flex-1 overflow-y-auto px-4 py-4 space-y-4" onScroll={handleScroll}>
         {messages.map((message) => (
-          <ChatMessage key={message.id} message={message} currentUser={currentUser} />
+          <ChatMessage key={message.id + ('fileName' in message ? (message as { fileName?: string }).fileName ?? '' : '')} message={message} currentUser={currentUser} />
         ))}
 
         {/* Typing Indicator */}
@@ -387,7 +439,7 @@ export default function ChatPage() {
       </div>
 
       {/* Hidden File Input */}
-      <input ref={fileInputRef} type="file" className="hidden" onChange={handleFileUpload} accept="*/*" />
+      <input ref={fileInputRef} type="file" className="hidden" onChange={handleFileUpload} accept="*/*" multiple />
 
       {/* Room Settings Modal */}
       <RoomSettingsModal

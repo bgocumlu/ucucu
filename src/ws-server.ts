@@ -190,6 +190,36 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
       }
     }
   });
+
+  ws.on('error', (err) => {
+    // @ts-expect-error: custom error code property for ws errors
+    if (err && err.code === 'WS_ERR_UNSUPPORTED_MESSAGE_LENGTH') {
+      ws.send(JSON.stringify({ type: 'error', error: 'File too large. Max file size exceeded.' }));
+      // Also notify the user in the room if possible
+      if (ws.joinedRoom && ws.joinedUser) {
+        const systemMsg = {
+          username: '',
+          text: `${ws.joinedUser} tried to send a file that was too large and it was not sent.`,
+          timestamp: Date.now(),
+          system: true
+        };
+        getClientsInRoom(ws.joinedRoom).forEach((client) => {
+          if (client.readyState === 1) {
+            client.send(JSON.stringify({ type: 'newMessage', roomId: ws.joinedRoom, message: systemMsg }));
+          }
+        });
+      }
+      console.error('[ws-server] File too large error:', err);
+    } else {
+      ws.send(JSON.stringify({ type: 'error', error: 'WebSocket error: ' + (err?.message || err) }));
+      console.error('[ws-server] WebSocket error:', err);
+    }
+  });
+});
+
+// --- Error handling for large payloads and other errors ---
+wss.on('error', (err) => {
+  console.error('[ws-server] WebSocket server error:', err);
 });
 
 function broadcastRooms() {
