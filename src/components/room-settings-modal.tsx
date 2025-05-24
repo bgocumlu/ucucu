@@ -21,15 +21,17 @@ interface RoomSettingsModalProps {
   roomId: string
   participants: Participant[]
   currentUser: string
+  owner?: string
+  onUpdateSettings?: (settings: { name?: string; maxParticipants?: number; locked?: boolean }) => void
 }
 
-export function RoomSettingsModal({ open, onOpenChange, roomId, participants, currentUser }: RoomSettingsModalProps) {
+export function RoomSettingsModal({ open, onOpenChange, roomId, participants, currentUser, owner, onUpdateSettings }: RoomSettingsModalProps) {
   const [roomName, setRoomName] = useState("Study Group")
   const [maxParticipants, setMaxParticipants] = useState("5")
   const [newPassword, setNewPassword] = useState("")
 
   const currentUserData = participants.find((p) => p.username === currentUser)
-  const isOwner = currentUserData?.isOwner || false
+  const isOwner = owner ? currentUser === owner : currentUserData?.isOwner || false
 
   const handleKickUser = (username: string) => {
     // In real app, this would send a WebSocket message
@@ -43,6 +45,18 @@ export function RoomSettingsModal({ open, onOpenChange, roomId, participants, cu
 
   const getInitials = (username: string) => {
     return username.slice(0, 2).toUpperCase()
+  }
+
+  // Save changes handler
+  const handleSave = () => {
+    if (onUpdateSettings) {
+      onUpdateSettings({ name: roomName, maxParticipants: Number(maxParticipants) })
+    }
+  }
+  const handleUpdateSecurity = () => {
+    if (onUpdateSettings) {
+      onUpdateSettings({ maxParticipants: Number(maxParticipants) })
+    }
   }
 
   return (
@@ -85,7 +99,12 @@ export function RoomSettingsModal({ open, onOpenChange, roomId, participants, cu
               </div>
             </div>
 
-            {isOwner && <Button className="w-full">Save Changes</Button>}
+            {owner && (
+              <div className="text-xs text-gray-500">
+                Room creator: <span className="font-semibold">{owner}</span>
+              </div>
+            )}
+            {isOwner && <Button className="w-full" onClick={handleSave}>Save Changes</Button>}
           </TabsContent>
 
           {/* Security Tab */}
@@ -119,7 +138,7 @@ export function RoomSettingsModal({ open, onOpenChange, roomId, participants, cu
                   />
                 </div>
 
-                <Button className="w-full">Update Security Settings</Button>
+                <Button className="w-full" onClick={handleUpdateSecurity}>Update Security Settings</Button>
               </>
             )}
 

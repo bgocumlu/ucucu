@@ -11,6 +11,7 @@ import { Switch } from "@/components/ui/switch"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { ArrowLeft, Users, Lock, Eye, EyeOff } from "lucide-react"
 import Link from "next/link"
+import { useWebSocket } from "@/components/WebSocketProvider"
 
 interface RoomInfo {
   id: string
@@ -39,29 +40,19 @@ export default function RoomPage() {
   const [showPassword, setShowPassword] = useState(false)
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const { send, lastMessage, isConnected, setOnMessage } = useWebSocket()
 
   useEffect(() => {
-    // Simulate checking if room exists
-    const checkRoom = async () => {
-      setLoading(true)
+    setLoading(true)
+    send({ type: "getRooms" })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [roomId])
 
-      // Mock API call
-      await new Promise((resolve) => setTimeout(resolve, 500))
-
-      // Mock room data - in real app, this would come from WebSocket/API
-      const existingRooms = ["study-group", "gaming-chat", "work-team"]
-      const roomExists = existingRooms.includes(roomId)
-
-      if (roomExists) {
-        const mockRoom: RoomInfo = {
-          id: roomId,
-          name: roomId === "study-group" ? "Study Group" : `Room ${roomId}`,
-          count: 2,
-          maxParticipants: 5,
-          locked: roomId === "study-group",
-          exists: true,
-        }
-        setRoomInfo(mockRoom)
+  useEffect(() => {
+    if (lastMessage && lastMessage.type === "rooms") {
+      const found = (lastMessage.rooms as RoomInfo[]).find((room) => room.id === roomId)
+      if (found) {
+        setRoomInfo({ ...found, exists: true })
       } else {
         setRoomInfo({
           id: roomId,
@@ -71,7 +62,6 @@ export default function RoomPage() {
           locked: false,
           exists: false,
         })
-        // Pre-fill display name with formatted room ID
         setFormData((prev) => ({
           ...prev,
           displayName: roomId
@@ -80,12 +70,65 @@ export default function RoomPage() {
             .join(" "),
         }))
       }
-
       setLoading(false)
     }
+  }, [lastMessage, roomId])
 
-    checkRoom()
-  }, [roomId])
+  useEffect(() => {
+    setIsSubmitting(false)
+  }, [isConnected])
+
+  const handleSubmit = async () => {
+    if (!validateForm()) return
+    setIsSubmitting(true)
+    setErrors({})
+    // Listen for the next roomInfo or error message
+    setOnMessage((msg) => {
+      console.log('[JOIN DEBUG] setOnMessage got:', JSON.stringify(msg, null, 2))
+      if (
+        msg.type === "roomInfo" &&
+        typeof msg.room === "object" &&
+        msg.room &&
+        "id" in msg.room &&
+        (msg.room as { id: string }).id === roomId
+      ) {
+        setIsSubmitting(false)
+        sessionStorage.setItem(`username:${roomId}`, formData.username)
+        setOnMessage(null)
+        router.push(`/${roomId}/chat`)
+      } else if (msg.type === "error") {
+        setIsSubmitting(false)
+        setErrors({ general: String(msg.error) })
+        sessionStorage.removeItem(`username:${roomId}`)
+        setOnMessage(null)
+      }
+    })
+    send({
+      type: "joinRoom",
+      roomId,
+      username: formData.username,
+    })
+  }
+
+  const generateRoomId = () => {
+    const adjectives = ["cool", "awesome", "epic", "fun", "chill", "cozy", "bright", "swift"]
+    const nouns = ["chat", "room", "space", "hub", "zone", "lounge", "corner", "spot"]
+    const randomAdj = adjectives[Math.floor(Math.random() * adjectives.length)]
+    const randomNoun = nouns[Math.floor(Math.random() * nouns.length)]
+    const randomNum = Math.floor(Math.random() * 1000)
+
+    const newRoomId = `${randomAdj}-${randomNoun}-${randomNum}`
+    router.push(`/${newRoomId}`)
+  }
+
+  const getInitials = (name: string) => {
+    return name
+      .split(" ")
+      .map((word) => word[0])
+      .join("")
+      .toUpperCase()
+      .slice(0, 2)
+  }
 
   const validateForm = () => {
     const newErrors: Record<string, string> = {}
@@ -108,44 +151,18 @@ export default function RoomPage() {
     return Object.keys(newErrors).length === 0
   }
 
-  const handleSubmit = async () => {
-    if (!validateForm()) return
-
-    setIsSubmitting(true)
-
-    try {
-      // Simulate API call
-      await new Promise((resolve) => setTimeout(resolve, 1000))
-
-      // Navigate to chat
-      router.push(`/${roomId}/chat`)
-    } catch (error) {
-      console.error("Failed to join/create room:", error)
-      setErrors({ general: "Failed to process request. Please try again." })
-    } finally {
-      setIsSubmitting(false)
+  // Clear sessionStorage when leaving the room (navigating away from chat)
+  useEffect(() => {
+    const handleRouteChange = (url: string) => {
+      if (!url.endsWith(`/chat`)) {
+        sessionStorage.removeItem(`username:${roomId}`)
+      }
     }
-  }
-
-  const generateRoomId = () => {
-    const adjectives = ["cool", "awesome", "epic", "fun", "chill", "cozy", "bright", "swift"]
-    const nouns = ["chat", "room", "space", "hub", "zone", "lounge", "corner", "spot"]
-    const randomAdj = adjectives[Math.floor(Math.random() * adjectives.length)]
-    const randomNoun = nouns[Math.floor(Math.random() * nouns.length)]
-    const randomNum = Math.floor(Math.random() * 1000)
-
-    const newRoomId = `${randomAdj}-${randomNoun}-${randomNum}`
-    router.push(`/${newRoomId}`)
-  }
-
-  const getInitials = (name: string) => {
-    return name
-      .split(" ")
-      .map((word) => word[0])
-      .join("")
-      .toUpperCase()
-      .slice(0, 2)
-  }
+    window.addEventListener('popstate', () => handleRouteChange(window.location.pathname))
+    return () => {
+      window.removeEventListener('popstate', () => handleRouteChange(window.location.pathname))
+    }
+  }, [roomId])
 
   if (loading) {
     return (

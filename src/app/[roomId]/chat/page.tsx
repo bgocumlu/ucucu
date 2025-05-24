@@ -10,10 +10,11 @@ import { Input } from "@/components/ui/input"
 import { ArrowLeft, Send, Paperclip, Mic, MoreVertical, ArrowDown } from "lucide-react"
 import { ChatMessage } from "@/components/chat-message"
 import { RoomSettingsModal } from "@/components/room-settings-modal"
+import { useWebSocket } from "@/components/WebSocketProvider"
 
 interface Message {
   id: string
-  type: "text" | "file" | "audio"
+  type: "text" | "file" | "audio" | "system"
   username: string
   content: string
   timestamp: Date
@@ -25,14 +26,17 @@ interface Participant {
   isOwner: boolean
 }
 
+type RoomInfoMsg = { id: string; name: string; count: number; maxParticipants: number; locked: boolean; exists: boolean; owner?: string }
+
 export default function ChatPage() {
   const params = useParams()
   const router = useRouter()
   const roomId = params.roomId as string
 
+  const { send, lastMessage, isConnected } = useWebSocket()
   const [messages, setMessages] = useState<Message[]>([])
   const [participants, setParticipants] = useState<Participant[]>([])
-  const [currentUser, setCurrentUser] = useState("Alice") // Mock current user
+  const [currentUser, setCurrentUser] = useState<string>("")
   const [messageText, setMessageText] = useState("")
   const [isTyping, setIsTyping] = useState("")
   const [showSettings, setShowSettings] = useState(false)
@@ -43,44 +47,73 @@ export default function ChatPage() {
   const chatContainerRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
-  // Mock data
+  // Join room on mount
   useEffect(() => {
-    const mockMessages: Message[] = [
-      {
-        id: "1",
-        type: "text",
-        username: "Bob",
-        content: "Hey everyone! Welcome to the study group.",
-        timestamp: new Date(Date.now() - 300000),
-        isOwn: false,
-      },
-      {
-        id: "2",
-        type: "text",
-        username: "Alice",
-        content: "Thanks! Excited to be here.",
-        timestamp: new Date(Date.now() - 240000),
-        isOwn: true,
-      },
-      {
-        id: "3",
-        type: "text",
-        username: "Charlie",
-        content: "Should we start with the math problems?",
-        timestamp: new Date(Date.now() - 180000),
-        isOwn: false,
-      },
-    ]
+    // Only get username from sessionStorage, never prompt
+    const username = sessionStorage.getItem(`username:${roomId}`) || ""
+    if (!username) {
+      router.replace(`/${roomId}`)
+      return
+    }
+    setCurrentUser(username)
+    send({ type: "joinRoom", roomId, username })
+  }, [roomId, send, router])
 
-    const mockParticipants: Participant[] = [
-      { username: "Bob", isOwner: true },
-      { username: "Alice", isOwner: false },
-      { username: "Charlie", isOwner: false },
-    ]
+  // Track room owner for RoomSettingsModal
+  const [roomOwner, setRoomOwner] = useState<string>("")
 
-    setMessages(mockMessages)
-    setParticipants(mockParticipants)
-  }, [])
+  // Listen for messages and participants
+  useEffect(() => {
+    if (!lastMessage) return
+    if (lastMessage.type === "messages" && lastMessage.roomId === roomId) {
+      setMessages([])
+    }
+    if (lastMessage.type === "newMessage" && lastMessage.roomId === roomId) {
+      const msg = lastMessage.message as { username: string; text: string; timestamp: number; system?: boolean }
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: msg.timestamp.toString(),
+          type: msg.system ? "system" : "text",
+          username: msg.username,
+          content: msg.text,
+          timestamp: new Date(msg.timestamp),
+          isOwn: msg.username === currentUser,
+        },
+      ])
+    }
+    // Prefer roomInfo for participants if available
+    if (lastMessage.type === "roomInfo" && lastMessage.room && (lastMessage.room as RoomInfoMsg).id === roomId) {
+      const info = lastMessage.room as RoomInfoMsg & { users?: string[] }
+      setRoomOwner(info.owner || "")
+      if (info.users && Array.isArray(info.users)) {
+        setParticipants(
+          info.users.map((username) => ({
+            username,
+            isOwner: info.owner ? username === info.owner : false,
+          }))
+        )
+      }
+    } else if (lastMessage.type === "rooms" && Array.isArray(lastMessage.rooms)) {
+      type Room = { id: string; name: string; users?: string[]; owner?: string }
+      const found = (lastMessage.rooms as Room[]).find((r) => r.id === roomId)
+      if (found && found.users) {
+        setParticipants(
+          found.users.map((username) => ({
+            username,
+            isOwner: found.owner ? username === found.owner : false,
+          }))
+        )
+      }
+    }
+  }, [lastMessage, roomId, currentUser])
+
+  // Add handler for updating room settings (owner only)
+  const handleUpdateRoomSettings = (settings: { name?: string; maxParticipants?: number; locked?: boolean }) => {
+    if (currentUser && roomOwner === currentUser) {
+      send({ type: "updateRoomSettings", roomId, username: currentUser, ...settings })
+    }
+  }
 
   // Auto-scroll to bottom
   useEffect(() => {
@@ -100,17 +133,7 @@ export default function ChatPage() {
 
   const sendMessage = () => {
     if (!messageText.trim()) return
-
-    const newMessage: Message = {
-      id: Date.now().toString(),
-      type: "text",
-      username: currentUser,
-      content: messageText,
-      timestamp: new Date(),
-      isOwn: true,
-    }
-
-    setMessages((prev) => [...prev, newMessage])
+    send({ type: "sendMessage", roomId, username: currentUser, text: messageText })
     setMessageText("")
     setIsAtBottom(true)
   }
@@ -169,6 +192,19 @@ export default function ChatPage() {
   const getInitials = (username: string) => {
     return username.slice(0, 2).toUpperCase()
   }
+
+  // Clear sessionStorage when leaving the chat page
+  useEffect(() => {
+    const handleRouteChange = (url: string) => {
+      if (!url.endsWith(`/chat`)) {
+        sessionStorage.removeItem(`username:${roomId}`)
+      }
+    }
+    window.addEventListener('popstate', () => handleRouteChange(window.location.pathname))
+    return () => {
+      window.removeEventListener('popstate', () => handleRouteChange(window.location.pathname))
+    }
+  }, [roomId])
 
   return (
     <div className="h-screen bg-white flex flex-col">
@@ -296,6 +332,8 @@ export default function ChatPage() {
         roomId={roomId}
         participants={participants}
         currentUser={currentUser}
+        owner={roomOwner}
+        onUpdateSettings={handleUpdateRoomSettings}
       />
     </div>
   )

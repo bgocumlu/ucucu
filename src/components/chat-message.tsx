@@ -4,7 +4,7 @@ import { Download, Play, FileText } from "lucide-react"
 
 interface Message {
   id: string
-  type: "text" | "file" | "audio"
+  type: "text" | "file" | "audio" | "system"
   username: string
   content: string
   timestamp: Date
@@ -22,6 +22,16 @@ export function ChatMessage({ message }: ChatMessageProps) {
 
   const getInitials = (username: string) => {
     return username.slice(0, 2).toUpperCase()
+  }
+
+  if (message.type === "system") {
+    return (
+      <div className="flex justify-center my-2">
+        <div className="bg-gray-200 text-gray-600 text-xs px-3 py-1 rounded-full">
+          {message.content}
+        </div>
+      </div>
+    )
   }
 
   return (
