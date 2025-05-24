@@ -4,8 +4,8 @@
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/bgocumlu/ephchat.git
-   cd ephchat
+   git clone https://github.com/bgocumlu/ucucu.git
+   cd ucucu
    ```
 
 2. **Install dependencies**

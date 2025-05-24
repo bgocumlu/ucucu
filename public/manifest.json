@@ -1,6 +1,6 @@
 {
-  "name": "EphemeralChat",
-  "short_name": "EphemeralChat",
+  "name": "ucucu",
+  "short_name": "ucucu",
   "description": "Lightweight, ephemeral chat rooms with no message history",
   "start_url": "/",
   "display": "standalone",

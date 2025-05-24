@@ -1,6 +1,3 @@
-// Simple WebSocket server for ephemeralchat
-// Run with: npx tsx src/ws-server.ts
-
 import { WebSocket, WebSocketServer } from 'ws';
 import { createServer } from 'http';
 import bcrypt from 'bcryptjs';
