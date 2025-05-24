@@ -1,6 +1,7 @@
 "use client"
 import { Button } from "@/components/ui/button"
 import { Download, Play, FileText } from "lucide-react"
+import Image from "next/image"
 
 interface Message {
   id: string
@@ -79,17 +80,34 @@ export function ChatMessage({ message, currentUser }: ChatMessageProps & { curre
             {message.type === "text" && <p className="text-sm whitespace-pre-wrap break-words">{message.content}</p>}
 
             {message.type === "file" && (() => {
-              // Only show preview if file is an image
+              // Only show preview if file is an image or video
               const isImage = typeof message.fileData === 'string' && message.fileData.startsWith('data:image/');
+              const isVideo = typeof message.fileData === 'string' && message.fileData.startsWith('data:video/');
               return (
                 <div className="flex flex-col items-start space-y-2">
-                  {isImage && (
-                    <img
-                      src={message.fileData}
-                      alt={message.fileName || message.content || 'image'}
-                      className="max-w-xs max-h-60 rounded border border-gray-200 mb-1"
-                      style={{ objectFit: 'contain' }}
-                    />
+                  {isImage && message.fileData && (
+                    <div className="max-w-xs max-h-60 rounded border border-gray-200 mb-1 overflow-hidden">
+                      <Image
+                        src={message.fileData}
+                        alt={message.fileName || message.content || 'image'}
+                        width={320}
+                        height={240}
+                        style={{ objectFit: 'contain', width: '100%', height: 'auto', maxHeight: '15rem' }}
+                        unoptimized
+                        priority={false}
+                      />
+                    </div>
+                  )}
+                  {isVideo && message.fileData && (
+                    <div className="max-w-xs max-h-60 rounded border border-gray-200 mb-1 overflow-hidden">
+                      <video
+                        src={message.fileData}
+                        controls
+                        style={{ width: '100%', height: 'auto', maxHeight: '15rem', background: '#000' }}
+                      >
+                        Your browser does not support the video tag.
+                      </video>
+                    </div>
                   )}
                   <div className="flex items-center space-x-2">
                     <FileText className="h-4 w-4" />

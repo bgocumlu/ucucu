@@ -345,9 +345,28 @@ export default function ChatPage() {
               Leave
             </Button>
             <div>
-              <h1 className="font-semibold text-gray-900">{roomId}</h1>
+              <div className="flex items-center space-x-2">
+                <h1 className="font-semibold text-gray-900">{roomId}</h1>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-6 px-2 py-0 text-xs"
+                  onClick={() => {
+                    const username = sessionStorage.getItem(`username:${roomId}`) || currentUser;
+                    if (username) {
+                      setCurrentUser(username);
+                      send({ type: "joinRoom", roomId, username });
+                    }
+                  }}
+                  // disabled={isConnected}
+                  title="Reconnect to room"
+                >
+                  Reconnect
+                </Button>
+              </div>
               <p className="text-xs text-gray-500">/{roomId}</p>
             </div>
+            
           </div>
 
           <div className="flex items-center space-x-2">

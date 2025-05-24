@@ -11,7 +11,7 @@ const PORT = 3001;
 const rooms: Record<string, { name: string; users: Set<string>; locked: boolean; maxParticipants: number; visibility: 'public' | 'private'; owner?: string; password?: string }> = {};
 
 const server = createServer();
-const wss = new WebSocketServer({ server });
+const wss = new WebSocketServer({ server, maxPayload: 150 * 1024 * 1024 }); // 256 MB max payload size
 
 function getClientsInRoom(roomId: string) {
   return Array.from(wss.clients).filter((client) => {
@@ -209,6 +209,7 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
           }
         });
       }
+      ws.send(JSON.stringify({ type: 'error', error: 'WebSocket error: ' + (err?.message || err) }));
       console.error('[ws-server] File too large error:', err);
     } else {
       ws.send(JSON.stringify({ type: 'error', error: 'WebSocket error: ' + (err?.message || err) }));
