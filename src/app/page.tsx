@@ -65,7 +65,7 @@ export default function HomePage() {
 
   useEffect(() => {
     if (lastMessage && lastMessage.type === "rooms") {
-      setRooms(lastMessage.rooms)
+      setRooms(lastMessage.rooms as Room[])
     }
     // Listen for roomInfo and newMessage to trigger a getRooms for live updates
     if (lastMessage && (lastMessage.type === "roomInfo" || lastMessage.type === "newMessage")) {
@@ -77,10 +77,51 @@ export default function HomePage() {
     setIsOnline(isConnected)
   }, [isConnected])
 
+  // Check room existence when room name changes - USE EXISTING WEBSOCKET
+  useEffect(() => {
+    if (!roomName.trim() || !showRoomInput) {
+      setRoomStatus(null)
+      return
+    }
+
+    setCheckingRoom(true)
+
+    // Use the existing WebSocket connection instead of creating a new one
+    const timeoutId = setTimeout(() => {
+      send({ type: "getRooms" })
+    }, 500)
+
+    return () => {
+      clearTimeout(timeoutId)
+    }
+  }, [roomName, showRoomInput, send])
+
+  // Handle room status checking with existing lastMessage
+  useEffect(() => {
+    if (!checkingRoom || !lastMessage || lastMessage.type !== "rooms") return
+
+    const cleanRoomName = roomName.trim().toLowerCase().replace(/[^a-zA-Z0-9-_]/g, "-")
+    const existingRoom = (lastMessage.rooms as Room[]).find((room) => room.id === cleanRoomName)
+    
+    if (existingRoom) {
+      setRoomStatus({
+        exists: true,
+        name: existingRoom.name,
+        count: existingRoom.count,
+        maxParticipants: existingRoom.maxParticipants,
+        locked: existingRoom.locked,
+      })
+    } else {
+      setRoomStatus({ exists: false })
+    }
+    setCheckingRoom(false)
+  }, [lastMessage, checkingRoom, roomName])
+
   const filteredRooms = rooms.filter(
     (room) =>
-      room.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      room.id.toLowerCase().includes(searchQuery.toLowerCase()),
+      (room.visibility === 'public') &&
+      (room.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        room.id.toLowerCase().includes(searchQuery.toLowerCase()))
   )
 
   const getInitials = (name: string) => {
@@ -123,7 +164,7 @@ export default function HomePage() {
     setCheckingRoom(true)
 
     timeoutId = setTimeout(() => {
-      ws = new WebSocket("ws://localhost:3001")
+      ws = new WebSocket("ws://192.168.1.223:3001")
       ws.onopen = () => {
         ws!.send(JSON.stringify({ type: "getRooms" }))
       }

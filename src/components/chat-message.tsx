@@ -15,20 +15,42 @@ interface ChatMessageProps {
   message: Message
 }
 
-export function ChatMessage({ message }: ChatMessageProps) {
+// Hash a string to a color
+function stringToColor(str: string) {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    hash = str.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  // Generate HSL color
+  const hue = Math.abs(hash) % 360;
+  return `hsl(${hue}, 70%, 80%)`;
+}
+
+export function ChatMessage({ message, currentUser }: ChatMessageProps & { currentUser?: string }) {
   const formatTime = (date: Date) => {
     return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const getInitials = (username: string) => {
     return username.slice(0, 2).toUpperCase()
+  }
+
+  // Detect "You joined/left" for system messages
+  let systemText = message.content;
+  if (message.type === "system" && currentUser) {
+    if (message.content === `${currentUser} joined the chat.`) {
+      systemText = `${currentUser} joined the chat. (You)`;
+    } else if (message.content === `${currentUser} left the chat.`) {
+      systemText = `${currentUser} joined the chat. (You)`;
+    }
   }
 
   if (message.type === "system") {
     return (
       <div className="flex justify-center my-2">
         <div className="bg-gray-200 text-gray-600 text-xs px-3 py-1 rounded-full">
-          {message.content}
+          {systemText}
         </div>
       </div>
     )
@@ -36,24 +58,21 @@ export function ChatMessage({ message }: ChatMessageProps) {
 
   return (
     <div className={`flex ${message.isOwn ? "justify-end" : "justify-start"}`}>
-      <div className={`flex space-x-2 max-w-[80%] ${message.isOwn ? "flex-row-reverse space-x-reverse" : ""}`}>
-        {/* Avatar */}
-        {!message.isOwn && (
-          <div className="w-8 h-8 bg-gray-400 rounded-full flex items-center justify-center text-white text-xs font-medium flex-shrink-0">
-            {getInitials(message.username)}
-          </div>
-        )}
-
+      <div className={`flex space-x-2 max-w-full ${message.isOwn ? "flex-row-reverse space-x-reverse" : ""}`}>
         {/* Message Content */}
         <div className={`flex flex-col ${message.isOwn ? "items-end" : "items-start"}`}>
           {/* Username */}
-          {!message.isOwn && <span className="text-xs text-gray-600 mb-1 px-1">{message.username}</span>}
-
+          <span className="text-xs text-gray-600 mb-1 px-1">{message.username}</span>
           {/* Message Bubble */}
           <div
-            className={`rounded-lg px-3 py-2 max-w-full ${
-              message.isOwn ? "bg-blue-500 text-white" : "bg-gray-100 text-gray-900"
-            }`}
+            className={`rounded-lg px-3 py-2 inline-block`}
+            style={{
+              wordBreak: 'break-word',
+              overflowWrap: 'break-word',
+              maxWidth: '100%',
+              background: message.isOwn ? '#3b82f6' : stringToColor(message.username),
+              color: message.isOwn ? 'white' : '#222',
+            }}
           >
             {message.type === "text" && <p className="text-sm whitespace-pre-wrap break-words">{message.content}</p>}
 

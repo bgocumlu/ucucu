@@ -5,7 +5,6 @@ import React, { createContext, useContext, useEffect, useRef, useState, useCallb
 export type WSMessage = { type: string; [key: string]: unknown };
 
 type WebSocketContextType = {
-  ws: WebSocket | null;
   send: (msg: WSMessage) => void;
   lastMessage: WSMessage | null;
   setOnMessage: (cb: ((msg: WSMessage) => void) | null) => void;
@@ -19,31 +18,58 @@ export const WebSocketProvider = ({ children }: { children: React.ReactNode }) =
   const [isConnected, setIsConnected] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const onMessageRef = useRef<((msg: WSMessage) => void) | null>(null);
+  const reconnectTimer = useRef<NodeJS.Timeout | null>(null);
+
+  const connect = useCallback(() => {
+    // Always defer connection logic to avoid setState during render
+    Promise.resolve().then(() => {
+      if (wsRef.current && (wsRef.current.readyState === 0 || wsRef.current.readyState === 1)) {
+        // Already connecting or open
+        return;
+      }
+      const ws = new WebSocket("ws://192.168.1.223:3001");
+      wsRef.current = ws;
+      ws.onopen = () => {
+        setIsConnected(true);
+        if (reconnectTimer.current) {
+          clearTimeout(reconnectTimer.current);
+          reconnectTimer.current = null;
+        }
+      };
+      ws.onclose = () => {
+        setIsConnected(false);
+        if (!reconnectTimer.current) {
+          reconnectTimer.current = setTimeout(connect, 3000); // Try to reconnect every 3s
+        }
+      };
+      ws.onerror = () => {
+        setIsConnected(false);
+        if (!reconnectTimer.current) {
+          reconnectTimer.current = setTimeout(connect, 3000);
+        }
+      };
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          setLastMessage((prev) => {
+            if (JSON.stringify(prev) !== JSON.stringify(msg)) {
+              if (onMessageRef.current) onMessageRef.current(msg);
+              return msg;
+            }
+            return prev;
+          });
+        } catch {}
+      };
+    });
+  }, []);
 
   useEffect(() => {
-    const ws = new WebSocket("ws://localhost:3001");
-    wsRef.current = ws;
-    ws.onopen = () => setIsConnected(true);
-    ws.onclose = () => setIsConnected(false);
-    ws.onerror = () => setIsConnected(false);
-    // Only update setLastMessage and call onMessageRef.current if the message is different
-    ws.onmessage = (event) => {
-      try {
-        const msg = JSON.parse(event.data);
-        console.log('WebSocket message received:', msg);
-        setLastMessage((prev) => {
-          if (JSON.stringify(prev) !== JSON.stringify(msg)) {
-            if (onMessageRef.current) onMessageRef.current(msg);
-            return msg;
-          }
-          return prev;
-        });
-      } catch {}
-    };
+    connect();
     return () => {
-      ws.close();
+      if (wsRef.current) wsRef.current.close();
+      if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
     };
-  }, []);
+  }, [connect]);
 
   const send = useCallback((msg: WSMessage) => {
     if (wsRef.current && wsRef.current.readyState === 1) {
@@ -55,8 +81,24 @@ export const WebSocketProvider = ({ children }: { children: React.ReactNode }) =
     onMessageRef.current = cb;
   }, []);
 
+  // Memoize context value to avoid triggering renders from wsRef.current changes
+  const contextValue = React.useMemo(() => ({
+    send,
+    lastMessage,
+    setOnMessage,
+    isConnected,
+  }), [send, lastMessage, setOnMessage, isConnected]);
+
+  useEffect(() => {
+    // Expose wsRef for bfcache workaround
+    if (typeof window !== "undefined") {
+      // @ts-expect-error: __ws is not a standard property, used for bfcache workaround
+      window.__ws = wsRef.current;
+    }
+  });
+
   return (
-    <WebSocketContext.Provider value={{ ws: wsRef.current, send, lastMessage, setOnMessage, isConnected }}>
+    <WebSocketContext.Provider value={contextValue}>
       {children}
     </WebSocketContext.Provider>
   );

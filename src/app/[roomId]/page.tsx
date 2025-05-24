@@ -79,12 +79,33 @@ export default function RoomPage() {
   }, [isConnected])
 
   const handleSubmit = async () => {
-    if (!validateForm()) return
-    setIsSubmitting(true)
-    setErrors({})
-    // Listen for the next roomInfo or error message
-    setOnMessage((msg) => {
-      console.log('[JOIN DEBUG] setOnMessage got:', JSON.stringify(msg, null, 2))
+    if (!validateForm()) return;
+    setIsSubmitting(true);
+    setErrors({});
+    send({
+      type: "joinRoom",
+      roomId,
+      username: formData.username,
+      // Only send displayName, password, visibility, maxParticipants if creating a new room
+      ...(roomInfo && !roomInfo.exists && formData.displayName.trim() && { displayName: formData.displayName.trim() }),
+      ...(roomInfo && !roomInfo.exists && { password: formData.password }),
+      ...(roomInfo && !roomInfo.exists && { visibility: formData.visibility }),
+      ...(roomInfo && !roomInfo.exists && { maxParticipants: Number(formData.maxParticipants) }),
+      // Always send password if joining a locked room
+      ...(roomInfo && roomInfo.exists && roomInfo.locked && { password: formData.password })
+    });
+  };
+
+  // Listen for the next roomInfo or error message only when submitting
+  useEffect(() => {
+    if (!isSubmitting) return;
+    type RoomInfoMessage = { type: "roomInfo"; room: { id: string } };
+    type ErrorMessage = { type: "error"; error: string };
+    type RoomsMessage = { type: "rooms"; rooms: RoomInfo[] };
+    type WebSocketMessage = RoomInfoMessage | ErrorMessage | RoomsMessage | { type: string; [key: string]: unknown };
+
+    const handler = (msg: WebSocketMessage) => {
+      console.log('[JOIN DEBUG] setOnMessage got:', JSON.stringify(msg, null, 2));
       if (
         msg.type === "roomInfo" &&
         typeof msg.room === "object" &&
@@ -92,23 +113,20 @@ export default function RoomPage() {
         "id" in msg.room &&
         (msg.room as { id: string }).id === roomId
       ) {
-        setIsSubmitting(false)
-        sessionStorage.setItem(`username:${roomId}`, formData.username)
-        setOnMessage(null)
-        router.push(`/${roomId}/chat`)
+        setIsSubmitting(false);
+        sessionStorage.setItem(`username:${roomId}`, formData.username);
+        setOnMessage(null);
+        router.push(`/${roomId}/chat`);
       } else if (msg.type === "error") {
-        setIsSubmitting(false)
-        setErrors({ general: String(msg.error) })
-        sessionStorage.removeItem(`username:${roomId}`)
-        setOnMessage(null)
+        setIsSubmitting(false);
+        setErrors({ general: String(msg.error) });
+        sessionStorage.removeItem(`username:${roomId}`);
+        setOnMessage(null);
       }
-    })
-    send({
-      type: "joinRoom",
-      roomId,
-      username: formData.username,
-    })
-  }
+    };
+    setOnMessage(handler);
+    return () => setOnMessage(null);
+  }, [isSubmitting, formData.username, roomId, router, setOnMessage]);
 
   const generateRoomId = () => {
     const adjectives = ["cool", "awesome", "epic", "fun", "chill", "cozy", "bright", "swift"]
@@ -135,8 +153,8 @@ export default function RoomPage() {
 
     if (!formData.username.trim()) {
       newErrors.username = "Username is required"
-    } else if (formData.username.length < 3 || formData.username.length > 20) {
-      newErrors.username = "Username must be 3-20 characters"
+    } else if (formData.username.length < 1 || formData.username.length > 20) {
+      newErrors.username = "Username must be 1-20 characters"
     }
 
     if (roomInfo?.exists && roomInfo.locked && !formData.password) {
@@ -271,7 +289,7 @@ export default function RoomPage() {
               </div>
 
               {/* Display Name (only for create) */}
-              {!roomInfo.exists && (
+              {/* {!roomInfo.exists && (
                 <div className="space-y-2">
                   <Label htmlFor="displayName">Display Name (Optional)</Label>
                   <Input
@@ -281,7 +299,7 @@ export default function RoomPage() {
                     onChange={(e) => setFormData((prev) => ({ ...prev, displayName: e.target.value }))}
                   />
                 </div>
-              )}
+              )} */}
 
               {/* Password Toggle (only for create) */}
               {!roomInfo.exists && (

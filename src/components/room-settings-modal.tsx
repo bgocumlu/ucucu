@@ -22,13 +22,14 @@ interface RoomSettingsModalProps {
   participants: Participant[]
   currentUser: string
   owner?: string
-  onUpdateSettings?: (settings: { name?: string; maxParticipants?: number; locked?: boolean }) => void
+  onUpdateSettings?: (settings: { name?: string; maxParticipants?: number; locked?: boolean; visibility?: 'public' | 'private' }) => void
 }
 
 export function RoomSettingsModal({ open, onOpenChange, roomId, participants, currentUser, owner, onUpdateSettings }: RoomSettingsModalProps) {
   const [roomName, setRoomName] = useState("Study Group")
   const [maxParticipants, setMaxParticipants] = useState("5")
   const [newPassword, setNewPassword] = useState("")
+  const [visibility, setVisibility] = useState<string>('public')
 
   const currentUserData = participants.find((p) => p.username === currentUser)
   const isOwner = owner ? currentUser === owner : currentUserData?.isOwner || false
@@ -47,15 +48,18 @@ export function RoomSettingsModal({ open, onOpenChange, roomId, participants, cu
     return username.slice(0, 2).toUpperCase()
   }
 
+  // Use roomId as default display if no custom name is set
+  const displayRoomName = roomName && roomName !== "Study Group" ? roomName : roomId
+
   // Save changes handler
   const handleSave = () => {
     if (onUpdateSettings) {
-      onUpdateSettings({ name: roomName, maxParticipants: Number(maxParticipants) })
+      onUpdateSettings({ name: roomName, maxParticipants: Number(maxParticipants), visibility: visibility as 'public' | 'private' })
     }
   }
   const handleUpdateSecurity = () => {
     if (onUpdateSettings) {
-      onUpdateSettings({ maxParticipants: Number(maxParticipants) })
+      onUpdateSettings({ maxParticipants: Number(maxParticipants), visibility: visibility as 'public' | 'private' })
     }
   }
 
@@ -84,7 +88,7 @@ export function RoomSettingsModal({ open, onOpenChange, roomId, participants, cu
               <Label htmlFor="roomName">Room Name</Label>
               <Input
                 id="roomName"
-                value={roomName}
+                value={displayRoomName}
                 onChange={(e) => setRoomName(e.target.value)}
                 disabled={!isOwner}
                 placeholder="Enter room name"
@@ -93,10 +97,20 @@ export function RoomSettingsModal({ open, onOpenChange, roomId, participants, cu
 
             <div className="space-y-2">
               <Label htmlFor="visibility">Visibility</Label>
-              <div className="flex items-center space-x-2">
-                <Badge variant="secondary">Public</Badge>
-                <span className="text-sm text-gray-600">This room appears in the public directory</span>
-              </div>
+              <Select value={visibility} onValueChange={(v) => setVisibility(v as 'public' | 'private')} disabled={!isOwner}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="public">Public</SelectItem>
+                  <SelectItem value="private">Private</SelectItem>
+                </SelectContent>
+              </Select>
+              <span className="text-sm text-gray-600">
+                {visibility === 'public'
+                  ? 'This room appears in the public directory'
+                  : 'This room is hidden from the public directory'}
+              </span>
             </div>
 
             {owner && (
@@ -105,6 +119,11 @@ export function RoomSettingsModal({ open, onOpenChange, roomId, participants, cu
               </div>
             )}
             {isOwner && <Button className="w-full" onClick={handleSave}>Save Changes</Button>}
+            {!isOwner && (
+              <div className="text-center text-gray-500 text-sm py-4">
+                Only the room owner can edit room info
+              </div>
+            )}
           </TabsContent>
 
           {/* Security Tab */}
@@ -152,52 +171,58 @@ export function RoomSettingsModal({ open, onOpenChange, roomId, participants, cu
           {/* Participants Tab */}
           <TabsContent value="participants" className="space-y-4">
             <div className="space-y-3">
-              {participants.map((participant) => (
-                <div key={participant.username} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
-                  <div className="flex items-center space-x-3">
-                    <div className="w-10 h-10 bg-blue-500 rounded-full flex items-center justify-center text-white font-medium">
-                      {getInitials(participant.username)}
-                    </div>
-                    <div>
-                      <div className="flex items-center space-x-2">
-                        <span className="font-medium">{participant.username}</span>
-                        {participant.isOwner && <Crown className="h-4 w-4 text-yellow-500" />}
-                        {participant.username === currentUser && (
-                          <Badge variant="outline" className="text-xs">
-                            You
-                          </Badge>
-                        )}
-                      </div>
-                      <p className="text-sm text-gray-600">{participant.isOwner ? "Room Owner" : "Participant"}</p>
-                    </div>
-                  </div>
-
-                  {isOwner && participant.username !== currentUser && (
-                    <div className="flex space-x-1">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => handleKickUser(participant.username)}
-                        className="text-orange-600 hover:text-orange-700"
-                      >
-                        <UserX className="h-4 w-4" />
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => handleBanUser(participant.username)}
-                        className="text-red-600 hover:text-red-700"
-                      >
-                        <Shield className="h-4 w-4" />
-                      </Button>
-                    </div>
-                  )}
+              {participants.length === 0 ? (
+                <div className="text-center text-gray-500 text-sm py-4">
+                  No participants in this room.
                 </div>
-              ))}
+              ) : (
+                participants.map((participant) => (
+                  <div key={participant.username} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                    <div className="flex items-center space-x-3">
+                      <div className="w-10 h-10 bg-blue-500 rounded-full flex items-center justify-center text-white font-medium">
+                        {getInitials(participant.username)}
+                      </div>
+                      <div>
+                        <div className="flex items-center space-x-2">
+                          <span className="font-medium">{participant.username}</span>
+                          {participant.isOwner && <Crown className="h-4 w-4 text-yellow-500" />}
+                          {participant.username === currentUser && (
+                            <Badge variant="outline" className="text-xs">
+                              You
+                            </Badge>
+                          )}
+                        </div>
+                        <p className="text-sm text-gray-600">{participant.isOwner ? "Room Owner" : "Participant"}</p>
+                      </div>
+                    </div>
+
+                    {isOwner && participant.username !== currentUser && (
+                      <div className="flex space-x-1">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => handleKickUser(participant.username)}
+                          className="text-orange-600 hover:text-orange-700"
+                        >
+                          <UserX className="h-4 w-4" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => handleBanUser(participant.username)}
+                          className="text-red-600 hover:text-red-700"
+                        >
+                          <Shield className="h-4 w-4" />
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                ))
+              )}
             </div>
 
             <div className="text-center text-sm text-gray-600">
-              {participants.length} of {maxParticipants} participants
+              {participants.length} {participants.length === 1 ? 'person' : 'people'} of {maxParticipants} allowed
             </div>
           </TabsContent>
         </Tabs>

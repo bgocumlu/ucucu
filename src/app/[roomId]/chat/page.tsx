@@ -10,6 +10,7 @@ import { Input } from "@/components/ui/input"
 import { ArrowLeft, Send, Paperclip, Mic, MoreVertical, ArrowDown } from "lucide-react"
 import { ChatMessage } from "@/components/chat-message"
 import { RoomSettingsModal } from "@/components/room-settings-modal"
+import { RoomLeaveDialog } from "@/components/room-leave-dialog"
 import { useWebSocket } from "@/components/WebSocketProvider"
 
 interface Message {
@@ -42,6 +43,7 @@ export default function ChatPage() {
   const [showSettings, setShowSettings] = useState(false)
   const [isAtBottom, setIsAtBottom] = useState(true)
   const [isRecording, setIsRecording] = useState(false)
+  const [showLeaveDialog, setShowLeaveDialog] = useState(false)
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const chatContainerRef = useRef<HTMLDivElement>(null)
@@ -66,7 +68,18 @@ export default function ChatPage() {
   useEffect(() => {
     if (!lastMessage) return
     if (lastMessage.type === "messages" && lastMessage.roomId === roomId) {
-      setMessages([])
+      // Set all messages from server, including system join/leave
+      setMessages(
+        (lastMessage.messages as Array<{ username: string; text: string; timestamp: number; system?: boolean }>).
+          map((msg) => ({
+            id: (msg.timestamp || Date.now()).toString(),
+            type: msg.system ? "system" : "text",
+            username: msg.username || "",
+            content: msg.text || "",
+            timestamp: new Date(msg.timestamp),
+            isOwn: msg.username === currentUser,
+          }))
+      )
     }
     if (lastMessage.type === "newMessage" && lastMessage.roomId === roomId) {
       const msg = lastMessage.message as { username: string; text: string; timestamp: number; system?: boolean }
@@ -206,17 +219,42 @@ export default function ChatPage() {
     }
   }, [roomId])
 
+  const handleLeaveRoom = () => {
+    // Optionally send a leave event here if you want to notify the server
+    // (not strictly needed, as ws.onclose will fire on navigation)
+    if (typeof window !== "undefined") {
+      sessionStorage.removeItem(`username:${roomId}`);
+    }
+    router.replace("/");
+    setTimeout(() => {window.location.reload();}, 300); // Small delay to ensure the page unloads properly
+  };
+
+  useEffect(() => {
+    const handlePageHide = (event: PageTransitionEvent) => {
+      if (event.persisted) {
+        send({ type: "leaveRoom", roomId, username: currentUser });
+        // Try to close the WebSocket if possible
+        // @ts-expect-error: __ws is not a standard property, used for bfcache workaround
+        if (typeof window !== "undefined" && window.__ws) window.__ws.close();
+      }
+    };
+    window.addEventListener("pagehide", handlePageHide);
+    return () => {
+      window.removeEventListener("pagehide", handlePageHide);
+    };
+  }, [roomId, currentUser, send]);
+
   return (
     <div className="h-screen bg-white flex flex-col">
       {/* Header */}
       <header className="bg-white border-b border-gray-200 px-4 py-3 flex-shrink-0">
         <div className="flex items-center justify-between">
           <div className="flex items-center space-x-3">
-            <Button variant="ghost" size="sm" onClick={() => router.push("/")}>
-              <ArrowLeft className="h-4 w-4" />
+            <Button variant="destructive" size="sm" onClick={() => setShowLeaveDialog(true)}>
+              Leave
             </Button>
             <div>
-              <h1 className="font-semibold text-gray-900">Study Group</h1>
+              <h1 className="font-semibold text-gray-900">{roomId}</h1>
               <p className="text-xs text-gray-500">/{roomId}</p>
             </div>
           </div>
@@ -250,7 +288,7 @@ export default function ChatPage() {
       {/* Messages */}
       <div ref={chatContainerRef} className="flex-1 overflow-y-auto px-4 py-4 space-y-4" onScroll={handleScroll}>
         {messages.map((message) => (
-          <ChatMessage key={message.id} message={message} />
+          <ChatMessage key={message.id} message={message} currentUser={currentUser} />
         ))}
 
         {/* Typing Indicator */}
@@ -335,6 +373,9 @@ export default function ChatPage() {
         owner={roomOwner}
         onUpdateSettings={handleUpdateRoomSettings}
       />
+
+      {/* Leave Room Dialog */}
+      <RoomLeaveDialog open={showLeaveDialog} onConfirm={handleLeaveRoom} onCancel={() => setShowLeaveDialog(false)} />
     </div>
   )
 }

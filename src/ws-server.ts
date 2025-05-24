@@ -3,15 +3,12 @@
 
 import { WebSocket, WebSocketServer } from 'ws';
 import { createServer } from 'http';
+import bcrypt from 'bcryptjs';
 
 const PORT = 3001;
 
 // In-memory store for rooms and messages
-const rooms: Record<string, { name: string; users: Set<string>; messages: unknown[]; locked: boolean; maxParticipants: number; visibility: 'public' | 'private'; owner?: string }> = {
-  'study-group': { name: 'Study Group', users: new Set(), messages: [], locked: true, maxParticipants: 5, visibility: 'public', owner: undefined },
-  'gaming-chat': { name: 'Gaming Chat', users: new Set(), messages: [], locked: false, maxParticipants: 10, visibility: 'public', owner: undefined },
-  'work-team': { name: 'Work Team', users: new Set(), messages: [], locked: true, maxParticipants: 8, visibility: 'public', owner: undefined },
-};
+const rooms: Record<string, { name: string; users: Set<string>; messages: unknown[]; locked: boolean; maxParticipants: number; visibility: 'public' | 'private'; owner?: string; password?: string }> = {};
 
 const server = createServer();
 const wss = new WebSocketServer({ server });
@@ -23,7 +20,30 @@ function getClientsInRoom(roomId: string) {
   });
 }
 
-wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string }) => {
+// --- Add ping/pong to detect dead connections only for clients in a room ---
+setInterval(() => {
+  wss.clients.forEach((ws) => {
+    const client = ws as WebSocket & { joinedRoom?: string; isAlive?: boolean };
+    if (!client.joinedRoom) return; // Only ping if client is in a room
+    if (client.isAlive === false) {
+      console.log(`[HEARTBEAT][SERVER:${PORT}] Terminating dead connection in room: ${client.joinedRoom}`);
+      client.terminate();
+      return;
+    }
+    client.isAlive = false;
+    client.ping();
+    console.log(`[HEARTBEAT][SERVER:${PORT}] Sent ping to client in room: ${client.joinedRoom}`);
+  });
+}, 30000); // every 10 seconds
+
+wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string; isAlive?: boolean }) => {
+  ws.isAlive = true;
+  ws.on('pong', () => {
+    ws.isAlive = true;
+    const room = ws.joinedRoom || 'none';
+    console.log(`[HEARTBEAT][SERVER:${PORT}] Received pong from client in room: ${room}`);
+  });
+
   // Track which room and username this socket is in
   let joinedRoom: string | null = null;
   let joinedUser: string | null = null;
@@ -38,17 +58,20 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
       } else if (msg.type === 'joinRoom') {
         const { roomId, username, password } = msg;
         // Validate username and roomId
-        if (!username || typeof username !== 'string' || username.length < 3 || username.length > 20) {
-          ws.send(JSON.stringify({ type: 'error', error: 'Invalid username. Must be 3-20 characters.' }));
+        if (!username || typeof username !== 'string' || username.length < 1 || username.length > 20) {
+          ws.send(JSON.stringify({ type: 'error', error: 'Invalid username. Must be 1-20 characters.' }));
           return;
         }
-        if (!roomId || typeof roomId !== 'string' || roomId.length < 2 || roomId.length > 40) {
+        if (!roomId || typeof roomId !== 'string' || roomId.length < 1 || roomId.length > 40) {
           ws.send(JSON.stringify({ type: 'error', error: 'Invalid room ID.' }));
           return;
         }
         if (!rooms[roomId]) {
           // Create new room
-          rooms[roomId] = { name: `Room ${roomId}`, users: new Set(), messages: [], locked: false, maxParticipants: 10, visibility: 'public', owner: username };
+          const hashedPassword = password ? bcrypt.hashSync(password, 8) : undefined;
+          const displayName = typeof msg.displayName === 'string' && msg.displayName.trim().length > 0 ? msg.displayName.trim() : `${roomId}`;
+          rooms[roomId] = { name: displayName, users: new Set(), messages: [], locked: !!password, maxParticipants: 10, visibility: 'public', owner: username, password: hashedPassword };
+          broadcastRooms(); // Broadcast new room list
         }
         // Prevent duplicate usernames
         if (rooms[roomId].users.has(username)) {
@@ -60,11 +83,12 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
           ws.send(JSON.stringify({ type: 'error', error: 'Room is full.' }));
           return;
         }
-        // Prevent joining locked rooms (password logic placeholder)
+        // Prevent joining locked rooms (password logic)
         if (rooms[roomId].locked) {
-          // TODO: Add password check here if you want password support
-          ws.send(JSON.stringify({ type: 'error', error: 'Room is locked. Password required.' }));
-          return;
+          if (!password || !rooms[roomId].password || !bcrypt.compareSync(password, rooms[roomId].password)) {
+            ws.send(JSON.stringify({ type: 'error', error: 'Room is locked. Password required or incorrect.' }));
+            return;
+          }
         }
         rooms[roomId].users.add(username);
         if (!rooms[roomId].owner) rooms[roomId].owner = username;
@@ -72,6 +96,7 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
         joinedUser = username;
         ws.joinedRoom = roomId;
         ws.joinedUser = username;
+        broadcastRooms(); // Broadcast participant count change
         // Send join notification message
         const joinMsg = { username: '', text: `${username} joined the chat.`, timestamp: Date.now(), system: true };
         rooms[roomId].messages.push(joinMsg);
@@ -99,11 +124,19 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
           });
         }
       } else if (msg.type === 'updateRoomSettings') {
-        const { roomId, username, name, maxParticipants, locked } = msg;
+        const { roomId, username, name, maxParticipants, locked, password } = msg;
         if (rooms[roomId] && rooms[roomId].owner === username) {
           if (typeof name === 'string') rooms[roomId].name = name;
           if (typeof maxParticipants === 'number') rooms[roomId].maxParticipants = maxParticipants;
           if (typeof locked === 'boolean') rooms[roomId].locked = locked;
+          if (typeof password === 'string' && password.length > 0) {
+            rooms[roomId].password = bcrypt.hashSync(password, 8);
+            rooms[roomId].locked = true;
+          }
+          if (password === '') {
+            rooms[roomId].password = undefined;
+            rooms[roomId].locked = false;
+          }
           // Broadcast updated roomInfo (with users)
           const usersArr = Array.from(rooms[roomId].users);
           getClientsInRoom(roomId).forEach((client) => {
@@ -124,14 +157,25 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
   ws.on('close', () => {
     if (joinedRoom && joinedUser && rooms[joinedRoom]) {
       rooms[joinedRoom].users.delete(joinedUser);
+      broadcastRooms(); // Broadcast participant count change
       // Delete room if no participants left
       if (rooms[joinedRoom].users.size === 0) {
         delete rooms[joinedRoom];
+        broadcastRooms(); // Broadcast room deletion
       }
     }
   });
 });
 
-server.listen(PORT, () => {
+function broadcastRooms() {
+  const roomList = Object.entries(rooms).map(([id, r]) => ({ id, name: r.name, count: r.users.size, maxParticipants: r.maxParticipants, locked: r.locked, visibility: r.visibility }));
+  wss.clients.forEach((client) => {
+    if (client.readyState === 1) {
+      client.send(JSON.stringify({ type: 'rooms', rooms: roomList }));
+    }
+  });
+}
+
+server.listen(PORT, '0.0.0.0', () => {
   console.log(`WebSocket server running on ws://localhost:${PORT}`);
 });
