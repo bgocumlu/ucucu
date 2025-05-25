@@ -728,60 +728,62 @@ export default function ChatPage() {
     <div className="h-screen bg-white flex flex-col">
       {/* Header */}
       <header className="bg-white border-b border-gray-200 px-4 py-3 flex-shrink-0">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center space-x-3">
-            <Button variant="destructive" size="sm" onClick={() => setShowLeaveDialog(true)}>
-              Leave
-            </Button>            <div>
-              <div className="flex items-center space-x-2">
-                <h1 className="font-semibold text-gray-900">{roomInfo.name || roomId}</h1>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="h-6 px-2 py-0 text-xs"
-                  onClick={() => {
-                    const username = sessionStorage.getItem(`username:${roomId}`) || currentUser;
-                    if (username) {
-                      setCurrentUser(username);
-                      send({ type: "joinRoom", roomId, username });
-                    }
-                  }}
-                  // disabled={isConnected}
-                  title="Reconnect to room"
-                >
-                  Reconnect
-                </Button>
-              </div>
-              <p className="text-xs text-gray-500">/{roomId}</p>
-            </div>
-            
+  <div className="flex items-center justify-between gap-2 w-full flex-nowrap">
+    {/* Left: Leave + Reconnect + Room name/id (very compact) */}
+    <div className="flex items-center gap-2 min-w-0 flex-shrink">
+      <Button variant="destructive" size="sm" onClick={() => setShowLeaveDialog(true)}>
+        Leave
+      </Button>
+      <Button
+        variant="ghost"
+        size="sm"
+        className="border border-gray-300 bg-white text-red-600 hover:bg-gray-100 h-8 px-3 py-0 text-xs font-semibold shadow-none"
+        style={{ boxShadow: 'none' }}
+        onClick={() => {
+          const username = sessionStorage.getItem(`username:${roomId}`) || currentUser;
+          if (username) {
+            setCurrentUser(username);
+            send({ type: "joinRoom", roomId, username });
+          }
+        }}
+        title="Reconnect to room"
+      >
+        Reconnect
+      </Button>
+      <div className="flex flex-col min-w-0">
+        <h1
+          className="font-semibold text-gray-900 truncate max-w-[80px]"
+          title={roomInfo.name || roomId}
+        >
+          {roomInfo.name || roomId}
+        </h1>
+        <p className="text-xs text-gray-500 truncate max-w-[80px]">/{roomId}</p>
+      </div>
+    </div>
+    {/* Right: Avatars and settings always at top right */}
+    <div className="flex items-center gap-2 flex-shrink-0 min-w-0">
+      <div className="flex -space-x-2 max-w-[120px] overflow-hidden">
+        {participants.slice(0, 3).map((participant) => (
+          <div
+            key={participant.username}
+            className="w-8 h-8 bg-blue-500 rounded-full border-2 border-white flex items-center justify-center text-white text-xs font-medium"
+            title={participant.username}
+          >
+            {getInitials(participant.username)}
           </div>
-
-          <div className="flex items-center space-x-2">
-            {/* Participant Avatars */}
-            <div className="flex -space-x-2">
-              {participants.slice(0, 3).map((participant) => (
-                <div
-                  key={participant.username}
-                  className="w-8 h-8 bg-blue-500 rounded-full border-2 border-white flex items-center justify-center text-white text-xs font-medium"
-                  title={participant.username}
-                >
-                  {getInitials(participant.username)}
-                </div>
-              ))}
-              {participants.length > 3 && (
-                <div className="w-8 h-8 bg-gray-400 rounded-full border-2 border-white flex items-center justify-center text-white text-xs">
-                  +{participants.length - 3}
-                </div>
-              )}
-            </div>
-
-            <Button variant="ghost" size="sm" onClick={() => setShowSettings(true)}>
-              <MoreVertical className="h-4 w-4" />
-            </Button>
+        ))}
+        {participants.length > 3 && (
+          <div className="w-8 h-8 bg-gray-400 rounded-full border-2 border-white flex items-center justify-center text-white text-xs">
+            +{participants.length - 3}
           </div>
-        </div>
-      </header>
+        )}
+      </div>
+      <Button variant="ghost" size="sm" onClick={() => setShowSettings(true)}>
+        <MoreVertical className="h-4 w-4" />
+      </Button>
+    </div>
+  </div>
+</header>
 
       {/* Messages */}
       <div ref={chatContainerRef} className="flex-1 overflow-y-auto px-4 py-4 space-y-4" onScroll={handleScroll}>
