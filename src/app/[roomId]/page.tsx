@@ -187,20 +187,19 @@ export default function RoomPage() {
       window.removeEventListener('popstate', () => handleRouteChange(window.location.pathname))
     }
   }, [roomId])
-  
-  if (loading) {
+    if (loading) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
         <div className="text-center">
           <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto mb-4"></div>
           <p className="text-gray-600 mb-4">Loading room...</p>
-          <Button 
-            variant="outline" 
-            onClick={() => window.location.reload()}
-            className="mt-2"
-          >
-            Refresh Page
-          </Button>
+          <div className="flex gap-2 justify-center">
+            <Link href="/">
+              <Button variant="default">
+                Go Back to Home
+              </Button>
+            </Link>
+          </div>
         </div>
       </div>
     )
