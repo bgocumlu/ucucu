@@ -712,17 +712,17 @@ export default function ChatPage() {
   }, [roomId, currentUser, send]);
 
   // --- bfcache/iOS fix: reload page if restored from bfcache (e.g., after PDF preview on iOS) ---
-  useEffect(() => {
-    const handlePageShow = (event: PageTransitionEvent) => {
-      if (event.persisted) {
-        window.location.reload();
-      }
-    };
-    window.addEventListener('pageshow', handlePageShow);
-    return () => {
-      window.removeEventListener('pageshow', handlePageShow);
-    };
-  }, []);
+  // useEffect(() => {
+  //   const handlePageShow = (event: PageTransitionEvent) => {
+  //     if (event.persisted) {
+  //       window.location.reload();
+  //     }
+  //   };
+  //   window.addEventListener('pageshow', handlePageShow);
+  //   return () => {
+  //     window.removeEventListener('pageshow', handlePageShow);
+  //   };
+  // }, []);
 
   return (
     <div className="h-screen bg-white flex flex-col">

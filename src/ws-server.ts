@@ -252,5 +252,5 @@ server.on('request', (req, res) => {
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`WebSocket server 1.4 running on ws://localhost:${PORT}`);
+  console.log(`WebSocket server 1.4.1 running on ws://localhost:${PORT}`);
 });

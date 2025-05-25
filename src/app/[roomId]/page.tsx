@@ -73,10 +73,16 @@ export default function RoomPage() {
       setLoading(false)
     }
   }, [lastMessage, roomId])
-
   useEffect(() => {
     setIsSubmitting(false)
   }, [isConnected])
+
+  const handleKeyPress = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter" && !isSubmitting && !isRoomFull) {
+      e.preventDefault()
+      handleSubmit()
+    }
+  }
 
   const handleSubmit = async () => {
     if (!validateForm()) return;
@@ -274,8 +280,7 @@ export default function RoomPage() {
                 </div>
               )}
 
-              {/* Username */}
-              <div className="space-y-2">
+              {/* Username */}              <div className="space-y-2">
                 <Label htmlFor="username">Your Username</Label>
                 <Input
                   id="username"
@@ -284,6 +289,7 @@ export default function RoomPage() {
                   onChange={(e) => setFormData((prev) => ({ ...prev, username: e.target.value }))}
                   className={errors.username ? "border-red-500" : ""}
                   disabled={isRoomFull}
+                  onKeyDown={handleKeyPress}
                 />
                 {errors.username && <p className="text-sm text-red-500">{errors.username}</p>}
               </div>
@@ -323,8 +329,7 @@ export default function RoomPage() {
               {((roomInfo.exists && roomInfo.locked) || (!roomInfo.exists && formData.requirePassword)) && (
                 <div className="space-y-2">
                   <Label htmlFor="password">{roomInfo.exists ? "Room Password" : "Password"}</Label>
-                  <div className="relative">
-                    <Input
+                  <div className="relative">                    <Input
                       id="password"
                       type={showPassword ? "text" : "password"}
                       placeholder={roomInfo.exists ? "Enter room password" : "Enter room password"}
@@ -332,6 +337,7 @@ export default function RoomPage() {
                       onChange={(e) => setFormData((prev) => ({ ...prev, password: e.target.value }))}
                       className={errors.password ? "border-red-500" : ""}
                       disabled={isRoomFull}
+                      onKeyDown={handleKeyPress}
                     />
                     <Button
                       type="button"
