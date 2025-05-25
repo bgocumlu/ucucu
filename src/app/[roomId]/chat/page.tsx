@@ -729,17 +729,18 @@ export default function ChatPage() {
   }, [roomId, currentUser, send]);
 
   // --- bfcache/iOS fix: reload page if restored from bfcache (e.g., after PDF preview on iOS) ---
-  useEffect(() => {
-    const handlePageShow = (event: PageTransitionEvent) => {
-      if (event.persisted) {
-        window.location.reload();
-      }
-    };
-    window.addEventListener('pageshow', handlePageShow);
-    return () => {
-      window.removeEventListener('pageshow', handlePageShow);
-    };
-  }, []);
+  // useEffect(() => {
+  //   const handlePageShow = (event: PageTransitionEvent) => {
+  //     if (event.persisted) {
+  //       window.location.reload();
+  //     }
+  //   };
+  //   window.addEventListener('pageshow', handlePageShow);
+  //   return () => {
+  //     window.removeEventListener('pageshow', handlePageShow);
+  //   };
+  // }, []);
+  
   // Enhanced connection health monitoring with ping/pong
   useEffect(() => {
     if (!isConnected) {
@@ -806,58 +807,63 @@ export default function ChatPage() {
 
   return (
     <div className="h-screen bg-white flex flex-col">
-      {/* Header */}
-      <header className="bg-white border-b border-gray-200 px-4 py-3 flex-shrink-0">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center space-x-3">
+      {/* Header */}      <header className="bg-white border-b border-gray-200 px-4 py-3 flex-shrink-0">
+        <div className="flex items-center justify-between min-w-0">
+          <div className="flex items-center space-x-3 min-w-0 flex-1">
             <Button variant="destructive" size="sm" onClick={() => setShowLeaveDialog(true)}>
               Leave
-            </Button>            <div>              <div className="flex items-center space-x-2">
-                <h1 className="font-semibold text-gray-900">{roomInfo.name || roomId}</h1>                <Button
-                  variant="ghost"
-                  size="sm"
-                  className={`h-7 px-3 py-1 text-xs border rounded-full transition-all duration-200 font-medium ${
-                    isConnected && isConnectionHealthy
-                      ? 'bg-green-50 hover:bg-green-100 border-green-200 text-green-700 hover:text-green-800' 
-                      : isConnected && !isConnectionHealthy
-                      ? 'bg-yellow-50 hover:bg-yellow-100 border-yellow-200 text-yellow-700 hover:text-yellow-800 animate-pulse'
-                      : 'bg-red-50 hover:bg-red-100 border-red-200 text-red-700 hover:text-red-800 animate-pulse'
-                  }`}                  onClick={() => {
-                    console.log('Manual WebSocket reconnection triggered')
-                    const username = sessionStorage.getItem(`username:${roomId}`) || currentUser;
-                    if (username) {
-                      // Reset connection health states
-                      setIsConnectionHealthy(true)
-                      setPingResponseReceived(true)
-                      setLastMessageTime(new Date())
-                      setLastPingTime(new Date())
-                      
-                      // Re-join the room to re-establish connection
-                      setCurrentUser(username);
-                      send({ type: "joinRoom", roomId, username });
-                      
-                      // Send a health check ping after re-joining
-                      setTimeout(() => {
-                        send({ type: "ping", roomId, username });
-                      }, 500)
-                    }
-                  }}title={
-                    isConnected && isConnectionHealthy 
-                      ? "Connection healthy - Click to reconnect anyway" 
-                      : isConnected && !isConnectionHealthy
-                      ? "Connection issues detected - Click to reconnect"
-                      : "Connection lost - Click to reconnect"
-                  }
-                >
-                  <svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                  </svg>
-                  {isConnected && isConnectionHealthy ? 'Connected' : isConnected && !isConnectionHealthy ? 'Reconnect' : 'Reconnect'}
-                </Button>
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={!isConnected}
+              className={`px-2 py-1 text-xs border rounded transition-all duration-200 font-medium flex-shrink-0 ${
+                isConnected && isConnectionHealthy
+                  ? 'bg-green-50 hover:bg-green-100 border-green-200 text-green-700 hover:text-green-800' 
+                  : isConnected && !isConnectionHealthy
+                  ? 'bg-yellow-50 hover:bg-yellow-100 border-yellow-200 text-yellow-700 hover:text-yellow-800 animate-pulse'
+                  : 'bg-gray-50 border-gray-200 text-gray-500 cursor-not-allowed animate-pulse'
+              }`}
+              onClick={() => {
+                if (!isConnected) return; // Prevent action when disabled
+                console.log('Manual WebSocket reconnection triggered')
+                const username = sessionStorage.getItem(`username:${roomId}`) || currentUser;
+                if (username) {
+                  // Reset connection health states
+                  setIsConnectionHealthy(true)
+                  setPingResponseReceived(true)
+                  setLastMessageTime(new Date())
+                  setLastPingTime(new Date())
+                  
+                  // Re-join the room to re-establish connection
+                  setCurrentUser(username);
+                  send({ type: "joinRoom", roomId, username });
+                  
+                  // Send a health check ping after re-joining
+                  setTimeout(() => {
+                    send({ type: "ping", roomId, username });
+                  }, 500)
+                }
+              }}
+              title={
+                isConnected && isConnectionHealthy 
+                  ? "Connection healthy - Click to reconnect anyway" 
+                  : isConnected && !isConnectionHealthy
+                  ? "Connection issues detected - Click to reconnect"
+                  : "Attempting to reconnect..."
+              }
+            >
+              <svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+              {isConnected && isConnectionHealthy ? 'Connected' : isConnected && !isConnectionHealthy ? 'Reconnect' : 'Offline'}
+            </Button>
+            <div className="min-w-0 flex-1 overflow-hidden">
+              <div className="flex items-center space-x-2">
+                <h1 className="font-semibold text-gray-900 truncate">{roomInfo.name || roomId}</h1>
               </div>
-              <p className="text-xs text-gray-500">/{roomId}</p>
+              <p className="text-xs text-gray-500 truncate">/{roomId}</p>
             </div>
-            
           </div>
 
           <div className="flex items-center space-x-2">
@@ -962,39 +968,10 @@ export default function ChatPage() {
             </Button>
           )}
         </div>        {(!isConnected || !isConnectionHealthy) && (
-          <div className="mt-2 flex items-center space-x-2 text-sm font-medium">
-            {!isConnected ? (
+          <div className="mt-2 flex items-center space-x-2 text-sm font-medium">            {!isConnected ? (
               <>
                 <div className="w-2 h-2 bg-red-600 rounded-full animate-pulse"></div>
-                <span className="text-red-600">Connection lost. Please click the reconnect button.</span>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-6 w-6 p-1 border transition-colors duration-200 bg-red-50 hover:bg-red-100 border-red-200 text-red-700 hover:text-red-800"
-                  onClick={() => {
-                    console.log('Manual WebSocket reconnection triggered from error message button')
-                    const username = sessionStorage.getItem(`username:${roomId}`) || currentUser;
-                    if (username) {
-                      // Reset connection health states
-                      setIsConnectionHealthy(true)
-                      setPingResponseReceived(true)
-                      setLastMessageTime(new Date())
-                      setLastPingTime(new Date())
-                      
-                      // Re-join the room to re-establish connection
-                      setCurrentUser(username);
-                      send({ type: "joinRoom", roomId, username });
-                      
-                      // Send a health check ping after re-joining
-                      setTimeout(() => {
-                        send({ type: "ping", roomId, username });
-                      }, 500)
-                    }
-                  }}
-                  title="Connection lost - Click to reconnect"
-                >
-                  <RefreshCw className="w-3 h-3" />
-                </Button>
+                <span className="text-red-600">Connection lost. Attempting to reconnect...</span>
               </>
             ) : !isConnectionHealthy ? (
               <>

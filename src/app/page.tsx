@@ -12,6 +12,7 @@ import Link from "next/link"
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { useRouter } from "next/navigation"
 import { useWebSocket } from "@/components/WebSocketProvider"
+import { truncateRoomId, MAX_ROOM_ID_LENGTH } from "@/lib/room-limits"
 
 interface Room {
   id: string
@@ -95,12 +96,12 @@ export default function HomePage() {
       clearTimeout(timeoutId)
     }
   }, [roomName, showRoomInput, send])
-
   // Handle room status checking with existing lastMessage
   useEffect(() => {
     if (!checkingRoom || !lastMessage || lastMessage.type !== "rooms") return
 
-    const cleanRoomName = roomName.trim().toLowerCase().replace(/[^a-zA-Z0-9-_]/g, "-")
+    let cleanRoomName = roomName.trim().toLowerCase().replace(/[^a-zA-Z0-9-_]/g, "-")
+    cleanRoomName = truncateRoomId(cleanRoomName)
     const existingRoom = (lastMessage.rooms as Room[]).find((room) => room.id === cleanRoomName)
     
     if (existingRoom) {
@@ -131,14 +132,17 @@ export default function HomePage() {
       .toUpperCase()
       .slice(0, 2)
   }
-
   const handleJoinOrCreateRoom = () => {
     if (!roomName.trim()) return
 
-    const cleanRoomName = roomName
+    let cleanRoomName = roomName
       .trim()
       .toLowerCase()
       .replace(/[^a-zA-Z0-9-_]/g, "-")
+    
+    // Automatically truncate if room ID exceeds maximum length
+    cleanRoomName = truncateRoomId(cleanRoomName)
+    
     router.push(`/${cleanRoomName}`)
     setShowRoomInput(false)
     setRoomName("")
@@ -162,33 +166,10 @@ export default function HomePage() {
       setRoomStatus(null)
       setCheckingRoom(false)
       return
-    }
-
-    setCheckingRoom(true)
+    }    setCheckingRoom(true)
     // Use the existing WebSocket connection to get rooms
     send({ type: "getRooms" })
   }, [roomName, showRoomInput, isConnected, send])
-
-  // Handle room status updates from WebSocket messages
-  useEffect(() => {
-    if (lastMessage?.type === "rooms" && checkingRoom && roomName.trim()) {
-      const cleanRoomName = roomName.trim().toLowerCase().replace(/[^a-zA-Z0-9-_]/g, "-")
-      const existingRoom = (lastMessage.rooms as Room[]).find((room) => room.id === cleanRoomName)
-      
-      if (existingRoom) {
-        setRoomStatus({
-          exists: true,
-          name: existingRoom.name,
-          count: existingRoom.count,
-          maxParticipants: existingRoom.maxParticipants,
-          locked: existingRoom.locked,
-        })
-      } else {
-        setRoomStatus({ exists: false })
-      }
-      setCheckingRoom(false)
-    }
-  }, [lastMessage, checkingRoom, roomName])
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -306,8 +287,7 @@ export default function HomePage() {
           <DialogHeader>
             <DialogTitle>Enter Room Name</DialogTitle>
           </DialogHeader>
-          <div className="space-y-4">
-            <div className="space-y-2">
+          <div className="space-y-4">            <div className="space-y-2">
               <Input
                 placeholder="Enter room name..."
                 value={roomName}
@@ -315,6 +295,17 @@ export default function HomePage() {
                 onKeyPress={handleKeyPress}
                 autoFocus
               />
+              
+              {/* Character limit indicator */}
+              {roomName.trim() && (                <div className="text-xs text-gray-500">
+                  <span>
+                    Room ID will be: /{truncateRoomId(roomName.trim().toLowerCase().replace(/[^a-zA-Z0-9-_]/g, "-"))}
+                    {roomName.trim().toLowerCase().replace(/[^a-zA-Z0-9-_]/g, "-").length > MAX_ROOM_ID_LENGTH && (
+                      <span className="text-orange-600 ml-1">(truncated)</span>
+                    )}
+                  </span>
+                </div>
+              )}
 
               {/* Room Status */}
               {roomName.trim() && (

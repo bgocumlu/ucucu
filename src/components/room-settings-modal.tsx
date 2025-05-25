@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/badge"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Crown, Shield, UserX } from "lucide-react"
+import { MAX_ROOM_NAME_LENGTH } from "@/lib/room-limits"
 
 interface Participant {
   username: string
@@ -87,6 +88,13 @@ export function RoomSettingsModal({ open, onOpenChange, roomId, participants, cu
   // Save changes handler
   const handleSave = async () => {
     if (onUpdateSettings) {
+      // Validate room name length
+      if (roomName.trim().length > MAX_ROOM_NAME_LENGTH) {
+        setSaveError(`Room name is too long. Maximum ${MAX_ROOM_NAME_LENGTH} characters.`)
+        setTimeout(() => setSaveError(null), 5000)
+        return
+      }
+      
       setIsSaving(true)
       setSaveSuccess(false)
       setSaveError(null)
@@ -180,7 +188,13 @@ export function RoomSettingsModal({ open, onOpenChange, roomId, participants, cu
                 onChange={(e) => setRoomName(e.target.value)}
                 disabled={!isOwner}
                 placeholder="Enter room name"
+                maxLength={MAX_ROOM_NAME_LENGTH}
+                className={roomName.length > MAX_ROOM_NAME_LENGTH ? "border-red-500" : ""}
               />
+              {/* Only show error if present, no character count */}
+              {roomName.length > MAX_ROOM_NAME_LENGTH && (
+                <span className="text-red-500 text-xs">Room name is too long.</span>
+              )}
             </div>
 
             <div className="space-y-2">

@@ -1,6 +1,7 @@
 import { WebSocket, WebSocketServer } from 'ws';
 import { createServer } from 'http';
 import bcrypt from 'bcryptjs';
+import { MAX_ROOM_ID_LENGTH, MAX_ROOM_NAME_LENGTH, MAX_USERNAME_LENGTH } from './lib/room-limits';
 
 const PORT = 3001;
 
@@ -55,16 +56,23 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
       if (msg.type === 'getRooms') {
         ws.send(JSON.stringify({ type: 'rooms', rooms: Object.entries(rooms).map(([id, r]) => ({ id, name: r.name, count: r.users.size, maxParticipants: r.maxParticipants, locked: r.locked, visibility: r.visibility })) }));
       } else if (msg.type === 'joinRoom') {
-        const { roomId, username, password } = msg;
-        // Validate username and roomId
-        if (!username || typeof username !== 'string' || username.length < 1 || username.length > 20) {
-          ws.send(JSON.stringify({ type: 'error', error: 'Invalid username. Must be 1-20 characters.' }));
+        const { roomId, username, password } = msg;        // Validate username and roomId
+        if (!username || typeof username !== 'string' || username.length < 1 || username.length > MAX_USERNAME_LENGTH) {
+          ws.send(JSON.stringify({ type: 'error', error: `Invalid username. Must be 1-${MAX_USERNAME_LENGTH} characters.` }));
           return;
         }
-        if (!roomId || typeof roomId !== 'string' || roomId.length < 1 || roomId.length > 40) {
-          ws.send(JSON.stringify({ type: 'error', error: 'Invalid room ID.' }));
+        if (!roomId || typeof roomId !== 'string' || roomId.length < 1 || roomId.length > MAX_ROOM_ID_LENGTH) {
+          ws.send(JSON.stringify({ type: 'error', error: `Invalid room ID. Must be 1-${MAX_ROOM_ID_LENGTH} characters.` }));
           return;
-        }        if (!rooms[roomId]) {
+        }
+        
+        // Validate display name if creating a new room
+        if (!rooms[roomId] && msg.displayName && typeof msg.displayName === 'string') {
+          if (msg.displayName.trim().length > MAX_ROOM_NAME_LENGTH) {
+            ws.send(JSON.stringify({ type: 'error', error: `Room name is too long. Maximum ${MAX_ROOM_NAME_LENGTH} characters.` }));
+            return;
+          }
+        }if (!rooms[roomId]) {
           // Create new room
           const hashedPassword = password ? bcrypt.hashSync(password, 8) : undefined;
           const displayName = typeof msg.displayName === 'string' && msg.displayName.trim().length > 0 ? msg.displayName.trim() : `${roomId}`;
@@ -144,9 +152,15 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
           });
         } else {
           console.log(`[ERROR][SERVER:${PORT}] User "${username}" tried to send file to non-existent room "${roomId}"`);        }} else if (msg.type === 'updateRoomSettings') {
-        const { roomId, username, name, maxParticipants, locked, password, visibility, updateId } = msg;
-        if (rooms[roomId] && rooms[roomId].owner === username) {
+        const { roomId, username, name, maxParticipants, locked, password, visibility, updateId } = msg;        if (rooms[roomId] && rooms[roomId].owner === username) {
           console.log(`[SETTINGS][SERVER:${PORT}] User "${username}" updating settings for room "${roomId}"`);
+            // Validate room name length
+          if (typeof name === 'string' && name.trim().length > MAX_ROOM_NAME_LENGTH) {
+            console.log(`[ERROR][SERVER:${PORT}] User "${username}" tried to set room name longer than ${MAX_ROOM_NAME_LENGTH} characters in room "${roomId}"`);
+            ws.send(JSON.stringify({ type: 'error', error: `Room name is too long. Maximum ${MAX_ROOM_NAME_LENGTH} characters.` }));
+            return;
+          }
+          
           // Prevent setting maxParticipants lower than current user count
           if (typeof maxParticipants === 'number') {
             if (maxParticipants < rooms[roomId].users.size) {

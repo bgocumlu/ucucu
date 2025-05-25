@@ -12,6 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { ArrowLeft, Users, Lock, Eye, EyeOff } from "lucide-react"
 import Link from "next/link"
 import { useWebSocket } from "@/components/WebSocketProvider"
+import { truncateRoomId, MAX_ROOM_NAME_LENGTH, MAX_USERNAME_LENGTH } from "@/lib/room-limits"
 
 interface RoomInfo {
   id: string
@@ -25,7 +26,16 @@ interface RoomInfo {
 export default function RoomPage() {
   const params = useParams()
   const router = useRouter()
-  const roomId = params.roomId as string
+  const originalRoomId = params.roomId as string
+  const roomId = truncateRoomId(originalRoomId)
+
+  // Redirect if room ID was truncated
+  useEffect(() => {
+    if (originalRoomId !== roomId) {
+      router.replace(`/${roomId}`)
+      return
+    }
+  }, [originalRoomId, roomId, router])
 
   const [roomInfo, setRoomInfo] = useState<RoomInfo | null>(null)
   const [loading, setLoading] = useState(true)
@@ -43,10 +53,13 @@ export default function RoomPage() {
   const { send, lastMessage, isConnected, setOnMessage } = useWebSocket()
 
   useEffect(() => {
+    // Only proceed if room ID wasn't truncated (to avoid double requests)
+    if (originalRoomId !== roomId) return
+    
     setLoading(true)
     send({ type: "getRooms" })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [roomId])
+  }, [roomId, originalRoomId])
 
   useEffect(() => {
     if (lastMessage && lastMessage.type === "rooms") {
@@ -153,8 +166,12 @@ export default function RoomPage() {
 
     if (!formData.username.trim()) {
       newErrors.username = "Username is required"
-    } else if (formData.username.length < 1 || formData.username.length > 20) {
-      newErrors.username = "Username must be 1-20 characters"
+    } else if (formData.username.length < 1 || formData.username.length > MAX_USERNAME_LENGTH) {
+      newErrors.username = `Username must be 1-${MAX_USERNAME_LENGTH} characters`
+    }
+
+    if (!roomInfo?.exists && formData.displayName.trim().length > MAX_ROOM_NAME_LENGTH) {
+      newErrors.displayName = `Room name must be ${MAX_ROOM_NAME_LENGTH} characters or less`
     }
 
     if (roomInfo?.exists && roomInfo.locked && !formData.password) {
@@ -279,27 +296,41 @@ export default function RoomPage() {
                 <Label htmlFor="username">Your Username</Label>
                 <Input
                   id="username"
-                  placeholder="Enter your username (1-20 characters)"
+                  placeholder={`Enter your username (1-${MAX_USERNAME_LENGTH} characters)`}
                   value={formData.username}
                   onChange={(e) => setFormData((prev) => ({ ...prev, username: e.target.value }))}
+                  onKeyPress={(e) => {
+                    if (e.key === "Enter") {
+                      handleSubmit()
+                    }
+                  }}
                   className={errors.username ? "border-red-500" : ""}
                   disabled={isRoomFull}
+                  maxLength={MAX_USERNAME_LENGTH}
                 />
-                {errors.username && <p className="text-sm text-red-500">{errors.username}</p>}
+                {errors.username && <span className="text-red-500 text-xs">{errors.username}</span>}
               </div>
 
               {/* Display Name (only for create) */}
-              {/* {!roomInfo.exists && (
+              {!roomInfo.exists && (
                 <div className="space-y-2">
                   <Label htmlFor="displayName">Display Name (Optional)</Label>
                   <Input
                     id="displayName"
-                    placeholder="My Awesome Room"
+                    placeholder={`My Awesome Room (max ${MAX_ROOM_NAME_LENGTH} characters)`}
                     value={formData.displayName}
                     onChange={(e) => setFormData((prev) => ({ ...prev, displayName: e.target.value }))}
+                    onKeyPress={(e) => {
+                      if (e.key === "Enter") {
+                        handleSubmit()
+                      }
+                    }}
+                    className={errors.displayName ? "border-red-500" : ""}
+                    maxLength={MAX_ROOM_NAME_LENGTH}
                   />
+                  {errors.displayName && <span className="text-red-500 text-xs">{errors.displayName}</span>}
                 </div>
-              )} */}
+              )}
 
               {/* Password Toggle (only for create) */}
               {!roomInfo.exists && (
@@ -330,6 +361,11 @@ export default function RoomPage() {
                       placeholder={roomInfo.exists ? "Enter room password" : "Enter room password"}
                       value={formData.password}
                       onChange={(e) => setFormData((prev) => ({ ...prev, password: e.target.value }))}
+                      onKeyPress={(e) => {
+                        if (e.key === "Enter") {
+                          handleSubmit()
+                        }
+                      }}
                       className={errors.password ? "border-red-500" : ""}
                       disabled={isRoomFull}
                     />
