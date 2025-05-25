@@ -73,6 +73,16 @@ export default function ChatPage() {
     send({ type: "joinRoom", roomId, username })
   }, [roomId, send, router])
 
+  // Always join room on (re)connect
+  useEffect(() => {
+    if (!isConnected) return;
+    // Always get username from sessionStorage (authoritative)
+    const username = sessionStorage.getItem(`username:${roomId}`) || "";
+    if (!username) return;
+    setCurrentUser(username);
+    send({ type: "joinRoom", roomId, username });
+  }, [isConnected, roomId, send]);
+
   // Track room owner and info for RoomSettingsModal
   const [roomOwner, setRoomOwner] = useState<string>("")
   const [roomInfo, setRoomInfo] = useState<{

@@ -224,37 +224,39 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
       ws.send(JSON.stringify({ type: 'error', error: 'Invalid message' }));
     }
   });  ws.on('close', () => {
-    if (typeof joinedRoom === 'string' && joinedUser && joinedRoom in rooms && rooms[joinedRoom]) {
-      console.log(`[LEAVE][SERVER:${PORT}] User "${joinedUser}" left room "${joinedRoom}" (${rooms[joinedRoom].users.size - 1}/${rooms[joinedRoom].maxParticipants} users remaining)`);
-      rooms[joinedRoom].users.delete(joinedUser);
-      
+    // Use both local and ws properties to ensure cleanup
+    const roomToLeave = ws.joinedRoom || joinedRoom;
+    const userToRemove = ws.joinedUser || joinedUser;
+    if (typeof roomToLeave === 'string' && userToRemove && rooms[roomToLeave]) {
+      console.log(`[LEAVE][SERVER:${PORT}] User "${userToRemove}" left room "${roomToLeave}" (${rooms[roomToLeave].users.size - 1}/${rooms[roomToLeave].maxParticipants} users remaining)`);
+      rooms[roomToLeave].users.delete(userToRemove);
       // Clear the WebSocket's room info before broadcasting to avoid including the leaving client
       ws.joinedRoom = undefined;
       ws.joinedUser = undefined;
-      
+      joinedRoom = null;
+      joinedUser = null;
       // Broadcast leave notification message (system message, only to remaining clients in the room)
-      const leaveMsg = { username: '', text: `${joinedUser} left the chat.`, timestamp: Date.now(), system: true };
-      const usersArr = Array.from(rooms[joinedRoom].users);
-      
-      getClientsInRoom(joinedRoom).forEach((client) => {
-        if (client.readyState === 1 && joinedRoom) {
+      const leaveMsg = { username: '', text: `${userToRemove} left the chat.`, timestamp: Date.now(), system: true };
+      const usersArr = Array.from(rooms[roomToLeave].users);
+      getClientsInRoom(roomToLeave).forEach((client) => {
+        if (client.readyState === 1 && roomToLeave) {
           const clientUser = (client as WebSocket & { joinedUser?: string }).joinedUser || 'unknown';
-          console.log(`[BROADCAST][SERVER:${PORT}] Sending leave notification and roomInfo to user "${clientUser}" in room "${joinedRoom}"`);
-          client.send(JSON.stringify({ type: 'newMessage', roomId: joinedRoom, message: leaveMsg }));
-          client.send(JSON.stringify({ type: 'roomInfo', room: { id: joinedRoom, name: rooms[joinedRoom].name, count: rooms[joinedRoom].users.size, maxParticipants: rooms[joinedRoom].maxParticipants, locked: rooms[joinedRoom].locked, visibility: rooms[joinedRoom].visibility, exists: true, owner: rooms[joinedRoom].owner, users: usersArr } }));
+          console.log(`[BROADCAST][SERVER:${PORT}] Sending leave notification and roomInfo to user "${clientUser}" in room "${roomToLeave}"`);
+          client.send(JSON.stringify({ type: 'newMessage', roomId: roomToLeave, message: leaveMsg }));
+          client.send(JSON.stringify({ type: 'roomInfo', room: { id: roomToLeave, name: rooms[roomToLeave].name, count: rooms[roomToLeave].users.size, maxParticipants: rooms[roomToLeave].maxParticipants, locked: rooms[roomToLeave].locked, visibility: rooms[roomToLeave].visibility, exists: true, owner: rooms[roomToLeave].owner, users: usersArr } }));
         }
       });
       broadcastRooms(); // Broadcast participant count change
       // Delete room if no participants left
-      if (rooms[joinedRoom].users.size === 0) {
-        console.log(`[ROOM][SERVER:${PORT}] Room "${joinedRoom}" deleted (no users remaining)`);
-        delete rooms[joinedRoom];
+      if (rooms[roomToLeave].users.size === 0) {
+        console.log(`[ROOM][SERVER:${PORT}] Room "${roomToLeave}" deleted (no users remaining)`);
+        delete rooms[roomToLeave];
         broadcastRooms(); // Broadcast room deletion
       }
     } else {
       // Handle disconnection of clients not in a room
-      const user = joinedUser || 'unknown';
-      const room = joinedRoom || 'none';
+      const user = ws.joinedUser || joinedUser || 'unknown';
+      const room = ws.joinedRoom || joinedRoom || 'none';
       console.log(`[DISCONNECT][SERVER:${PORT}] Client disconnected (user: "${user}", room: "${room}")`);
     }
   });
