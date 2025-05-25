@@ -1,6 +1,7 @@
 import { WebSocket, WebSocketServer } from 'ws';
 import { createServer } from 'http';
 import bcrypt from 'bcryptjs';
+import { aiService } from './ai-service';
 
 const PORT = 3001;
 
@@ -106,16 +107,87 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
           }
         });
         // Also send roomInfo to the joining client (in case not included above)
-        ws.send(JSON.stringify({ type: 'roomInfo', room: { id: roomId, name: rooms[roomId].name, count: rooms[roomId].users.size, maxParticipants: rooms[roomId].maxParticipants, locked: rooms[roomId].locked, visibility: rooms[roomId].visibility, exists: true, owner: rooms[roomId].owner, users: usersArr } }));
-      } else if (msg.type === 'sendMessage') {
+        ws.send(JSON.stringify({ type: 'roomInfo', room: { id: roomId, name: rooms[roomId].name, count: rooms[roomId].users.size, maxParticipants: rooms[roomId].maxParticipants, locked: rooms[roomId].locked, visibility: rooms[roomId].visibility, exists: true, owner: rooms[roomId].owner, users: usersArr } }));      } else if (msg.type === 'sendMessage') {
         const { roomId, username, text } = msg;
         const message = { username, text, timestamp: Date.now() };
+        
         if (rooms[roomId]) {
-          getClientsInRoom(roomId).forEach((client) => {
-            if (client.readyState === 1) {
-              client.send(JSON.stringify({ type: 'newMessage', roomId, message }));
-            }
-          });
+          // Check if this is an AI command
+          if (text.trim().startsWith('/ai ')) {
+            const aiPrompt = text.trim().substring(4).trim(); // Remove '/ai ' prefix
+            
+            if (aiPrompt.length === 0) {
+              // Send usage instructions
+              const helpMessage = { 
+                username: 'System', 
+                text: '🤖 Usage: /ai [your message]\nExample: /ai How are you today?', 
+                timestamp: Date.now(),
+                system: true
+              };
+              
+              getClientsInRoom(roomId).forEach((client) => {
+                if (client.readyState === 1) {
+                  client.send(JSON.stringify({ type: 'newMessage', roomId, message: helpMessage }));
+                }
+              });
+              return;
+            }            // Send the user's AI command message first
+            getClientsInRoom(roomId).forEach((client) => {
+              if (client.readyState === 1) {
+                client.send(JSON.stringify({ type: 'newMessage', roomId, message }));
+              }
+            });            // Send typing indicator for AI response
+            const typingMessage = { 
+              username: `Gizli AI → ${username}`, 
+              text: '🤖 Thinking...', 
+              timestamp: Date.now(),
+              isAI: true,
+              isTyping: true
+            };
+            
+            getClientsInRoom(roomId).forEach((client) => {
+              if (client.readyState === 1) {
+                client.send(JSON.stringify({ type: 'newMessage', roomId, message: typingMessage }));
+              }
+            });
+
+            // Process AI request asynchronously
+            aiService.chat(aiPrompt, username).then((aiResponse) => {
+              const aiMessage = { 
+                username: `Gizli AI → ${username}`, 
+                text: aiResponse, 
+                timestamp: Date.now(),
+                isAI: true  // Special flag to identify AI messages
+              };
+              
+              getClientsInRoom(roomId).forEach((client) => {
+                if (client.readyState === 1) {
+                  client.send(JSON.stringify({ type: 'newMessage', roomId, message: aiMessage }));
+                }
+              });
+            }).catch((error) => {
+              console.error('[AI Service] Error processing AI request:', error);
+              const errorMessage = { 
+                username: `Gizli AI → ${username}`, 
+                text: '🤖 Sorry, I encountered an error while processing your request. Please try again.', 
+                timestamp: Date.now(),
+                isAI: true
+              };
+              
+              getClientsInRoom(roomId).forEach((client) => {
+                if (client.readyState === 1) {
+                  client.send(JSON.stringify({ type: 'newMessage', roomId, message: errorMessage }));
+                }
+              });
+            });
+          } else {
+            // Regular message handling
+            getClientsInRoom(roomId).forEach((client) => {
+              if (client.readyState === 1) {
+                client.send(JSON.stringify({ type: 'newMessage', roomId, message }));
+              }
+            });
+          }
         }
       } else if (msg.type === 'sendFile') {
         const { roomId, username, fileName, fileType, fileData, timestamp, asAudio } = msg;
@@ -292,5 +364,5 @@ server.on('request', (req, res) => {
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`WebSocket server 1.4.2 running on ws://localhost:${PORT}`);
+  console.log(`WebSocket server 1.4.3 running on ws://localhost:${PORT}`);
 });

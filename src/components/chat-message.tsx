@@ -13,6 +13,7 @@ interface Message {
   isOwn: boolean
   fileData?: string // base64 data
   fileName?: string // optional file name
+  isAI?: boolean // Flag to identify AI messages
 }
 
 interface ChatMessageProps {
@@ -59,7 +60,6 @@ export function ChatMessage({ message, currentUser }: ChatMessageProps & { curre
       </div>
     )
   }
-
   return (
     <div className={`flex ${message.isOwn ? "justify-end" : "justify-start"}`}>
       <div className={`flex space-x-2 max-w-full ${message.isOwn ? "flex-row-reverse space-x-reverse" : ""}`}>
@@ -69,13 +69,17 @@ export function ChatMessage({ message, currentUser }: ChatMessageProps & { curre
           <span className="text-xs text-gray-600 mb-1 px-1">{message.username}</span>
           {/* Message Bubble */}
           <div
-            className={`rounded-lg px-3 py-2 inline-block`}
+            className={`rounded-lg px-3 py-2 inline-block ${message.isAI ? 'border-2 border-purple-300' : ''}`}
             style={{
               wordBreak: 'break-word',
               overflowWrap: 'break-word',
               maxWidth: '100%',
-              background: message.isOwn ? '#3b82f6' : stringToColor(message.username),
-              color: message.isOwn ? 'white' : '#222',
+              background: message.isAI 
+                ? 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)' 
+                : message.isOwn 
+                  ? '#3b82f6' 
+                  : stringToColor(message.username),
+              color: message.isAI || message.isOwn ? 'white' : '#222',
             }}
           >
             {message.type === "text" && <p className="text-sm whitespace-pre-wrap break-words">{message.content}</p>}

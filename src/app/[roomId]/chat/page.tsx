@@ -22,6 +22,7 @@ interface Message {
   isOwn: boolean
   fileData?: string
   fileName?: string
+  isAI?: boolean  // Flag to identify AI messages
 }
 
 interface Participant {
@@ -55,7 +56,6 @@ export default function ChatPage() {
     timeout: NodeJS.Timeout
   } | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
-
   // Join room on mount
   useEffect(() => {
     // Only get username from sessionStorage, never prompt
@@ -66,7 +66,10 @@ export default function ChatPage() {
     }
     setCurrentUser(username)
     send({ type: "joinRoom", roomId, username })
-  }, [roomId, send, router])  // Track room owner and info for RoomSettingsModal
+
+    // Add welcome message with AI instructions    // Initialize empty messages
+    setMessages([])
+  }, [roomId, send, router])// Track room owner and info for RoomSettingsModal
   const [roomOwner, setRoomOwner] = useState<string>("")
   const [roomInfo, setRoomInfo] = useState<{
     name?: string
@@ -92,10 +95,9 @@ export default function ChatPage() {
             isOwn: msg.username === currentUser,
           }))
       )
-    }
-    if (lastMessage.type === "newMessage" && lastMessage.roomId === roomId) {
+    }    if (lastMessage.type === "newMessage" && lastMessage.roomId === roomId) {
       type IncomingMsg =
-        | { username: string; text: string; timestamp: number; system?: boolean; type?: undefined }
+        | { username: string; text: string; timestamp: number; system?: boolean; isAI?: boolean; isTyping?: boolean; type?: undefined }
         | { username: string; fileName: string; fileType: string; fileData: string; timestamp: number; type: "file"; asAudio?: boolean };
       const msg = lastMessage.message as IncomingMsg;
       if (msg.type === "file" && (msg.asAudio || (msg.fileType && msg.fileType.startsWith('audio/')))) {
@@ -125,20 +127,68 @@ export default function ChatPage() {
             fileData: msg.fileData,
             fileName: msg.fileName,
           },
-        ]);
-      } else {
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: msg.timestamp.toString(),
-            type: msg.system ? "system" : "text",
-            username: msg.username,
-            content: msg.text,
-            timestamp: new Date(msg.timestamp),
-            isOwn: msg.username === currentUser,
-          },
-        ]);
-      }    }    // Prefer roomInfo for participants if available
+        ]);      } else {
+        // Handle regular text messages (including AI messages)
+        const msg = lastMessage.message as { 
+          username: string; 
+          text: string; 
+          timestamp: number; 
+          system?: boolean; 
+          isAI?: boolean; 
+          isTyping?: boolean; 
+        };
+        
+        // Handle AI typing indicator
+        if (msg.isAI && msg.isTyping) {
+          // Remove any existing typing message and add new one
+          setMessages((prev) => {
+            const withoutTyping = prev.filter(m => !(m.isAI && m.content.includes('Thinking')));
+            return [
+              ...withoutTyping,
+              {
+                id: `typing-${msg.timestamp}`,
+                type: "text" as const,
+                username: msg.username,
+                content: msg.text,
+                timestamp: new Date(msg.timestamp),
+                isOwn: false,
+                isAI: true,
+              },
+            ];
+          });
+        } else if (msg.isAI && !msg.isTyping) {
+          // Replace typing indicator with actual AI response
+          setMessages((prev) => {
+            const withoutTyping = prev.filter(m => !(m.isAI && m.content.includes('Thinking')));
+            return [
+              ...withoutTyping,
+              {
+                id: msg.timestamp.toString(),
+                type: msg.system ? "system" : "text",
+                username: msg.username,
+                content: msg.text,
+                timestamp: new Date(msg.timestamp),
+                isOwn: msg.username === currentUser,
+                isAI: true,
+              },
+            ];
+          });
+        } else {
+          // Regular message handling
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: msg.timestamp.toString(),
+              type: msg.system ? "system" : "text",
+              username: msg.username,
+              content: msg.text,
+              timestamp: new Date(msg.timestamp),
+              isOwn: msg.username === currentUser,
+              isAI: msg.isAI || false,
+            },
+          ]);
+        }
+      }}    // Prefer roomInfo for participants if available
     if (lastMessage.type === "roomInfo" && lastMessage.room && (lastMessage.room as RoomInfoMsg).id === roomId) {
       const info = lastMessage.room as RoomInfoMsg & { users?: string[]; visibility?: 'public' | 'private' }
       setRoomOwner(info.owner || "")
