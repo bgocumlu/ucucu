@@ -747,7 +747,7 @@ export default function ChatPage() {
             // Then send join message after a small delay
             setTimeout(() => {
               send({ type: "joinRoom", roomId, username });
-            }, 100);
+            }, 1000);
           }
         }}
         title="Reconnect to room"
