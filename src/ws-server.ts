@@ -129,7 +129,7 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
             }
           });
         }      } else if (msg.type === 'updateRoomSettings') {
-        const { roomId, username, name, maxParticipants, locked, password, visibility } = msg;
+        const { roomId, username, name, maxParticipants, locked, password, visibility, updateId } = msg;
         if (rooms[roomId] && rooms[roomId].owner === username) {
           // Prevent setting maxParticipants lower than current user count
           if (typeof maxParticipants === 'number') {
@@ -151,11 +151,26 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
           if (password === '') {
             rooms[roomId].password = undefined;
             rooms[roomId].locked = false;
-          }
-          // Broadcast updated roomInfo (with users)
+          }          // Broadcast updated roomInfo (with users)
           const usersArr = Array.from(rooms[roomId].users);          getClientsInRoom(roomId).forEach((client) => {
             if (client.readyState === 1) {
-              client.send(JSON.stringify({ type: 'roomInfo', room: { id: roomId, name: rooms[roomId].name, count: rooms[roomId].users.size, maxParticipants: rooms[roomId].maxParticipants, locked: rooms[roomId].locked, visibility: rooms[roomId].visibility, exists: true, owner: rooms[roomId].owner, users: usersArr } }));
+              interface RoomInfo {
+                id: string;
+                name: string;
+                count: number;
+                maxParticipants: number;
+                locked: boolean;
+                visibility: 'public' | 'private';
+                exists: boolean;
+                owner?: string;
+                users: string[];
+              }
+              const roomInfoMsg: { type: string; room: RoomInfo; updateId?: string } = { type: 'roomInfo', room: { id: roomId, name: rooms[roomId].name, count: rooms[roomId].users.size, maxParticipants: rooms[roomId].maxParticipants, locked: rooms[roomId].locked, visibility: rooms[roomId].visibility, exists: true, owner: rooms[roomId].owner, users: usersArr } };
+              // Include updateId for the client that initiated the update
+              if (client === ws && updateId) {
+                roomInfoMsg.updateId = updateId;
+              }
+              client.send(JSON.stringify(roomInfoMsg));
             }
           });
           // Broadcast updated rooms list to all clients (visibility change affects public listing)

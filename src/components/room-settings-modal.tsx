@@ -36,20 +36,33 @@ export function RoomSettingsModal({ open, onOpenChange, roomId, participants, cu
   const [maxParticipants, setMaxParticipants] = useState("10")
   const [newPassword, setNewPassword] = useState("")
   const [visibility, setVisibility] = useState<string>('public')
+  const [isSaving, setIsSaving] = useState(false)
+  const [saveSuccess, setSaveSuccess] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
 
   // Sync local state with props when modal opens or when roomInfo changes
+  // But only if we're not currently saving to avoid overwriting user changes
   useEffect(() => {
-    if (open && roomInfo) {
+    if (open && roomInfo && !isSaving) {
       setRoomName(roomInfo.name || roomId)
       setMaxParticipants(String(roomInfo.maxParticipants || 10))
       setVisibility(roomInfo.visibility || 'public')
-    } else if (open) {
+    } else if (open && !roomInfo && !isSaving) {
       // Fallback if no roomInfo provided
       setRoomName(roomId)
       setMaxParticipants("10")
       setVisibility('public')
     }
-  }, [open, roomId, roomInfo])
+  }, [open, roomId, roomInfo, isSaving])
+
+  // Reset feedback states when modal opens
+  useEffect(() => {
+    if (open) {
+      setSaveSuccess(false)
+      setSaveError(null)
+      setIsSaving(false)
+    }
+  }, [open])
 
   const currentUserData = participants.find((p) => p.username === currentUser)
   const isOwner = owner ? currentUser === owner : currentUserData?.isOwner || false
@@ -72,38 +85,69 @@ export function RoomSettingsModal({ open, onOpenChange, roomId, participants, cu
   const displayRoomName = roomName || roomId
 
   // Save changes handler
-  const handleSave = () => {
+  const handleSave = async () => {
     if (onUpdateSettings) {
-      onUpdateSettings({ 
-        name: roomName || roomId, 
-        maxParticipants: Number(maxParticipants), 
-        visibility: visibility as 'public' | 'private' 
-      })
+      setIsSaving(true)
+      setSaveSuccess(false)
+      setSaveError(null)
+      
+      try {
+        await onUpdateSettings({ 
+          name: roomName || roomId, 
+          maxParticipants: Number(maxParticipants), 
+          visibility: visibility as 'public' | 'private' 
+        })
+        
+        // Show success feedback
+        setSaveSuccess(true)
+        setTimeout(() => setSaveSuccess(false), 3000)
+      } catch (error) {
+        setSaveError(error instanceof Error ? error.message : 'Failed to save changes')
+        setTimeout(() => setSaveError(null), 5000)
+      } finally {
+        setIsSaving(false)
+      }
     }
   }
   
-  const handleUpdateSecurity = () => {
+  const handleUpdateSecurity = async () => {
     if (onUpdateSettings) {
-      const updates: { 
-        maxParticipants: number; 
-        visibility: 'public' | 'private';
-        password?: string;
-        locked?: boolean;
-      } = { 
-        maxParticipants: Number(maxParticipants), 
-        visibility: visibility as 'public' | 'private' 
-      }
+      setIsSaving(true)
+      setSaveSuccess(false)
+      setSaveError(null)
       
-      // Handle password updates
-      if (newPassword.trim()) {
-        updates.password = newPassword.trim()
-        updates.locked = true
-      } else if (newPassword === '') {
-        updates.password = ''
-        updates.locked = false
+      try {
+        const updates: { 
+          maxParticipants: number; 
+          visibility: 'public' | 'private';
+          password?: string;
+          locked?: boolean;
+        } = { 
+          maxParticipants: Number(maxParticipants), 
+          visibility: visibility as 'public' | 'private' 
+        }
+        
+        // Handle password updates
+        if (newPassword.trim()) {
+          updates.password = newPassword.trim()
+          updates.locked = true
+        } else if (newPassword === '') {
+          updates.password = ''
+          updates.locked = false
+        }
+        
+        await onUpdateSettings(updates)
+        
+        // Show success feedback and clear password field
+        setSaveSuccess(true)
+        setNewPassword('')
+        setTimeout(() => setSaveSuccess(false), 3000)
+      } catch (error) {
+        setSaveError(error instanceof Error ? error.message : 'Failed to update security settings')
+        setTimeout(() => setSaveError(null), 5000)
+      } finally {
+        setIsSaving(false)
       }
-      
-      onUpdateSettings(updates)
     }
   }
 
@@ -162,7 +206,37 @@ export function RoomSettingsModal({ open, onOpenChange, roomId, participants, cu
                 Room creator: <span className="font-semibold">{owner}</span>
               </div>
             )}
-            {isOwner && <Button className="w-full" onClick={handleSave}>Save Changes</Button>}
+            
+            {/* Feedback Messages */}
+            {saveSuccess && (
+              <div className="p-3 bg-green-50 border border-green-200 rounded-md">
+                <div className="flex">
+                  <div className="text-sm text-green-800">
+                    ✓ Settings saved successfully!
+                  </div>
+                </div>
+              </div>
+            )}
+            
+            {saveError && (
+              <div className="p-3 bg-red-50 border border-red-200 rounded-md">
+                <div className="flex">
+                  <div className="text-sm text-red-800">
+                    ✗ {saveError}
+                  </div>
+                </div>
+              </div>
+            )}
+            
+            {isOwner && (
+              <Button 
+                className="w-full" 
+                onClick={handleSave}
+                disabled={isSaving}
+              >
+                {isSaving ? 'Saving...' : 'Save Changes'}
+              </Button>
+            )}
             {!isOwner && (
               <div className="text-center text-gray-500 text-sm py-4">
                 Only the room owner can edit room info
@@ -201,7 +275,34 @@ export function RoomSettingsModal({ open, onOpenChange, roomId, participants, cu
                   />
                 </div>
 
-                <Button className="w-full" onClick={handleUpdateSecurity}>Update Security Settings</Button>
+                {/* Security Feedback Messages */}
+                {saveSuccess && (
+                  <div className="p-3 bg-green-50 border border-green-200 rounded-md">
+                    <div className="flex">
+                      <div className="text-sm text-green-800">
+                        ✓ Security settings updated successfully!
+                      </div>
+                    </div>
+                  </div>
+                )}
+                
+                {saveError && (
+                  <div className="p-3 bg-red-50 border border-red-200 rounded-md">
+                    <div className="flex">
+                      <div className="text-sm text-red-800">
+                        ✗ {saveError}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                <Button 
+                  className="w-full" 
+                  onClick={handleUpdateSecurity}
+                  disabled={isSaving}
+                >
+                  {isSaving ? 'Updating...' : 'Update Security Settings'}
+                </Button>
               </>
             )}
 

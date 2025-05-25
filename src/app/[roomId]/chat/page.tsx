@@ -46,9 +46,14 @@ export default function ChatPage() {
   const [isAtBottom, setIsAtBottom] = useState(true)
   const [isRecording, setIsRecording] = useState(false)
   const [showLeaveDialog, setShowLeaveDialog] = useState(false)
-
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const chatContainerRef = useRef<HTMLDivElement>(null)
+  const pendingUpdateRef = useRef<{
+    updateId: string
+    resolve: () => void
+    reject: (error: Error) => void
+    timeout: NodeJS.Timeout
+  } | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   // Join room on mount
@@ -61,8 +66,7 @@ export default function ChatPage() {
     }
     setCurrentUser(username)
     send({ type: "joinRoom", roomId, username })
-  }, [roomId, send, router])
-  // Track room owner and info for RoomSettingsModal
+  }, [roomId, send, router])  // Track room owner and info for RoomSettingsModal
   const [roomOwner, setRoomOwner] = useState<string>("")
   const [roomInfo, setRoomInfo] = useState<{
     name?: string
@@ -70,6 +74,7 @@ export default function ChatPage() {
     locked?: boolean
     visibility?: 'public' | 'private'
   }>({})
+  const [pendingUpdate, setPendingUpdate] = useState<string | null>(null)
 
   // Listen for messages and participants
   useEffect(() => {
@@ -133,19 +138,32 @@ export default function ChatPage() {
             isOwn: msg.username === currentUser,
           },
         ]);
-      }
-    }    // Prefer roomInfo for participants if available
+      }    }    // Prefer roomInfo for participants if available
     if (lastMessage.type === "roomInfo" && lastMessage.room && (lastMessage.room as RoomInfoMsg).id === roomId) {
       const info = lastMessage.room as RoomInfoMsg & { users?: string[]; visibility?: 'public' | 'private' }
       setRoomOwner(info.owner || "")
+        // Check if this is a response to a pending room update from current user
+      const isResponseToPendingUpdate = pendingUpdateRef.current && (lastMessage as { updateId?: string }).updateId === pendingUpdateRef.current.updateId;
       
-      // Update room info for settings modal
-      setRoomInfo({
-        name: info.name,
-        maxParticipants: info.maxParticipants,
-        locked: info.locked,
-        visibility: info.visibility || 'public'
-      })
+      if (isResponseToPendingUpdate && pendingUpdateRef.current) {
+        // This is a response to our own update request
+        clearTimeout(pendingUpdateRef.current.timeout)
+        setPendingUpdate(null)
+        pendingUpdateRef.current.resolve()
+        pendingUpdateRef.current = null
+      }
+      
+      // Always update room info for live updates, unless we have a pending update AND this isn't the response to it
+      const shouldUpdateRoomInfo = !pendingUpdate || isResponseToPendingUpdate;
+      
+      if (shouldUpdateRoomInfo) {
+        setRoomInfo({
+          name: info.name,
+          maxParticipants: info.maxParticipants,
+          locked: info.locked,
+          visibility: info.visibility || 'public'
+        })
+      }
       
       if (info.users && Array.isArray(info.users)) {
         setParticipants(
@@ -154,7 +172,12 @@ export default function ChatPage() {
             isOwner: info.owner ? username === info.owner : false,
           }))
         )
-      }
+      }    } else if (lastMessage.type === "error" && pendingUpdateRef.current) {
+      // Handle errors for room updates
+      clearTimeout(pendingUpdateRef.current.timeout)
+      setPendingUpdate(null)
+      pendingUpdateRef.current.reject(new Error(String(lastMessage.error) || 'Failed to update room settings'))
+      pendingUpdateRef.current = null
     } else if (lastMessage.type === "rooms" && Array.isArray(lastMessage.rooms)) {
       type Room = { id: string; name: string; users?: string[]; owner?: string }
       const found = (lastMessage.rooms as Room[]).find((r) => r.id === roomId)
@@ -166,14 +189,7 @@ export default function ChatPage() {
           }))
         )
       }
-    }
-  }, [lastMessage, roomId, currentUser])
-  // Add handler for updating room settings (owner only)
-  const handleUpdateRoomSettings = (settings: { name?: string; maxParticipants?: number; locked?: boolean; visibility?: 'public' | 'private'; password?: string }) => {
-    if (currentUser && roomOwner === currentUser) {
-      send({ type: "updateRoomSettings", roomId, username: currentUser, ...settings })
-    }
-  }
+    }  }, [lastMessage, roomId, currentUser, pendingUpdate])
 
   // Auto-scroll to bottom
   useEffect(() => {
@@ -625,7 +641,6 @@ export default function ChatPage() {
       window.removeEventListener('popstate', () => handleRouteChange(window.location.pathname))
     }
   }, [roomId])
-
   const handleLeaveRoom = () => {
     // Optionally send a leave event here if you want to notify the server
     // (not strictly needed, as ws.onclose will fire on navigation)
@@ -634,6 +649,51 @@ export default function ChatPage() {
     }
     router.replace("/");
     setTimeout(() => {window.location.reload();}, 300); // Small delay to ensure the page unloads properly
+  };
+
+  const handleUpdateRoomSettings = async (settings: { 
+    name?: string; 
+    maxParticipants?: number; 
+    locked?: boolean; 
+    visibility?: 'public' | 'private'; 
+    password?: string 
+  }): Promise<void> => {
+    return new Promise((resolve, reject) => {
+      const updateId = Math.random().toString(36).substr(2, 9);
+      
+      // Clean up any existing pending update
+      if (pendingUpdateRef.current) {
+        clearTimeout(pendingUpdateRef.current.timeout);
+        pendingUpdateRef.current.reject(new Error('Request cancelled by new update'));
+      }
+      
+      // Set up timeout for this update
+      const timeout = setTimeout(() => {
+        if (pendingUpdateRef.current?.updateId === updateId) {
+          pendingUpdateRef.current = null;
+          reject(new Error('Room settings update timed out'));
+        }
+      }, 10000); // 10 second timeout
+      
+      // Store the pending update
+      pendingUpdateRef.current = {
+        updateId,
+        resolve,
+        reject,
+        timeout
+      };
+      
+      // Store pending update ID to prevent roomInfo updates from overriding changes
+      setPendingUpdate(updateId);
+        // Send the update request
+      send({
+        type: "updateRoomSettings",
+        roomId,
+        username: currentUser,
+        updateId,
+        ...settings
+      });
+    });
   };
 
   useEffect(() => {
@@ -672,10 +732,9 @@ export default function ChatPage() {
           <div className="flex items-center space-x-3">
             <Button variant="destructive" size="sm" onClick={() => setShowLeaveDialog(true)}>
               Leave
-            </Button>
-            <div>
+            </Button>            <div>
               <div className="flex items-center space-x-2">
-                <h1 className="font-semibold text-gray-900">{roomId}</h1>
+                <h1 className="font-semibold text-gray-900">{roomInfo.name || roomId}</h1>
                 <Button
                   variant="outline"
                   size="sm"
