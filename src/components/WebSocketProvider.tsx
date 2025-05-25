@@ -11,7 +11,7 @@ type WebSocketContextType = {
   isConnected: boolean;
 };
 
-const WS_URL = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:3001";
+const WS_URL = /* process.env.NEXT_PUBLIC_WS_URL ||*/ "ws://localhost:3001";
 
 const WebSocketContext = createContext<WebSocketContextType | undefined>(undefined);
 
@@ -21,7 +21,6 @@ export const WebSocketProvider = ({ children }: { children: React.ReactNode }) =
   const wsRef = useRef<WebSocket | null>(null);
   const onMessageRef = useRef<((msg: WSMessage) => void) | null>(null);
   const reconnectTimer = useRef<NodeJS.Timeout | null>(null);
-  const messageQueue = useRef<WSMessage[]>([]);
 
   const connect = useCallback(() => {
     // Always defer connection logic to avoid setState during render
@@ -34,11 +33,6 @@ export const WebSocketProvider = ({ children }: { children: React.ReactNode }) =
       wsRef.current = ws;
       ws.onopen = () => {
         setIsConnected(true);
-        // Send any queued messages
-        while (messageQueue.current.length > 0) {
-          const msg = messageQueue.current.shift();
-          if (msg) ws.send(JSON.stringify(msg));
-        }
         if (reconnectTimer.current) {
           clearTimeout(reconnectTimer.current);
           reconnectTimer.current = null;
@@ -85,8 +79,6 @@ export const WebSocketProvider = ({ children }: { children: React.ReactNode }) =
       wsRef.current.send(JSON.stringify(msg));
     } else {
       console.warn('[WebSocketProvider] Tried to send but WebSocket not open', wsRef.current?.readyState)
-      // Queue the message to be sent when the socket opens
-      messageQueue.current.push(msg);
     }
   }, []);
 

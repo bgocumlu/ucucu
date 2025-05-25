@@ -39,13 +39,14 @@ export function ChatMessage({ message, currentUser }: ChatMessageProps & { curre
   const getInitials = (username: string) => {
     return username.slice(0, 2).toUpperCase()
   }
+
   // Detect "You joined/left" for system messages
   let systemText = message.content;
   if (message.type === "system" && currentUser) {
     if (message.content === `${currentUser} joined the chat.`) {
       systemText = `${currentUser} joined the chat. (You)`;
     } else if (message.content === `${currentUser} left the chat.`) {
-      systemText = `${currentUser} left the chat. (You)`;
+      systemText = `${currentUser} joined the chat. (You)`;
     }
   }
 
