@@ -493,17 +493,17 @@ export default function ChatPage() {
         if (isMediaRecorderSupported()) {
           console.log('Using MediaRecorder API');
           // MediaRecorder approach (for modern browsers)
-          const options: MediaRecorderOptions = {};
-          
-          // Prefer formats that work better on different platforms
-          if (MediaRecorder.isTypeSupported('audio/mp4')) {
-            options.mimeType = 'audio/mp4';
+          const options: MediaRecorderOptions = {};          // Prefer formats that work better on different platforms
+          if (MediaRecorder.isTypeSupported('audio/webm')) {
+            options.mimeType = 'audio/webm';
           } else if (MediaRecorder.isTypeSupported('audio/wav')) {
             options.mimeType = 'audio/wav';
-          } else if (MediaRecorder.isTypeSupported('audio/webm')) {
-            options.mimeType = 'audio/webm';
+          } else if (MediaRecorder.isTypeSupported('audio/mpeg')) {
+            options.mimeType = 'audio/mpeg';
           } else if (MediaRecorder.isTypeSupported('audio/ogg')) {
             options.mimeType = 'audio/ogg';
+          } else if (MediaRecorder.isTypeSupported('audio/mp4')) {
+            options.mimeType = 'audio/mp4';
           }
           
           const mediaRecorder = new MediaRecorder(stream, options);
