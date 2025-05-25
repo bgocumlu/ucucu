@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">  <!-- Home page -->
+  <url>
+    <loc>https://ucucu.vercel.app/</loc>
+    <lastmod>2025-05-25</lastmod>
+    <changefreq>daily</changefreq>
+    <priority>1.0</priority>
+  </url>
+  
+  <!-- Note: Individual chat rooms are typically not included in sitemaps -->
+  <!-- as they are private/temporary and not meant for search engine indexing -->
+  <!-- Dynamic room URLs like /room123 should not be in sitemap for privacy -->
+  
+  <!-- Add other static pages here when you create them -->
+  <!-- Example: About, Privacy Policy, Terms of Service, etc. -->
+</urlset>
