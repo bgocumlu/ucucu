@@ -46,6 +46,11 @@ export default function ChatPage() {
   const [isAtBottom, setIsAtBottom] = useState(true)
   const [isRecording, setIsRecording] = useState(false)
   const [showLeaveDialog, setShowLeaveDialog] = useState(false)
+  const [lastMessageTime, setLastMessageTime] = useState<Date>(new Date())
+  const [isConnectionHealthy, setIsConnectionHealthy] = useState(true)
+  const [lastPingTime, setLastPingTime] = useState<Date>(new Date())
+  const [pingResponseReceived, setPingResponseReceived] = useState(true)
+  const pingIntervalRef = useRef<NodeJS.Timeout | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const chatContainerRef = useRef<HTMLDivElement>(null)
   const pendingUpdateRef = useRef<{
@@ -66,7 +71,9 @@ export default function ChatPage() {
     }
     setCurrentUser(username)
     send({ type: "joinRoom", roomId, username })
-  }, [roomId, send, router])  // Track room owner and info for RoomSettingsModal
+  }, [roomId, send, router])
+
+  // Track room owner and info for RoomSettingsModal
   const [roomOwner, setRoomOwner] = useState<string>("")
   const [roomInfo, setRoomInfo] = useState<{
     name?: string
@@ -74,11 +81,21 @@ export default function ChatPage() {
     locked?: boolean
     visibility?: 'public' | 'private'
   }>({})
-  const [pendingUpdate, setPendingUpdate] = useState<string | null>(null)
-
-  // Listen for messages and participants
+  const [pendingUpdate, setPendingUpdate] = useState<string | null>(null)  // Listen for messages and participants
   useEffect(() => {
     if (!lastMessage) return
+    
+    // Update last message time for any message we receive
+    setLastMessageTime(new Date())
+    setIsConnectionHealthy(true)
+    
+    // Handle ping responses for connection health monitoring
+    if (lastMessage.type === "pong") {
+      setPingResponseReceived(true)
+      setIsConnectionHealthy(true)
+      return
+    }
+    
     if (lastMessage.type === "messages" && lastMessage.roomId === roomId) {
       // Set all messages from server, including system join/leave
       setMessages(
@@ -723,6 +740,69 @@ export default function ChatPage() {
       window.removeEventListener('pageshow', handlePageShow);
     };
   }, []);
+  // Enhanced connection health monitoring with ping/pong
+  useEffect(() => {
+    if (!isConnected) {
+      // Clear ping interval when disconnected
+      if (pingIntervalRef.current) {
+        clearInterval(pingIntervalRef.current)
+        pingIntervalRef.current = null
+      }
+      setIsConnectionHealthy(false)
+      return
+    }
+
+    // Start ping monitoring when connected
+    const startPingMonitoring = () => {
+      if (pingIntervalRef.current) {
+        clearInterval(pingIntervalRef.current)
+      }
+
+      pingIntervalRef.current = setInterval(() => {
+        const now = new Date()
+        const timeSinceLastMessage = now.getTime() - lastMessageTime.getTime()
+        const timeSinceLastPing = now.getTime() - lastPingTime.getTime()
+        
+        // If we haven't received any message in 15 seconds, or haven't pinged in 10 seconds, send a ping
+        if (timeSinceLastMessage > 15000 || timeSinceLastPing > 10000) {
+          if (!pingResponseReceived) {
+            // We sent a ping but didn't get a response - connection is likely ghosted
+            console.warn('Connection ghosted - ping response not received')
+            setIsConnectionHealthy(false)
+          } else {
+            // Send a ping to check connection health
+            console.log('Sending ping to check connection health')
+            setPingResponseReceived(false)
+            setLastPingTime(now)
+            send({ type: "ping", roomId, username: currentUser })
+            
+            // Set a timeout for ping response
+            setTimeout(() => {
+              if (!pingResponseReceived) {
+                console.warn('Ping timeout - connection appears ghosted')
+                setIsConnectionHealthy(false)
+              }
+            }, 5000) // 5 second timeout for ping response
+          }
+        }
+        
+        // Also check for general message flow (backup detection)
+        const healthyThreshold = 45000 // 45 seconds without any server message indicates potential ghosting
+        if (timeSinceLastMessage > healthyThreshold) {
+          setIsConnectionHealthy(false)
+        }
+      }, 5000) // Check every 5 seconds
+    }
+
+    startPingMonitoring()
+
+    return () => {
+      if (pingIntervalRef.current) {
+        clearInterval(pingIntervalRef.current)
+        pingIntervalRef.current = null
+      }
+    }
+  }, [isConnected, lastMessageTime, lastPingTime, pingResponseReceived, send, roomId, currentUser])
 
   return (
     <div className="h-screen bg-white flex flex-col">
@@ -732,24 +812,47 @@ export default function ChatPage() {
           <div className="flex items-center space-x-3">
             <Button variant="destructive" size="sm" onClick={() => setShowLeaveDialog(true)}>
               Leave
-            </Button>            <div>
-              <div className="flex items-center space-x-2">
-                <h1 className="font-semibold text-gray-900">{roomInfo.name || roomId}</h1>
-                <Button
-                  variant="outline"
+            </Button>            <div>              <div className="flex items-center space-x-2">
+                <h1 className="font-semibold text-gray-900">{roomInfo.name || roomId}</h1>                <Button
+                  variant="ghost"
                   size="sm"
-                  className="h-6 px-2 py-0 text-xs"
-                  onClick={() => {
+                  className={`h-7 px-3 py-1 text-xs border rounded-full transition-all duration-200 font-medium ${
+                    isConnected && isConnectionHealthy
+                      ? 'bg-green-50 hover:bg-green-100 border-green-200 text-green-700 hover:text-green-800' 
+                      : isConnected && !isConnectionHealthy
+                      ? 'bg-yellow-50 hover:bg-yellow-100 border-yellow-200 text-yellow-700 hover:text-yellow-800 animate-pulse'
+                      : 'bg-red-50 hover:bg-red-100 border-red-200 text-red-700 hover:text-red-800 animate-pulse'
+                  }`}                  onClick={() => {
+                    console.log('Manual WebSocket reconnection triggered')
                     const username = sessionStorage.getItem(`username:${roomId}`) || currentUser;
                     if (username) {
+                      // Reset connection health states
+                      setIsConnectionHealthy(true)
+                      setPingResponseReceived(true)
+                      setLastMessageTime(new Date())
+                      setLastPingTime(new Date())
+                      
+                      // Re-join the room to re-establish connection
                       setCurrentUser(username);
                       send({ type: "joinRoom", roomId, username });
+                      
+                      // Send a health check ping after re-joining
+                      setTimeout(() => {
+                        send({ type: "ping", roomId, username });
+                      }, 500)
                     }
-                  }}
-                  // disabled={isConnected}
-                  title="Reconnect to room"
+                  }}title={
+                    isConnected && isConnectionHealthy 
+                      ? "Connection healthy - Click to reconnect anyway" 
+                      : isConnected && !isConnectionHealthy
+                      ? "Connection issues detected - Click to reconnect"
+                      : "Connection lost - Click to reconnect"
+                  }
                 >
-                  Reconnect
+                  <svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                  </svg>
+                  {isConnected && isConnectionHealthy ? 'Connected' : isConnected && !isConnectionHealthy ? 'Reconnect' : 'Reconnect'}
                 </Button>
               </div>
               <p className="text-xs text-gray-500">/{roomId}</p>
@@ -822,27 +925,29 @@ export default function ChatPage() {
 
       {/* Input Area */}
       <div className="border-t border-gray-200 p-4 flex-shrink-0">
-        <div className="flex items-end space-x-2">
-          {/* File Upload */}
-          <Button variant="ghost" size="sm" onClick={() => fileInputRef.current?.click()} className="flex-shrink-0" disabled={!isConnected}>
+        <div className="flex items-end space-x-2">          {/* File Upload */}
+          <Button variant="ghost" size="sm" onClick={() => fileInputRef.current?.click()} className="flex-shrink-0" disabled={!isConnected || !isConnectionHealthy}>
             <Paperclip className="h-4 w-4" />
           </Button>
 
-          {/* Text Input */}
-          <div className="flex-1">
+          {/* Text Input */}          <div className="flex-1">
             <Input
-              placeholder={isConnected ? "Type a message..." : "Please refresh (connection lost)"}
+              placeholder={
+                !isConnected 
+                  ? "Disconnected - Please refresh" 
+                  : !isConnectionHealthy 
+                  ? "Connection issues - Click refresh button"
+                  : "Type a message..."
+              }
               value={messageText}
               onChange={(e) => setMessageText(e.target.value)}
               onKeyPress={handleKeyPress}
               className="resize-none"
-              disabled={isRecording || !isConnected}
+              disabled={isRecording || !isConnected || !isConnectionHealthy}
             />
-          </div>
-
-          {/* Audio Record / Send */}
+          </div>          {/* Audio Record / Send */}
           {messageText.trim() ? (
-            <Button onClick={sendMessage} size="sm" className="flex-shrink-0" disabled={!isConnected}>
+            <Button onClick={sendMessage} size="sm" className="flex-shrink-0" disabled={!isConnected || !isConnectionHealthy}>
               <Send className="h-4 w-4" />
             </Button>
           ) : (
@@ -851,16 +956,24 @@ export default function ChatPage() {
               size="sm"
               onClick={toggleRecording}
               className="flex-shrink-0"
-              disabled={!isConnected}
+              disabled={!isConnected || !isConnectionHealthy}
             >
               <Mic className="h-4 w-4" />
             </Button>
           )}
-        </div>
-
-        {!isConnected && (
-          <div className="mt-2 flex items-center space-x-2 text-red-600 text-sm font-semibold">
-            <span>Connection lost. Please refresh the page.</span>
+        </div>        {(!isConnected || !isConnectionHealthy) && (
+          <div className="mt-2 flex items-center space-x-2 text-sm font-medium">
+            {!isConnected ? (
+              <div className="flex items-center space-x-2 text-red-600">
+                <div className="w-2 h-2 bg-red-600 rounded-full animate-pulse"></div>
+                <span>Connection lost. Please click the reconnect button above.</span>
+              </div>
+            ) : !isConnectionHealthy ? (
+              <div className="flex items-center space-x-2 text-yellow-600">
+                <div className="w-2 h-2 bg-yellow-600 rounded-full animate-pulse"></div>
+                <span>Connection issues detected. Click the reconnect button above to fix.</span>
+              </div>
+            ) : null}
           </div>
         )}
 
