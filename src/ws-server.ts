@@ -82,11 +82,22 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
           console.log(`[ROOM][SERVER:${PORT}] Room "${roomId}" created by user "${username}" (${displayName}, ${visibility}, max: ${maxParticipants})`);
           broadcastRooms(); // Broadcast new room list
         }
-        // Prevent duplicate usernames
+        // Prevent duplicate usernames, but clean up ghosts
         if (rooms[roomId].users.has(username)) {
-          console.log(`[JOIN][SERVER:${PORT}] User "${username}" attempted to join room "${roomId}" but username already taken`);
-          ws.send(JSON.stringify({ type: 'error', error: 'Username already taken in this room.' }));
-          return;
+          // Check if any active WebSocket is actually using this username in this room
+          const isUserActive = Array.from(wss.clients).some((client) => {
+            // @ts-expect-error custom property
+            return client.readyState === 1 && client.joinedRoom === roomId && client.joinedUser === username;
+          });
+          if (!isUserActive) {
+            // Ghost cleanup: remove username from set
+            console.log(`[JOIN][SERVER:${PORT}] Cleaning up ghost user "${username}" in room "${roomId}"`);
+            rooms[roomId].users.delete(username);
+          } else {
+            console.log(`[JOIN][SERVER:${PORT}] User "${username}" attempted to join room "${roomId}" but username already taken`);
+            ws.send(JSON.stringify({ type: 'error', error: 'Username already taken in this room.' }));
+            return;
+          }
         }
         // Prevent joining if room is full
         if (rooms[roomId].users.size >= rooms[roomId].maxParticipants) {
