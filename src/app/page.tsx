@@ -116,11 +116,11 @@ export default function HomePage() {
     }
     setCheckingRoom(false)
   }, [lastMessage, checkingRoom, roomName])
-
   const filteredRooms = rooms.filter(
     (room) =>
-      room.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      room.id.toLowerCase().includes(searchQuery.toLowerCase()) || room.visibility == 'public',
+      room.visibility === 'public' &&
+      (room.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+       room.id.toLowerCase().includes(searchQuery.toLowerCase()))
   )
 
   const getInitials = (name: string) => {

@@ -62,12 +62,13 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
         if (!roomId || typeof roomId !== 'string' || roomId.length < 1 || roomId.length > 40) {
           ws.send(JSON.stringify({ type: 'error', error: 'Invalid room ID.' }));
           return;
-        }
-        if (!rooms[roomId]) {
+        }        if (!rooms[roomId]) {
           // Create new room
           const hashedPassword = password ? bcrypt.hashSync(password, 8) : undefined;
           const displayName = typeof msg.displayName === 'string' && msg.displayName.trim().length > 0 ? msg.displayName.trim() : `${roomId}`;
-          rooms[roomId] = { name: displayName, users: new Set(), locked: !!password, maxParticipants: 10, visibility: 'public', owner: username, password: hashedPassword };
+          const visibility = typeof msg.visibility === 'string' && (msg.visibility === 'public' || msg.visibility === 'private') ? msg.visibility : 'public';
+          const maxParticipants = typeof msg.maxParticipants === 'number' && msg.maxParticipants > 0 ? msg.maxParticipants : 10;
+          rooms[roomId] = { name: displayName, users: new Set(), locked: !!password, maxParticipants, visibility, owner: username, password: hashedPassword };
           broadcastRooms(); // Broadcast new room list
         }
         // Prevent duplicate usernames
@@ -128,9 +129,8 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
               client.send(JSON.stringify({ type: 'newMessage', roomId, message }));
             }
           });
-        }
-      } else if (msg.type === 'updateRoomSettings') {
-        const { roomId, username, name, maxParticipants, locked, password } = msg;
+        }      } else if (msg.type === 'updateRoomSettings') {
+        const { roomId, username, name, maxParticipants, locked, password, visibility } = msg;
         if (rooms[roomId] && rooms[roomId].owner === username) {
           // Prevent setting maxParticipants lower than current user count
           if (typeof maxParticipants === 'number') {
@@ -142,6 +142,9 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
           }
           if (typeof name === 'string') rooms[roomId].name = name;
           if (typeof locked === 'boolean') rooms[roomId].locked = locked;
+          if (typeof visibility === 'string' && (visibility === 'public' || visibility === 'private')) {
+            rooms[roomId].visibility = visibility;
+          }
           if (typeof password === 'string' && password.length > 0) {
             rooms[roomId].password = bcrypt.hashSync(password, 8);
             rooms[roomId].locked = true;
@@ -157,6 +160,8 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
               client.send(JSON.stringify({ type: 'roomInfo', room: { id: roomId, name: rooms[roomId].name, count: rooms[roomId].users.size, maxParticipants: rooms[roomId].maxParticipants, locked: rooms[roomId].locked, exists: true, owner: rooms[roomId].owner, users: usersArr } }));
             }
           });
+          // Broadcast updated rooms list to all clients (visibility change affects public listing)
+          broadcastRooms();
         } else {
           ws.send(JSON.stringify({ type: 'error', error: 'Only the room owner can update settings.' }));
         }
