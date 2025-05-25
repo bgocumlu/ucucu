@@ -1,0 +1,17 @@
+# Robots.txt for ucucu
+# Allow all web crawlers to access the site
+
+User-agent: *
+Allow: /
+
+# Disallow access to API routes and private paths
+Disallow: /api/
+Disallow: /_next/
+Disallow: /admin/
+
+# Sitemap location
+Sitemap: https://ucucu.vercel.app/sitemap.xml
+
+# Allow access to manifest and service worker for PWA
+Allow: /manifest.json
+Allow: /sw.js

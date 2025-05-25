@@ -174,9 +174,49 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
             }
           });
           // Broadcast updated rooms list to all clients (visibility change affects public listing)
-          broadcastRooms();
-        } else {
+          broadcastRooms();        } else {
           ws.send(JSON.stringify({ type: 'error', error: 'Only the room owner can update settings.' }));
+        }
+      } else if (msg.type === 'leaveRoom') {
+        const { roomId, username } = msg;
+        if (joinedRoom === roomId && joinedUser === username && rooms[roomId]) {
+          // Remove user from room
+          rooms[roomId].users.delete(username);
+          
+          // Send leave notification message (system message, only to clients in the room)
+          const leaveMsg = { username: '', text: `${username} left the chat.`, timestamp: Date.now(), system: true };
+          const usersArr = Array.from(rooms[roomId].users);
+          
+          getClientsInRoom(roomId).forEach((client) => {
+            if (client.readyState === 1) {
+              client.send(JSON.stringify({ type: 'newMessage', roomId, message: leaveMsg }));
+              client.send(JSON.stringify({ type: 'roomInfo', room: { 
+                id: roomId, 
+                name: rooms[roomId].name, 
+                count: rooms[roomId].users.size, 
+                maxParticipants: rooms[roomId].maxParticipants, 
+                locked: rooms[roomId].locked, 
+                visibility: rooms[roomId].visibility, 
+                exists: true, 
+                owner: rooms[roomId].owner, 
+                users: usersArr 
+              }}));
+            }
+          });
+          
+          // Update joined state
+          joinedRoom = null;
+          joinedUser = null;
+          ws.joinedRoom = undefined;
+          ws.joinedUser = undefined;
+          
+          broadcastRooms(); // Broadcast participant count change
+          
+          // Delete room if no participants left
+          if (rooms[roomId].users.size === 0) {
+            delete rooms[roomId];
+            broadcastRooms(); // Broadcast room deletion
+          }
         }
       }
     // eslint-disable-next-line @typescript-eslint/no-unused-vars

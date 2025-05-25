@@ -733,8 +733,7 @@ export default function ChatPage() {
     <div className="flex items-center gap-2 min-w-0 flex-shrink">
       <Button variant="destructive" size="sm" onClick={() => setShowLeaveDialog(true)}>
         Leave
-      </Button>
-      <Button
+      </Button>      <Button
         variant="ghost"
         size="sm"
         className="border border-gray-300 bg-white text-red-600 hover:bg-gray-100 h-8 px-3 py-0 text-xs font-semibold shadow-none"
@@ -743,7 +742,12 @@ export default function ChatPage() {
           const username = sessionStorage.getItem(`username:${roomId}`) || currentUser;
           if (username) {
             setCurrentUser(username);
-            send({ type: "joinRoom", roomId, username });
+            // Send leave message first to ensure we're not in room participants
+            send({ type: "leaveRoom", roomId, username });
+            // Then send join message after a small delay
+            setTimeout(() => {
+              send({ type: "joinRoom", roomId, username });
+            }, 100);
           }
         }}
         title="Reconnect to room"

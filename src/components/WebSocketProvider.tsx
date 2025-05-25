@@ -85,7 +85,7 @@ export const WebSocketProvider = ({ children }: { children: React.ReactNode }) =
           console.log('[WebSocketProvider] Retrying Sending message:', msg);
           wsRef.current.send(JSON.stringify(msg));
         }
-      }, 500);
+      }, 2000);
     }
   }, []);
 

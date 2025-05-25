@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect } from "react"
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -153,9 +153,11 @@ export function RoomSettingsModal({ open, onOpenChange, roomId, participants, cu
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md max-h-[80vh] overflow-y-auto">
-        <DialogHeader>
+      <DialogContent className="sm:max-w-md max-h-[80vh] overflow-y-auto">        <DialogHeader>
           <DialogTitle>Room Settings</DialogTitle>
+          <DialogDescription>
+            Manage room information, security settings, and participants.
+          </DialogDescription>
         </DialogHeader>
 
         <Tabs defaultValue="info" className="w-full">

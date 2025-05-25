@@ -9,7 +9,7 @@ import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
 import { Plus, Users, Lock, Search } from "lucide-react"
 import Link from "next/link"
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog"
 import { useRouter } from "next/navigation"
 import { useWebSocket } from "@/components/WebSocketProvider"
 
@@ -302,9 +302,11 @@ export default function HomePage() {
           }
         }}
       >
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
+        <DialogContent className="sm:max-w-md">          <DialogHeader>
             <DialogTitle>Enter Room Name</DialogTitle>
+            <DialogDescription>
+              Enter a room name to join or create a new chat room.
+            </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-2">
