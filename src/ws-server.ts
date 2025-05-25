@@ -9,7 +9,7 @@ const PORT = 3001;
 const rooms: Record<string, { name: string; users: Set<string>; locked: boolean; maxParticipants: number; visibility: 'public' | 'private'; owner?: string; password?: string }> = {};
 
 const server = createServer();
-const wss = new WebSocketServer({ server, maxPayload: 150 * 1024 * 1024 }); // 256 MB max payload size
+const wss = new WebSocketServer({ server, maxPayload: 150 * 1024 * 1024 }); // 150 MB max payload size
 
 function getClientsInRoom(roomId: string) {
   return Array.from(wss.clients).filter((client) => {
