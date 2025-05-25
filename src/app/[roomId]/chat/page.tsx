@@ -7,7 +7,7 @@ import { useState, useEffect, useRef } from "react"
 import { useParams, useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { ArrowLeft, Send, Paperclip, Mic, MoreVertical, ArrowDown } from "lucide-react"
+import { ArrowLeft, Send, Paperclip, Mic, MoreVertical, ArrowDown, RefreshCw } from "lucide-react"
 import { ChatMessage } from "@/components/chat-message"
 import { RoomSettingsModal } from "@/components/room-settings-modal"
 import { RoomLeaveDialog } from "@/components/room-leave-dialog"
@@ -964,15 +964,71 @@ export default function ChatPage() {
         </div>        {(!isConnected || !isConnectionHealthy) && (
           <div className="mt-2 flex items-center space-x-2 text-sm font-medium">
             {!isConnected ? (
-              <div className="flex items-center space-x-2 text-red-600">
+              <>
                 <div className="w-2 h-2 bg-red-600 rounded-full animate-pulse"></div>
-                <span>Connection lost. Please click the reconnect button above.</span>
-              </div>
+                <span className="text-red-600">Connection lost. Please click the reconnect button.</span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 w-6 p-1 border transition-colors duration-200 bg-red-50 hover:bg-red-100 border-red-200 text-red-700 hover:text-red-800"
+                  onClick={() => {
+                    console.log('Manual WebSocket reconnection triggered from error message button')
+                    const username = sessionStorage.getItem(`username:${roomId}`) || currentUser;
+                    if (username) {
+                      // Reset connection health states
+                      setIsConnectionHealthy(true)
+                      setPingResponseReceived(true)
+                      setLastMessageTime(new Date())
+                      setLastPingTime(new Date())
+                      
+                      // Re-join the room to re-establish connection
+                      setCurrentUser(username);
+                      send({ type: "joinRoom", roomId, username });
+                      
+                      // Send a health check ping after re-joining
+                      setTimeout(() => {
+                        send({ type: "ping", roomId, username });
+                      }, 500)
+                    }
+                  }}
+                  title="Connection lost - Click to reconnect"
+                >
+                  <RefreshCw className="w-3 h-3" />
+                </Button>
+              </>
             ) : !isConnectionHealthy ? (
-              <div className="flex items-center space-x-2 text-yellow-600">
+              <>
                 <div className="w-2 h-2 bg-yellow-600 rounded-full animate-pulse"></div>
-                <span>Connection issues detected. Click the reconnect button above to fix.</span>
-              </div>
+                <span className="text-yellow-600">Connection issues detected. Click the reconnect button to fix.</span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 w-6 p-1 border transition-colors duration-200 bg-yellow-50 hover:bg-yellow-100 border-yellow-200 text-yellow-700 hover:text-yellow-800"
+                  onClick={() => {
+                    console.log('Manual WebSocket reconnection triggered from error message button')
+                    const username = sessionStorage.getItem(`username:${roomId}`) || currentUser;
+                    if (username) {
+                      // Reset connection health states
+                      setIsConnectionHealthy(true)
+                      setPingResponseReceived(true)
+                      setLastMessageTime(new Date())
+                      setLastPingTime(new Date())
+                      
+                      // Re-join the room to re-establish connection
+                      setCurrentUser(username);
+                      send({ type: "joinRoom", roomId, username });
+                      
+                      // Send a health check ping after re-joining
+                      setTimeout(() => {
+                        send({ type: "ping", roomId, username });
+                      }, 500)
+                    }
+                  }}
+                  title="Connection issues detected - Click to reconnect"
+                >
+                  <RefreshCw className="w-3 h-3" />
+                </Button>
+              </>
             ) : null}
           </div>
         )}
