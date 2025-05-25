@@ -98,16 +98,15 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
         // Send join notification message (system message, only broadcast, not stored)
         const joinMsg = { username: '', text: `${username} joined the chat.`, timestamp: Date.now(), system: true };
         // Only broadcast to clients in this room
-        const usersArr = Array.from(rooms[roomId].users);
-        getClientsInRoom(roomId).forEach((client) => {
+        const usersArr = Array.from(rooms[roomId].users);        getClientsInRoom(roomId).forEach((client) => {
           if (client.readyState === 1) {
             console.log('[WS DEBUG] Sending roomInfo to client for room:', roomId)
             client.send(JSON.stringify({ type: 'newMessage', roomId, message: joinMsg }));
-            client.send(JSON.stringify({ type: 'roomInfo', room: { id: roomId, name: rooms[roomId].name, count: rooms[roomId].users.size, maxParticipants: rooms[roomId].maxParticipants, locked: rooms[roomId].locked, exists: true, owner: rooms[roomId].owner, users: usersArr } }));
+            client.send(JSON.stringify({ type: 'roomInfo', room: { id: roomId, name: rooms[roomId].name, count: rooms[roomId].users.size, maxParticipants: rooms[roomId].maxParticipants, locked: rooms[roomId].locked, visibility: rooms[roomId].visibility, exists: true, owner: rooms[roomId].owner, users: usersArr } }));
           }
         });
         // Also send roomInfo to the joining client (in case not included above)
-        ws.send(JSON.stringify({ type: 'roomInfo', room: { id: roomId, name: rooms[roomId].name, count: rooms[roomId].users.size, maxParticipants: rooms[roomId].maxParticipants, locked: rooms[roomId].locked, exists: true, owner: rooms[roomId].owner, users: usersArr } }));
+        ws.send(JSON.stringify({ type: 'roomInfo', room: { id: roomId, name: rooms[roomId].name, count: rooms[roomId].users.size, maxParticipants: rooms[roomId].maxParticipants, locked: rooms[roomId].locked, visibility: rooms[roomId].visibility, exists: true, owner: rooms[roomId].owner, users: usersArr } }));
       } else if (msg.type === 'sendMessage') {
         const { roomId, username, text } = msg;
         const message = { username, text, timestamp: Date.now() };
@@ -154,10 +153,9 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
             rooms[roomId].locked = false;
           }
           // Broadcast updated roomInfo (with users)
-          const usersArr = Array.from(rooms[roomId].users);
-          getClientsInRoom(roomId).forEach((client) => {
+          const usersArr = Array.from(rooms[roomId].users);          getClientsInRoom(roomId).forEach((client) => {
             if (client.readyState === 1) {
-              client.send(JSON.stringify({ type: 'roomInfo', room: { id: roomId, name: rooms[roomId].name, count: rooms[roomId].users.size, maxParticipants: rooms[roomId].maxParticipants, locked: rooms[roomId].locked, exists: true, owner: rooms[roomId].owner, users: usersArr } }));
+              client.send(JSON.stringify({ type: 'roomInfo', room: { id: roomId, name: rooms[roomId].name, count: rooms[roomId].users.size, maxParticipants: rooms[roomId].maxParticipants, locked: rooms[roomId].locked, visibility: rooms[roomId].visibility, exists: true, owner: rooms[roomId].owner, users: usersArr } }));
             }
           });
           // Broadcast updated rooms list to all clients (visibility change affects public listing)
@@ -177,11 +175,10 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
       rooms[joinedRoom].users.delete(joinedUser);
       // Broadcast leave notification message (system message, only to clients in the room)
       const leaveMsg = { username: '', text: `${joinedUser} left the chat.`, timestamp: Date.now(), system: true };
-      const usersArr = Array.from(rooms[joinedRoom].users);
-      getClientsInRoom(joinedRoom).forEach((client) => {
+      const usersArr = Array.from(rooms[joinedRoom].users);      getClientsInRoom(joinedRoom).forEach((client) => {
         if (client.readyState === 1 && joinedRoom) {
           client.send(JSON.stringify({ type: 'newMessage', roomId: joinedRoom, message: leaveMsg }));
-          client.send(JSON.stringify({ type: 'roomInfo', room: { id: joinedRoom, name: rooms[joinedRoom].name, count: rooms[joinedRoom].users.size, maxParticipants: rooms[joinedRoom].maxParticipants, locked: rooms[joinedRoom].locked, exists: true, owner: rooms[joinedRoom].owner, users: usersArr } }));
+          client.send(JSON.stringify({ type: 'roomInfo', room: { id: joinedRoom, name: rooms[joinedRoom].name, count: rooms[joinedRoom].users.size, maxParticipants: rooms[joinedRoom].maxParticipants, locked: rooms[joinedRoom].locked, visibility: rooms[joinedRoom].visibility, exists: true, owner: rooms[joinedRoom].owner, users: usersArr } }));
         }
       });
       broadcastRooms(); // Broadcast participant count change

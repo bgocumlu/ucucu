@@ -62,9 +62,14 @@ export default function ChatPage() {
     setCurrentUser(username)
     send({ type: "joinRoom", roomId, username })
   }, [roomId, send, router])
-
-  // Track room owner for RoomSettingsModal
+  // Track room owner and info for RoomSettingsModal
   const [roomOwner, setRoomOwner] = useState<string>("")
+  const [roomInfo, setRoomInfo] = useState<{
+    name?: string
+    maxParticipants?: number
+    locked?: boolean
+    visibility?: 'public' | 'private'
+  }>({})
 
   // Listen for messages and participants
   useEffect(() => {
@@ -129,11 +134,19 @@ export default function ChatPage() {
           },
         ]);
       }
-    }
-    // Prefer roomInfo for participants if available
+    }    // Prefer roomInfo for participants if available
     if (lastMessage.type === "roomInfo" && lastMessage.room && (lastMessage.room as RoomInfoMsg).id === roomId) {
-      const info = lastMessage.room as RoomInfoMsg & { users?: string[] }
+      const info = lastMessage.room as RoomInfoMsg & { users?: string[]; visibility?: 'public' | 'private' }
       setRoomOwner(info.owner || "")
+      
+      // Update room info for settings modal
+      setRoomInfo({
+        name: info.name,
+        maxParticipants: info.maxParticipants,
+        locked: info.locked,
+        visibility: info.visibility || 'public'
+      })
+      
       if (info.users && Array.isArray(info.users)) {
         setParticipants(
           info.users.map((username) => ({
@@ -155,9 +168,8 @@ export default function ChatPage() {
       }
     }
   }, [lastMessage, roomId, currentUser])
-
   // Add handler for updating room settings (owner only)
-  const handleUpdateRoomSettings = (settings: { name?: string; maxParticipants?: number; locked?: boolean }) => {
+  const handleUpdateRoomSettings = (settings: { name?: string; maxParticipants?: number; locked?: boolean; visibility?: 'public' | 'private'; password?: string }) => {
     if (currentUser && roomOwner === currentUser) {
       send({ type: "updateRoomSettings", roomId, username: currentUser, ...settings })
     }
@@ -802,9 +814,7 @@ export default function ChatPage() {
       </div>
 
       {/* Hidden File Input */}
-      <input ref={fileInputRef} type="file" className="hidden" onChange={handleFileUpload} accept="*/*" multiple />
-
-      {/* Room Settings Modal */}
+      <input ref={fileInputRef} type="file" className="hidden" onChange={handleFileUpload} accept="*/*" multiple />      {/* Room Settings Modal */}
       <RoomSettingsModal
         open={showSettings}
         onOpenChange={setShowSettings}
@@ -812,6 +822,7 @@ export default function ChatPage() {
         participants={participants}
         currentUser={currentUser}
         owner={roomOwner}
+        roomInfo={roomInfo}
         onUpdateSettings={handleUpdateRoomSettings}
       />
 

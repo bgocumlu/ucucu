@@ -22,28 +22,34 @@ interface RoomSettingsModalProps {
   participants: Participant[]
   currentUser: string
   owner?: string
-  onUpdateSettings?: (settings: { name?: string; maxParticipants?: number; locked?: boolean; visibility?: 'public' | 'private' }) => void
+  roomInfo?: {
+    name?: string
+    maxParticipants?: number
+    locked?: boolean
+    visibility?: 'public' | 'private'
+  }
+  onUpdateSettings?: (settings: { name?: string; maxParticipants?: number; locked?: boolean; visibility?: 'public' | 'private'; password?: string }) => void
 }
 
-export function RoomSettingsModal({ open, onOpenChange, roomId, participants, currentUser, owner, onUpdateSettings }: RoomSettingsModalProps) {
-  const [roomName, setRoomName] = useState("Study Group")
-  const [maxParticipants, setMaxParticipants] = useState("5")
+export function RoomSettingsModal({ open, onOpenChange, roomId, participants, currentUser, owner, roomInfo, onUpdateSettings }: RoomSettingsModalProps) {
+  const [roomName, setRoomName] = useState("")
+  const [maxParticipants, setMaxParticipants] = useState("10")
   const [newPassword, setNewPassword] = useState("")
   const [visibility, setVisibility] = useState<string>('public')
 
-  // Sync local state with props when modal opens or when owner/roomId/participants change
+  // Sync local state with props when modal opens or when roomInfo changes
   useEffect(() => {
-    if (open) {
-      // Find the current room info from participants/owner
-      // (Assume owner and participants are always up to date)
-      setRoomName(owner ? roomId : "Study Group") // fallback if no custom name logic
-      // If you have room name/maxParticipants/visibility as props, use them here
-      // For now, just reset to defaults or use props if available
-      // setRoomName(roomNameProp)
-      // setMaxParticipants(maxParticipantsProp)
-      // setVisibility(visibilityProp)
+    if (open && roomInfo) {
+      setRoomName(roomInfo.name || roomId)
+      setMaxParticipants(String(roomInfo.maxParticipants || 10))
+      setVisibility(roomInfo.visibility || 'public')
+    } else if (open) {
+      // Fallback if no roomInfo provided
+      setRoomName(roomId)
+      setMaxParticipants("10")
+      setVisibility('public')
     }
-  }, [open, roomId, owner])
+  }, [open, roomId, roomInfo])
 
   const currentUserData = participants.find((p) => p.username === currentUser)
   const isOwner = owner ? currentUser === owner : currentUserData?.isOwner || false
@@ -62,18 +68,42 @@ export function RoomSettingsModal({ open, onOpenChange, roomId, participants, cu
     return username.slice(0, 2).toUpperCase()
   }
 
-  // Use roomId as default display if no custom name is set
-  const displayRoomName = roomName && roomName !== "Study Group" ? roomName : roomId
+  // Use roomName from state, fallback to roomId
+  const displayRoomName = roomName || roomId
 
   // Save changes handler
   const handleSave = () => {
     if (onUpdateSettings) {
-      onUpdateSettings({ name: roomName, maxParticipants: Number(maxParticipants), visibility: visibility as 'public' | 'private' })
+      onUpdateSettings({ 
+        name: roomName || roomId, 
+        maxParticipants: Number(maxParticipants), 
+        visibility: visibility as 'public' | 'private' 
+      })
     }
   }
+  
   const handleUpdateSecurity = () => {
     if (onUpdateSettings) {
-      onUpdateSettings({ maxParticipants: Number(maxParticipants), visibility: visibility as 'public' | 'private' })
+      const updates: { 
+        maxParticipants: number; 
+        visibility: 'public' | 'private';
+        password?: string;
+        locked?: boolean;
+      } = { 
+        maxParticipants: Number(maxParticipants), 
+        visibility: visibility as 'public' | 'private' 
+      }
+      
+      // Handle password updates
+      if (newPassword.trim()) {
+        updates.password = newPassword.trim()
+        updates.locked = true
+      } else if (newPassword === '') {
+        updates.password = ''
+        updates.locked = false
+      }
+      
+      onUpdateSettings(updates)
     }
   }
 
