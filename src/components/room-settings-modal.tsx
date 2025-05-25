@@ -177,9 +177,10 @@ export function RoomSettingsModal({ open, onOpenChange, roomId, participants, cu
               <Input
                 id="roomName"
                 value={displayRoomName}
-                onChange={(e) => setRoomName(e.target.value)}
+                onChange={(e) => setRoomName(e.target.value.slice(0, 35))}
                 disabled={!isOwner}
                 placeholder="Enter room name"
+                maxLength={35}
               />
             </div>
 
