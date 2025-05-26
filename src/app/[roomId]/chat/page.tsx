@@ -137,12 +137,11 @@ export default function ChatPage() {
           isAI?: boolean; 
           isTyping?: boolean; 
         };
-        
-        // Handle AI typing indicator
+          // Handle AI typing indicator
         if (msg.isAI && msg.isTyping) {
           // Remove any existing typing message and add new one
           setMessages((prev) => {
-            const withoutTyping = prev.filter(m => !(m.isAI && m.content.includes('Thinking')));
+            const withoutTyping = prev.filter(m => !(m.isAI && (m.content.includes('Thinking') || m.content.includes('🤖 Thinking'))));
             return [
               ...withoutTyping,
               {
@@ -157,9 +156,10 @@ export default function ChatPage() {
             ];
           });
         } else if (msg.isAI && !msg.isTyping) {
-          // Replace typing indicator with actual AI response
+          // Replace typing indicator with actual AI response, but keep user's original AI command
           setMessages((prev) => {
-            const withoutTyping = prev.filter(m => !(m.isAI && m.content.includes('Thinking')));
+            // Remove only typing indicators, keep all other messages including user's AI command
+            const withoutTyping = prev.filter(m => !(m.isAI && (m.content.includes('Thinking') || m.content.includes('🤖 Thinking'))));
             return [
               ...withoutTyping,
               {
@@ -168,13 +168,13 @@ export default function ChatPage() {
                 username: msg.username,
                 content: msg.text,
                 timestamp: new Date(msg.timestamp),
-                isOwn: msg.username === currentUser,
+                isOwn: false, // AI messages are never "own"
                 isAI: true,
               },
             ];
           });
         } else {
-          // Regular message handling
+          // Regular message handling (including user's AI commands)
           setMessages((prev) => [
             ...prev,
             {

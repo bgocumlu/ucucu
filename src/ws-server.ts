@@ -14,7 +14,53 @@ const wss = new WebSocketServer({ server, maxPayload: 150 * 1024 * 1024 }); // 2
 function getClientsInRoom(roomId: string) {
   return Array.from(wss.clients).filter((client) => {
     // @ts-expect-error custom property
-    return client.joinedRoom === roomId;
+    return client.joinedRoom === roomId && client.readyState === WebSocket.OPEN;
+  });
+}
+
+// Reliable message broadcast with error handling and retry
+function broadcastToRoom(roomId: string, type: string, data: { [key: string]: unknown }, retries: number = 2): Promise<boolean> {
+  return new Promise((resolve) => {
+    const attemptSend = (attempt: number) => {
+      const clients = getClientsInRoom(roomId); // Fresh client list each attempt
+      
+      if (clients.length === 0) {
+        console.log(`[BROADCAST] No clients in room ${roomId}`);
+        resolve(false);
+        return;
+      }
+      
+      const message = JSON.stringify({ type, roomId, ...data });
+      let successCount = 0;
+      let failureCount = 0;
+      
+      clients.forEach((client, index) => {
+        try {
+          if (client.readyState === WebSocket.OPEN) {
+            client.send(message);
+            successCount++;
+            console.log(`[BROADCAST] ✅ Sent ${type} to client ${index + 1}/${clients.length} in room ${roomId}`);
+          } else {
+            failureCount++;
+            console.log(`[BROADCAST] ❌ Client ${index + 1} not ready (state: ${client.readyState})`);
+          }
+        } catch (error) {
+          failureCount++;
+          console.error(`[BROADCAST] ❌ Failed to send ${type} to client ${index + 1}:`, error);
+        }
+      });
+      
+      console.log(`[BROADCAST] ${type} delivery: ${successCount} success, ${failureCount} failed (attempt ${attempt + 1}/${retries + 1})`);
+      
+      if (successCount > 0 || attempt >= retries) {
+        resolve(successCount > 0);
+      } else {
+        // Retry after a short delay
+        setTimeout(() => attemptSend(attempt + 1), 100 * (attempt + 1));
+      }
+    };
+    
+    attemptSend(0);
   });
 }
 
@@ -48,7 +94,7 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
   ws.joinedRoom = undefined;
   ws.joinedUser = undefined;
 
-  ws.on('message', (data: WebSocket.RawData) => {
+  ws.on('message', async (data: WebSocket.RawData) => {
     try {
       const msg = JSON.parse(data.toString());
       if (msg.type === 'getRooms') {
@@ -95,24 +141,31 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
         joinedUser = username;
         ws.joinedRoom = roomId;
         ws.joinedUser = username;
-        broadcastRooms(); // Broadcast participant count change
-        // Send join notification message (system message, only broadcast, not stored)
+        broadcastRooms(); // Broadcast participant count change        // Send join notification message (system message, only broadcast, not stored)
         const joinMsg = { username: '', text: `${username} joined the chat.`, timestamp: Date.now(), system: true };
         // Only broadcast to clients in this room
-        const usersArr = Array.from(rooms[roomId].users);        getClientsInRoom(roomId).forEach((client) => {
-          if (client.readyState === 1) {
-            console.log('[WS DEBUG] Sending roomInfo to client for room:', roomId)
-            client.send(JSON.stringify({ type: 'newMessage', roomId, message: joinMsg }));
-            client.send(JSON.stringify({ type: 'roomInfo', room: { id: roomId, name: rooms[roomId].name, count: rooms[roomId].users.size, maxParticipants: rooms[roomId].maxParticipants, locked: rooms[roomId].locked, visibility: rooms[roomId].visibility, exists: true, owner: rooms[roomId].owner, users: usersArr } }));
-          }
-        });
-        // Also send roomInfo to the joining client (in case not included above)
-        ws.send(JSON.stringify({ type: 'roomInfo', room: { id: roomId, name: rooms[roomId].name, count: rooms[roomId].users.size, maxParticipants: rooms[roomId].maxParticipants, locked: rooms[roomId].locked, visibility: rooms[roomId].visibility, exists: true, owner: rooms[roomId].owner, users: usersArr } }));      } else if (msg.type === 'sendMessage') {
+        const usersArr = Array.from(rooms[roomId].users);
+        
+        // Use robust broadcast for join message
+        await broadcastToRoom(roomId, 'newMessage', { message: joinMsg });
+        
+        // Send room info to all clients in room
+        const roomInfo = { 
+          id: roomId, 
+          name: rooms[roomId].name, 
+          count: rooms[roomId].users.size, 
+          maxParticipants: rooms[roomId].maxParticipants, 
+          locked: rooms[roomId].locked, 
+          visibility: rooms[roomId].visibility, 
+          exists: true, 
+          owner: rooms[roomId].owner, 
+          users: usersArr 
+        };
+        await broadcastToRoom(roomId, 'roomInfo', { room: roomInfo });} else if (msg.type === 'sendMessage') {
         const { roomId, username, text } = msg;
         const message = { username, text, timestamp: Date.now() };
         
-        if (rooms[roomId]) {
-          // Check if this is an AI command
+        if (rooms[roomId]) {          // Check if this is an AI command
           if (text.trim().startsWith('/ai ')) {
             const aiPrompt = text.trim().substring(4).trim(); // Remove '/ai ' prefix
             
@@ -125,47 +178,41 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
                 system: true
               };
               
-              getClientsInRoom(roomId).forEach((client) => {
-                if (client.readyState === 1) {
-                  client.send(JSON.stringify({ type: 'newMessage', roomId, message: helpMessage }));
-                }
-              });
+              await broadcastToRoom(roomId, 'newMessage', { message: helpMessage });
               return;
-            }            // Send the user's AI command message first
-            getClientsInRoom(roomId).forEach((client) => {
-              if (client.readyState === 1) {
-                client.send(JSON.stringify({ type: 'newMessage', roomId, message }));
-              }
-            });            // Send typing indicator for AI response
-            const typingMessage = { 
-              username: `Gizli AI → ${username}`, 
-              text: '🤖 Thinking...', 
-              timestamp: Date.now(),
-              isAI: true,
-              isTyping: true
-            };
-            
-            getClientsInRoom(roomId).forEach((client) => {
-              if (client.readyState === 1) {
-                client.send(JSON.stringify({ type: 'newMessage', roomId, message: typingMessage }));
-              }
-            });
+            }
 
-            // Process AI request asynchronously
-            aiService.chat(aiPrompt, username).then((aiResponse) => {
+            // Process AI request with guaranteed atomic ordering
+            try {
+              console.log(`[AI] Processing command from ${username}: ${aiPrompt}`);
+              
+              // 1. Send the user's AI command message
+              const userMessage = { username, text, timestamp: Date.now() };
+              await broadcastToRoom(roomId, 'newMessage', { message: userMessage });
+              
+              // 2. Send typing indicator
+              const typingMessage = { 
+                username: `Gizli AI → ${username}`, 
+                text: '🤖 Thinking...', 
+                timestamp: Date.now(),
+                isAI: true,
+                isTyping: true
+              };
+              await broadcastToRoom(roomId, 'newMessage', { message: typingMessage });
+              
+              // 3. Process AI request and send response
+              const aiResponse = await aiService.chat(aiPrompt, username);
               const aiMessage = { 
                 username: `Gizli AI → ${username}`, 
                 text: aiResponse, 
                 timestamp: Date.now(),
-                isAI: true  // Special flag to identify AI messages
+                isAI: true
               };
+              await broadcastToRoom(roomId, 'newMessage', { message: aiMessage });
               
-              getClientsInRoom(roomId).forEach((client) => {
-                if (client.readyState === 1) {
-                  client.send(JSON.stringify({ type: 'newMessage', roomId, message: aiMessage }));
-                }
-              });
-            }).catch((error) => {
+              console.log(`[AI] Successfully processed command for ${username}`);
+              
+            } catch (error) {
               console.error('[AI Service] Error processing AI request:', error);
               const errorMessage = { 
                 username: `Gizli AI → ${username}`, 
@@ -174,33 +221,19 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
                 isAI: true
               };
               
-              getClientsInRoom(roomId).forEach((client) => {
-                if (client.readyState === 1) {
-                  client.send(JSON.stringify({ type: 'newMessage', roomId, message: errorMessage }));
-                }
-              });
-            });
-          } else {
+              await broadcastToRoom(roomId, 'newMessage', { message: errorMessage });
+            }          } else {
             // Regular message handling
-            getClientsInRoom(roomId).forEach((client) => {
-              if (client.readyState === 1) {
-                client.send(JSON.stringify({ type: 'newMessage', roomId, message }));
-              }
-            });
+            await broadcastToRoom(roomId, 'newMessage', { message });
           }
         }
       } else if (msg.type === 'sendFile') {
-        const { roomId, username, fileName, fileType, fileData, timestamp, asAudio } = msg;
-        console.log('[ws-server] Received sendFile:', { roomId, username, fileName, fileType, timestamp, fileDataLength: fileData?.length });
+        const { roomId, username, fileName, fileType, fileData, timestamp, asAudio } = msg;        console.log('[ws-server] Received sendFile:', { roomId, username, fileName, fileType, timestamp, fileDataLength: fileData?.length });
         const message = { username, fileName, fileType, fileData, timestamp, type: 'file', ...(asAudio ? { asAudio: true } : {}) };
         if (rooms[roomId]) {
-          getClientsInRoom(roomId).forEach((client) => {
-            if (client.readyState === 1) {
-              console.log('[ws-server] Broadcasting file message to client in room:', roomId);
-              client.send(JSON.stringify({ type: 'newMessage', roomId, message }));
-            }
-          });
-        }      } else if (msg.type === 'updateRoomSettings') {
+          console.log('[ws-server] Broadcasting file message to room:', roomId);
+          await broadcastToRoom(roomId, 'newMessage', { message });
+        }} else if (msg.type === 'updateRoomSettings') {
         const { roomId, username, name, maxParticipants, locked, password, visibility, updateId } = msg;
         if (rooms[roomId] && rooms[roomId].owner === username) {
           // Prevent setting maxParticipants lower than current user count
@@ -224,29 +257,23 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
             rooms[roomId].password = undefined;
             rooms[roomId].locked = false;
           }          // Broadcast updated roomInfo (with users)
-          const usersArr = Array.from(rooms[roomId].users);          getClientsInRoom(roomId).forEach((client) => {
-            if (client.readyState === 1) {
-              interface RoomInfo {
-                id: string;
-                name: string;
-                count: number;
-                maxParticipants: number;
-                locked: boolean;
-                visibility: 'public' | 'private';
-                exists: boolean;
-                owner?: string;
-                users: string[];
-              }
-              const roomInfoMsg: { type: string; room: RoomInfo; updateId?: string } = { type: 'roomInfo', room: { id: roomId, name: rooms[roomId].name, count: rooms[roomId].users.size, maxParticipants: rooms[roomId].maxParticipants, locked: rooms[roomId].locked, visibility: rooms[roomId].visibility, exists: true, owner: rooms[roomId].owner, users: usersArr } };
-              // Include updateId for the client that initiated the update
-              if (client === ws && updateId) {
-                roomInfoMsg.updateId = updateId;
-              }
-              client.send(JSON.stringify(roomInfoMsg));
-            }
-          });
+          const usersArr = Array.from(rooms[roomId].users);
+          const roomInfo = { 
+            id: roomId, 
+            name: rooms[roomId].name, 
+            count: rooms[roomId].users.size, 
+            maxParticipants: rooms[roomId].maxParticipants, 
+            locked: rooms[roomId].locked, 
+            visibility: rooms[roomId].visibility, 
+            exists: true, 
+            owner: rooms[roomId].owner, 
+            users: usersArr 
+          };
+          
+          await broadcastToRoom(roomId, 'roomInfo', { room: roomInfo, updateId });
+          
           // Broadcast updated rooms list to all clients (visibility change affects public listing)
-          broadcastRooms();        } else {
+          broadcastRooms();} else {
           ws.send(JSON.stringify({ type: 'error', error: 'Only the room owner can update settings.' }));
         }
       } else if (msg.type === 'leaveRoom') {
@@ -254,27 +281,24 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
         if (joinedRoom === roomId && joinedUser === username && rooms[roomId]) {
           // Remove user from room
           rooms[roomId].users.delete(username);
-          
-          // Send leave notification message (system message, only to clients in the room)
+            // Send leave notification message (system message, only to clients in the room)
           const leaveMsg = { username: '', text: `${username} left the chat.`, timestamp: Date.now(), system: true };
           const usersArr = Array.from(rooms[roomId].users);
           
-          getClientsInRoom(roomId).forEach((client) => {
-            if (client.readyState === 1) {
-              client.send(JSON.stringify({ type: 'newMessage', roomId, message: leaveMsg }));
-              client.send(JSON.stringify({ type: 'roomInfo', room: { 
-                id: roomId, 
-                name: rooms[roomId].name, 
-                count: rooms[roomId].users.size, 
-                maxParticipants: rooms[roomId].maxParticipants, 
-                locked: rooms[roomId].locked, 
-                visibility: rooms[roomId].visibility, 
-                exists: true, 
-                owner: rooms[roomId].owner, 
-                users: usersArr 
-              }}));
-            }
-          });
+          await broadcastToRoom(roomId, 'newMessage', { message: leaveMsg });
+          
+          const roomInfo = { 
+            id: roomId, 
+            name: rooms[roomId].name, 
+            count: rooms[roomId].users.size, 
+            maxParticipants: rooms[roomId].maxParticipants, 
+            locked: rooms[roomId].locked, 
+            visibility: rooms[roomId].visibility, 
+            exists: true, 
+            owner: rooms[roomId].owner, 
+            users: usersArr 
+          };
+          await broadcastToRoom(roomId, 'roomInfo', { room: roomInfo });
           
           // Update joined state
           joinedRoom = null;
@@ -296,18 +320,28 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
       ws.send(JSON.stringify({ type: 'error', error: 'Invalid message' }));
     }
   });
-
-  ws.on('close', () => {
+  ws.on('close', async () => {
     if (typeof joinedRoom === 'string' && joinedUser && joinedRoom in rooms && rooms[joinedRoom]) {
       rooms[joinedRoom].users.delete(joinedUser);
       // Broadcast leave notification message (system message, only to clients in the room)
       const leaveMsg = { username: '', text: `${joinedUser} left the chat.`, timestamp: Date.now(), system: true };
-      const usersArr = Array.from(rooms[joinedRoom].users);      getClientsInRoom(joinedRoom).forEach((client) => {
-        if (client.readyState === 1 && joinedRoom) {
-          client.send(JSON.stringify({ type: 'newMessage', roomId: joinedRoom, message: leaveMsg }));
-          client.send(JSON.stringify({ type: 'roomInfo', room: { id: joinedRoom, name: rooms[joinedRoom].name, count: rooms[joinedRoom].users.size, maxParticipants: rooms[joinedRoom].maxParticipants, locked: rooms[joinedRoom].locked, visibility: rooms[joinedRoom].visibility, exists: true, owner: rooms[joinedRoom].owner, users: usersArr } }));
-        }
-      });
+      const usersArr = Array.from(rooms[joinedRoom].users);
+      
+      await broadcastToRoom(joinedRoom, 'newMessage', { message: leaveMsg });
+      
+      const roomInfo = { 
+        id: joinedRoom, 
+        name: rooms[joinedRoom].name, 
+        count: rooms[joinedRoom].users.size, 
+        maxParticipants: rooms[joinedRoom].maxParticipants, 
+        locked: rooms[joinedRoom].locked, 
+        visibility: rooms[joinedRoom].visibility, 
+        exists: true, 
+        owner: rooms[joinedRoom].owner, 
+        users: usersArr 
+      };
+      await broadcastToRoom(joinedRoom, 'roomInfo', { room: roomInfo });
+      
       broadcastRooms(); // Broadcast participant count change
       // Delete room if no participants left
       if (rooms[joinedRoom].users.size === 0) {
@@ -316,8 +350,7 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
       }
     }
   });
-
-  ws.on('error', (err) => {
+  ws.on('error', async (err) => {
     // @ts-expect-error: custom error code property for ws errors
     if (err && err.code === 'WS_ERR_UNSUPPORTED_MESSAGE_LENGTH') {
       ws.send(JSON.stringify({ type: 'error', error: 'File too large. Max file size exceeded.' }));
@@ -329,11 +362,7 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
           timestamp: Date.now(),
           system: true
         };
-        getClientsInRoom(ws.joinedRoom).forEach((client) => {
-          if (client.readyState === 1) {
-            client.send(JSON.stringify({ type: 'newMessage', roomId: ws.joinedRoom, message: systemMsg }));
-          }
-        });
+        await broadcastToRoom(ws.joinedRoom, 'newMessage', { message: systemMsg });
       }
       ws.send(JSON.stringify({ type: 'error', error: 'WebSocket error: ' + (err?.message || err) }));
       console.error('[ws-server] File too large error:', err);
