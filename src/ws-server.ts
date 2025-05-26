@@ -180,27 +180,15 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
               
               await broadcastToRoom(roomId, 'newMessage', { message: helpMessage });
               return;
-            }
-
-            // Process AI request with guaranteed atomic ordering
+            }            // Process AI request - send user message first, then AI response when ready
             try {
               console.log(`[AI] Processing command from ${username}: ${aiPrompt}`);
               
-              // 1. Send the user's AI command message
+              // 1. Send the user's AI command message immediately
               const userMessage = { username, text, timestamp: Date.now() };
               await broadcastToRoom(roomId, 'newMessage', { message: userMessage });
               
-              // 2. Send typing indicator
-              const typingMessage = { 
-                username: `Gizli AI → ${username}`, 
-                text: '🤖 Thinking...', 
-                timestamp: Date.now(),
-                isAI: true,
-                isTyping: true
-              };
-              await broadcastToRoom(roomId, 'newMessage', { message: typingMessage });
-              
-              // 3. Process AI request and send response
+              // 2. Process AI request and send response when ready
               const aiResponse = await aiService.chat(aiPrompt, username);
               const aiMessage = { 
                 username: `Gizli AI → ${username}`, 
@@ -222,7 +210,7 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
               };
               
               await broadcastToRoom(roomId, 'newMessage', { message: errorMessage });
-            }          } else {
+            }} else {
             // Regular message handling
             await broadcastToRoom(roomId, 'newMessage', { message });
           }
