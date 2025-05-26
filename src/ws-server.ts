@@ -9,7 +9,7 @@ const PORT = 3001;
 const rooms: Record<string, { name: string; users: Set<string>; locked: boolean; maxParticipants: number; visibility: 'public' | 'private'; owner?: string; password?: string }> = {};
 
 const server = createServer();
-const wss = new WebSocketServer({ server, maxPayload: 150 * 1024 * 1024 }); // 256 MB max payload size
+const wss = new WebSocketServer({ server, maxPayload: 150 * 1024 * 1024 }); // 150 MB max payload size
 
 function getClientsInRoom(roomId: string) {
   return Array.from(wss.clients).filter((client) => {
@@ -166,19 +166,10 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
         const message = { username, text, timestamp: Date.now() };
         
         if (rooms[roomId]) {          // Check if this is an AI command
-          if (text.trim().startsWith('/ai ')) {
-            const aiPrompt = text.trim().substring(4).trim(); // Remove '/ai ' prefix
+          if (text.trim().startsWith('!')) {
+            const aiPrompt = text.trim().substring(1).trim(); // Remove '!' prefix
             
             if (aiPrompt.length === 0) {
-              // Send usage instructions
-              const helpMessage = { 
-                username: 'System', 
-                text: '🤖 Usage: /ai [your message]\nExample: /ai How are you today?', 
-                timestamp: Date.now(),
-                system: true
-              };
-              
-              await broadcastToRoom(roomId, 'newMessage', { message: helpMessage });
               return;
             }            // Process AI request - send user message first, then AI response when ready
             try {
@@ -381,5 +372,5 @@ server.on('request', (req, res) => {
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`WebSocket server 1.4.3 running on ws://localhost:${PORT}`);
+  console.log(`WebSocket server 1.5 running on ws://localhost:${PORT}`);
 });

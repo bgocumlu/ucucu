@@ -276,10 +276,28 @@ export default function ChatPage() {
     const files = e.target.files;
     if (!files || files.length === 0) return;
     const fileArray = Array.from(files);
+
+    // Check file sizes and filter (60MB limit)
+    const MAX_FILE_SIZE = 60 * 1024 * 1024; // 60MB in bytes
+    const validFiles = fileArray.filter(file => file.size <= MAX_FILE_SIZE);
+    const oversizedFiles = fileArray.filter(file => file.size > MAX_FILE_SIZE);
+    
+    // Show warning for oversized files but continue with valid ones
+    if (oversizedFiles.length > 0) {
+      const fileNames = oversizedFiles.map(f => f.name).join(', ');
+      alert(`The following files are too large (max 60MB) and will be skipped: ${fileNames}`);
+    }
+    
+    // If no valid files, exit
+    if (validFiles.length === 0) {
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      return;
+    }
+
     // Send each file individually, reliably
     const sendFiles = async () => {
-      for (let idx = 0; idx < fileArray.length; idx++) {
-        const file = fileArray[idx];
+      for (let idx = 0; idx < validFiles.length; idx++) {
+        const file = validFiles[idx];
         await new Promise<void>((resolve) => {
           const reader = new FileReader();
           reader.onload = () => {
@@ -325,9 +343,26 @@ export default function ChatPage() {
       e.preventDefault();
       if (e.dataTransfer?.files) {
         const fileArray = Array.from(e.dataTransfer.files);
+
+        // Check file sizes and filter (60MB limit)
+        const MAX_FILE_SIZE = 60 * 1024 * 1024; // 60MB in bytes
+        const validFiles = fileArray.filter(file => file.size <= MAX_FILE_SIZE);
+        const oversizedFiles = fileArray.filter(file => file.size > MAX_FILE_SIZE);
+        
+        // Show warning for oversized files but continue with valid ones
+        if (oversizedFiles.length > 0) {
+          const fileNames = oversizedFiles.map(f => f.name).join(', ');
+          alert(`The following files are too large (max 60MB) and will be skipped: ${fileNames}`);
+        }
+        
+        // If no valid files, exit
+        if (validFiles.length === 0) {
+          return;
+        }
+
         const sendFiles = async () => {
-          for (let idx = 0; idx < fileArray.length; idx++) {
-            const file = fileArray[idx];
+          for (let idx = 0; idx < validFiles.length; idx++) {
+            const file = validFiles[idx];
             await new Promise<void>((resolve) => {
               const reader = new FileReader();
               reader.onload = () => {
