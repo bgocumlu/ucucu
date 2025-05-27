@@ -297,48 +297,15 @@ class NotificationService {
       return 'denied'
     }
 
-    // Check if we're in a PWA environment
-    const isPWA = window.matchMedia('(display-mode: standalone)').matches || 
-                  (window.navigator as { standalone?: boolean }).standalone === true ||
-                  document.referrer.includes('android-app://');
-    
-    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent)
-    
-    this.log('Environment check', { isPWA, isIOS, userAgent: navigator.userAgent })
-
-    let permission = Notification.permission
-    this.log('Current notification permission:', permission)
-    
-    if (permission === 'granted') {
-      return 'granted'
+    // Only request if not already granted
+    if (Notification.permission === 'default') {
+      const permission = await Notification.requestPermission()
+      this.log('Permission request result:', permission)
+      return permission
     }
     
-    if (permission === 'denied') {
-      this.log('Notifications denied - user needs to enable in browser settings')
-      return 'denied'
-    }
-    
-    // For iOS PWA, we can't request permission programmatically
-    if (isIOS && isPWA) {
-      this.log('iOS PWA detected - permission must be granted in Safari first')
-      return 'denied' // This will trigger the iOS PWA alert message
-    }
-    
-    // For regular browsers or iOS Safari - only request when user interacts
-    if (permission === 'default') {
-      this.log('Requesting notification permission via browser API (user interaction)')
-      try {
-        // This MUST be called from a user gesture (click, tap, etc.)
-        permission = await Notification.requestPermission()
-        this.log('Permission request result:', permission)
-      } catch (error) {
-        this.log('Error requesting permission:', error)
-        return 'denied'
-      }
-    }
-    
-    this.log('Final notification permission status:', permission)
-    return permission
+    this.log('Permission already set:', Notification.permission)
+    return Notification.permission
   }
 
   hasNotificationPermission(): boolean {
@@ -454,10 +421,9 @@ class NotificationService {
   getAllActiveSubscriptions(): NotificationSubscription[] {
     const now = Date.now()
     return Array.from(this.subscriptions.values()).filter(sub => sub.endTime > now)
-  }
-  // This will be called when a new message arrives
+  }  // This will be called when a new message arrives
   async showNotification(roomId: string, message: { username: string; content: string }) {
-    this.log(`showNotification called with:`, { roomId, message, roomIdType: typeof roomId })
+    this.log(`showNotification called for room ${roomId}:`, message)
     
     if (!roomId) {
       this.log(`Error: roomId is ${roomId}`)
@@ -467,94 +433,68 @@ class NotificationService {
     if (!this.hasNotificationPermission()) {
       this.log(`Not showing notification for room ${roomId}: no permission`)
       return
-    }    // Show notification - backend has already filtered for subscribed users
-    this.log(`Showing notification for room ${roomId} - backend has authorized this notification`)
+    }
+
+    // Show notification - backend has already filtered for subscribed users
+    this.log(`Showing notification for room ${roomId}`)
 
     try {
-      // Check notification permission again before creating
-      this.log(`Browser notification permission: ${Notification.permission}`)
-      this.log(`Document visibility: ${document.visibilityState}`)
-      this.log(`Window focus: ${document.hasFocus()}`)
-      
-      // Direct notification API (more reliable for testing)
-      const notification = new Notification(`New message in /${roomId}`, {
-        body: `${message.username}: ${message.content}`,
+      const title = `/${roomId}`
+      const body = `${message.username}: ${message.content}`
+      const options = {
+        body,
         icon: '/icons/manifest-icon-192.maskable.png',
         badge: '/icons/manifest-icon-192.maskable.png',
-        tag: `room-${roomId}`, // Replace previous notifications from same room
+        tag: `room-${roomId}`,
         data: { roomId, message },
         requireInteraction: false,
         silent: false
-      })
-
-      this.log(`Notification object created:`, notification)
-
-      notification.onclick = () => {
-        this.log(`Notification clicked for room ${roomId}`)
-        window.focus()
-        window.location.href = `/${roomId}/chat`
-        notification.close()
       }
 
-      notification.onshow = () => {
-        this.log(`Notification successfully displayed for room ${roomId}`)
+      // Use Service Worker if available, otherwise fallback to direct notification
+      if (navigator.serviceWorker && navigator.serviceWorker.controller) {
+        const registration = await navigator.serviceWorker.getRegistration()
+        if (registration) {
+          await registration.showNotification(title, options)
+          this.log(`Service Worker notification shown for room ${roomId}`)
+        } else {
+          const notification = new Notification(title, options)
+          this.setupNotificationHandlers(notification, roomId)
+          this.log(`Direct notification shown for room ${roomId}`)
+        }
+      } else {
+        const notification = new Notification(title, options)
+        this.setupNotificationHandlers(notification, roomId)
+        this.log(`Direct notification shown for room ${roomId}`)
       }
-
-      notification.onerror = (error) => {
-        this.log(`Notification error for room ${roomId}:`, error)
-      }
-
-      notification.onclose = () => {
-        this.log(`Notification closed for room ${roomId}`)
-      }
-
-      // Auto-close after 5 seconds
-      setTimeout(() => {
-        this.log(`Auto-closing notification for room ${roomId}`)
-        notification.close()
-      }, 5000)
       
-      this.log(`Notification shown for room ${roomId}`, message)
     } catch (error) {
       console.error('[NotificationService] Failed to show notification:', error)
     }
   }
 
-  /**
-   * Test notification system - for debugging purposes
-   */
-  async testNotification(roomId: string): Promise<void> {
-    this.log('Testing notification system', { roomId })
-    
-    const hasPermission = this.hasNotificationPermission()
-    this.log('Permission status:', hasPermission)
-    
-    if (!hasPermission) {
-      const permission = await this.requestNotificationPermission()
-      this.log('Permission request result:', permission)
-      
-      if (permission !== 'granted') {
-        this.log('Permission denied, cannot test notifications')
-        return
-      }
+  private setupNotificationHandlers(notification: Notification, roomId: string) {
+    notification.onclick = () => {
+      this.log(`Notification clicked for room ${roomId}`)
+      window.focus()
+      window.location.href = `/${roomId}/chat`
+      notification.close()
     }
-    
-    // Test subscription
-    const success = await this.subscribeToRoom(roomId, 1) // 1 minute for testing
-    this.log('Subscription result:', success)
-    if (success) {
-      // Show test notification
-      const testMessage = {
-        username: 'System',
-        content: 'This is a test notification! 🔔'
-      }
-      
-      await this.showNotification(roomId, testMessage)
-      this.log('Test notification sent successfully', testMessage)
-    } else {
-      this.log('Failed to subscribe for test notification')
+
+    notification.onshow = () => {
+      this.log(`Notification displayed for room ${roomId}`)
     }
+
+    notification.onerror = (error) => {
+      this.log(`Notification error for room ${roomId}:`, error)
+    }
+
+    // Auto-close after 5 seconds
+    setTimeout(() => {
+      notification.close()
+    }, 5000)
   }
+
 
   // Cycle through notification intervals: 1 -> 3 -> 5 -> 10 -> 15 -> 0 (disabled) -> 1
   getNextInterval(currentInterval: NotificationInterval): NotificationInterval {

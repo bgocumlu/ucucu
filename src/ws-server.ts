@@ -171,7 +171,7 @@ async function sendNotificationsForMessage(roomId: string, message: { username: 
 
   // Prepare notification payload
   const notificationPayload = JSON.stringify({
-    title: `New message in ${roomId}`,
+    title: `${roomId}`,
     body: `${message.username}: ${message.text}`,
     icon: '/icon-192x192.png',
     badge: '/badge-72x72.png',

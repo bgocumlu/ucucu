@@ -32,7 +32,7 @@ self.addEventListener('push', (event) => {
       console.log('[NotificationSW] Push data:', pushData);
       
       notificationData = {
-        title: `New message in /${pushData.roomId}`,
+        title: `/${pushData.roomId}`,
         body: `${pushData.message.username}: ${pushData.message.content}`,
         icon: '/icons/manifest-icon-192.maskable.png',
         badge: '/icons/manifest-icon-192.maskable.png',
