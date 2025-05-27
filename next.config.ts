@@ -5,15 +5,12 @@ const nextConfig = {
   // ...other config options...
 };
 
-const isDev = process.env.NODE_ENV === "development";
-
 const configExport = async () => {
-  const { default: withPWA } = await import("next-pwa");
-  return withPWA({
+  const { default: withPWA } = await import("next-pwa");return withPWA({
     dest: "public",
     register: true,
     skipWaiting: true,
-    disable: true, // Disable PWA service worker completely to avoid conflicts
+    disable: process.env.NODE_ENV === "development", // Disable only in development, enable in production
     sw: "sw.js",
   })(nextConfig);
 };

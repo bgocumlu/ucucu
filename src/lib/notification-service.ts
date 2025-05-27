@@ -131,8 +131,7 @@ class NotificationService {
       const stored = localStorage.getItem('notificationSubscriptions')
       if (stored) {
         const subscriptionsData = JSON.parse(stored)
-        
-        for (const [key, data] of Object.entries(subscriptionsData)) {
+          for (const [, data] of Object.entries(subscriptionsData)) {
           const subscriptionData = data as NotificationSubscription
           // Use the roomId from the subscription data, not the storage key
           if (subscriptionData.roomId) {
