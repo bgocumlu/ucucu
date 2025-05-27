@@ -18,6 +18,8 @@ export function NotificationBell({ roomId, username, className = "" }: Notificat
   const [isSubscribed, setIsSubscribed] = useState(false)
   const [remainingTime, setRemainingTime] = useState(0)
   const [currentInterval, setCurrentInterval] = useState<NotificationInterval>(0)
+  const [pendingInterval, setPendingInterval] = useState<NotificationInterval | null>(null)
+  const [graceTimeRemaining, setGraceTimeRemaining] = useState(0)
 
   // Update state from notification service
   const updateState = useCallback(() => {
@@ -83,7 +85,6 @@ export function NotificationBell({ roomId, username, className = "" }: Notificat
       }
     }
   }, [lastMessage, roomId, updateState])
-
   useEffect(() => {
     updateState()
       // Update remaining time every second when subscribed
@@ -93,27 +94,45 @@ export function NotificationBell({ roomId, username, className = "" }: Notificat
       } else {
         updateState() // Refresh all state when subscription expires
       }
+      
+      // Update grace period countdown
+      if (graceTimeRemaining > 0) {
+        setGraceTimeRemaining(prev => prev - 1)
+      }
     }, 1000)
 
     return () => {
-      clearInterval(interval)
-    }
-  }, [roomId, updateState])
+      clearInterval(interval)    }  }, [roomId, updateState, graceTimeRemaining])
 
-  // Send subscription request to backend
-  const syncWithBackend = (interval: NotificationInterval) => {
-    send({
-      type: "subscribeNotifications",
-      roomId,
-      username,
-      interval
-    })
+  // Apply pending interval when grace period expires
+  const applyPendingInterval = useCallback(async () => {
+    if (pendingInterval === null) return
+
+    const intervalToApply = pendingInterval
+    setPendingInterval(null)
+
+    if (intervalToApply === 0) {
+      // Disable notifications
+      notificationService.unsubscribeFromRoom(roomId, username)
+    } else {
+      // Subscribe with new interval
+      const success = await notificationService.subscribeToRoom(roomId, intervalToApply, username)
+      if (!success) {
+        console.error('[NotificationBell] Failed to subscribe to room notifications', roomId)
+      }
+    }
+
+    // No need to call syncWithBackend here - the service methods handle it internally
     
-    if (interval > 0) {
-      console.log('[NotificationBell] Sent subscription request to backend', { roomId, username, interval })    } else {    console.log('[NotificationBell] Sent unsubscription request to backend', { roomId, username })
-    }
-  }
+    updateState()
+  }, [pendingInterval, roomId, username, updateState])
 
+  // Handle grace period expiration
+  useEffect(() => {
+    if (graceTimeRemaining === 0 && pendingInterval !== null) {
+      applyPendingInterval()
+    }
+  }, [graceTimeRemaining, pendingInterval, applyPendingInterval])
   const handleBellClick = async () => {
     // If no permission, request it
     if (!hasPermission) {
@@ -125,38 +144,34 @@ export function NotificationBell({ roomId, username, className = "" }: Notificat
       }
       
       setHasPermission(true)
-    }
-
-    // Cycle through intervals
-    const nextInterval = notificationService.getNextInterval(currentInterval)
-      if (nextInterval === 0) {
-      // Disable notifications
+    }    // If notifications are currently active (not in grace period), clicking disables them
+    if (isSubscribed && graceTimeRemaining === 0) {
+      // Immediately disable notifications
       notificationService.unsubscribeFromRoom(roomId, username)
-    } else {
-      // Subscribe with new interval
-      const success = await notificationService.subscribeToRoom(roomId, nextInterval, username)
-      if (!success) {
-        console.error('[NotificationBell] Failed to subscribe to room notifications', roomId)
-      }
+      // No need to call syncWithBackend - unsubscribeFromRoom handles it internally
+      updateState()
+      return
     }
 
-    // Sync with backend
-    syncWithBackend(nextInterval)
+    // If in grace period or no notifications active, cycle through intervals
+    const baseInterval = pendingInterval !== null ? pendingInterval : currentInterval
+    const nextInterval = notificationService.getNextInterval(baseInterval)
     
-    updateState()
+    // Set pending interval and start/restart 5-second grace period
+    setPendingInterval(nextInterval)
+    setGraceTimeRemaining(5)
   }
 
-
   const getBellIcon = () => {
-    if (!hasPermission || !isSubscribed) {
+    if (!hasPermission || (!isSubscribed && graceTimeRemaining === 0)) {
       return BellOff
     }
     return Bell
   }
 
   const getBellSize = () => {
-    // When timer is active, make bell smaller
-    return isSubscribed ? "h-3 w-3" : "h-4 w-4"
+    // When timer is active or in grace period, make bell smaller
+    return (isSubscribed || graceTimeRemaining > 0) ? "h-3 w-3" : "h-4 w-4"
   }
 
   const formatTime = (seconds: number): string => {
@@ -178,26 +193,31 @@ export function NotificationBell({ roomId, username, className = "" }: Notificat
           variant="ghost"
           size="sm"
           className="h-8 w-8 p-0 rounded-full hover:bg-gray-100"
-          onClick={handleBellClick}
-          title={
+          onClick={handleBellClick}          title={
             !hasPermission
               ? "Enable notifications"
+              : graceTimeRemaining > 0
+              ? `Setting ${pendingInterval}min notifications in ${graceTimeRemaining}s (click to cycle)`
               : !isSubscribed
               ? "Click to enable room notifications"
-              : `Notifications active for ${Math.ceil(remainingTime / 60)} minutes`
+              : `Notifications active for ${Math.ceil(remainingTime / 60)} minutes (click to disable)`
           }
-        >
-          <BellIcon 
+        >          <BellIcon 
             className={`${getBellSize()} ${
-              !hasPermission || !isSubscribed 
+              !hasPermission || (!isSubscribed && graceTimeRemaining === 0)
                 ? "text-gray-400" 
+                : graceTimeRemaining > 0
+                ? "text-orange-500"
                 : "text-blue-600"            }`} 
           />
         </Button>
       </div>
-      
-      {/* Timer display when notifications are active */}
-      {isSubscribed && remainingTime > 0 && (
+        {/* Timer display when notifications are active or in grace period */}
+      {graceTimeRemaining > 0 ? (
+        <div className="text-xs text-orange-500 font-mono leading-none -mt-1">
+          {pendingInterval}m in {graceTimeRemaining}s
+        </div>
+      ) : isSubscribed && remainingTime > 0 && (
         <div className="text-xs text-gray-500 font-mono leading-none -mt-1">
           {formatTime(remainingTime)}
         </div>

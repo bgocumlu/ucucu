@@ -194,7 +194,11 @@ class NotificationService {
       this.log(`Synced subscription with backend: ${username} (device: ${this.deviceId}) in room ${roomId} for ${interval} minutes`)
     } else {
       this.log('Cannot sync with backend: WebSocket send function not available')
-    }
+    }  }
+
+  // Public method to sync subscription with backend (includes deviceId)
+  syncSubscriptionWithBackend(roomId: string, username: string, interval: NotificationInterval, pushSubscription?: PushSubscriptionData) {
+    this.syncWithBackend(roomId, username, interval, pushSubscription)
   }
 
   // Fetch subscription status from backend
@@ -318,20 +322,19 @@ class NotificationService {
     if (!this.hasNotificationPermission()) {
       this.log('Cannot subscribe: no notification permission')
       return false
-    }
-
-    // Get or create push subscription for true background notifications
+    }    // Get or create push subscription for true background notifications
     let pushSubscription: PushSubscriptionData | undefined = undefined
     try {
+      this.log('Attempting to create push subscription...')
       const pushSub = await webPushService.subscribe()
       if (pushSub) {
         pushSubscription = pushSub
-        this.log('Push subscription created for true background notifications')
+        this.log('✓ Push subscription created for true background notifications')
       } else {
-        this.log('Failed to create push subscription, falling back to foreground notifications')
+        this.log('⚠ Failed to create push subscription, falling back to foreground notifications only')
       }
     } catch (error) {
-      this.log('Error creating push subscription:', error)
+      this.log('✗ Error creating push subscription, falling back to foreground notifications only:', error)
     }
 
     const now = Date.now()

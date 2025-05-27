@@ -103,16 +103,18 @@ export class WebPushService {
     console.log('[WebPushService] Permission status:', permission)
     return permission
   }
-    async subscribe(): Promise<PushSubscriptionData | null> {
+  async subscribe(): Promise<PushSubscriptionData | null> {
     if (!this.registration) {
-      console.error('[WebPushService] No service worker registration')
+      console.error('[WebPushService] ✗ No service worker registration available')
       return null
     }
     
     if (!this.vapidPublicKey) {
-      console.error('[WebPushService] No VAPID public key available')
+      console.error('[WebPushService] ✗ No VAPID public key available')
       return null
     }
+    
+    console.log('[WebPushService] ✓ Prerequisites met, creating push subscription...')
     
     try {
       // Check if already subscribed
@@ -133,11 +135,10 @@ export class WebPushService {
           auth: this.arrayBufferToBase64(this.subscription.getKey('auth')!)
         }
       }
-      
-      console.log('[WebPushService] Push subscription created:', subscriptionData)
+        console.log('[WebPushService] ✓ Push subscription created successfully:', subscriptionData)
       return subscriptionData
     } catch (error) {
-      console.error('[WebPushService] Push subscription failed:', error)
+      console.error('[WebPushService] ✗ Push subscription failed:', error)
       return null
     }
   }
