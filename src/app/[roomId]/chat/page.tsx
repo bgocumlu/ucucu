@@ -11,6 +11,7 @@ import { ArrowLeft, Send, Paperclip, Mic, MoreVertical, ArrowDown } from "lucide
 import { ChatMessage } from "@/components/chat-message"
 import { RoomSettingsModal } from "@/components/room-settings-modal"
 import { RoomLeaveDialog } from "@/components/room-leave-dialog"
+import { NotificationBell } from "@/components/notification-bell"
 import { useWebSocket } from "@/components/WebSocketProvider"
 
 interface Message {
@@ -848,11 +849,13 @@ export default function ChatPage() {
         </h1>
         <p className="text-xs text-gray-500 truncate max-w-[80px]">/{roomId}</p>
       </div>
-    </div>
-    {/* Right: Avatars and settings always at top right */}
-    <div className="flex items-center gap-2 flex-shrink-0 min-w-0">
-      <div className="flex -space-x-2 max-w-[120px] overflow-hidden">
-        {participants.slice(0, 3).map((participant) => (
+    </div>    {/* Right: Notification Bell, Avatars and settings always at top right */}    <div className="flex items-center gap-2 flex-shrink-0 min-w-0">
+      {/* Notification Bell */}
+      <NotificationBell roomId={roomId} username={currentUser} />
+      
+      {/* Participant Avatars - Show 2 instead of 3 to make room for bell */}
+      <div className="flex -space-x-2 max-w-[100px] overflow-hidden">
+        {participants.slice(0, 2).map((participant) => (
           <div
             key={participant.username}
             className="w-8 h-8 bg-blue-500 rounded-full border-2 border-white flex items-center justify-center text-white text-xs font-medium"
@@ -861,9 +864,9 @@ export default function ChatPage() {
             {getInitials(participant.username)}
           </div>
         ))}
-        {participants.length > 3 && (
+        {participants.length > 2 && (
           <div className="w-8 h-8 bg-gray-400 rounded-full border-2 border-white flex items-center justify-center text-white text-xs">
-            +{participants.length - 3}
+            +{participants.length - 2}
           </div>
         )}
       </div>

@@ -5,8 +5,143 @@ import { aiService } from './ai-service';
 
 const PORT = 3001;
 
+// Notification subscription interface
+interface NotificationSubscription {
+  roomId: string
+  username: string
+  interval: number // minutes
+  startTime: number
+  endTime: number
+}
+
 // In-memory store for rooms and messages
 const rooms: Record<string, { name: string; users: Set<string>; locked: boolean; maxParticipants: number; visibility: 'public' | 'private'; owner?: string; password?: string }> = {};
+
+// In-memory store for notification subscriptions
+const notificationSubscriptions: Map<string, NotificationSubscription[]> = new Map(); // roomId -> subscriptions[]
+
+// Notification management functions
+function addNotificationSubscription(roomId: string, username: string, interval: number): void {
+  const now = Date.now()
+  const endTime = now + (interval * 60 * 1000) // Convert minutes to milliseconds
+  
+  const subscription: NotificationSubscription = {
+    roomId,
+    username,
+    interval,
+    startTime: now,
+    endTime
+  }
+
+  if (!notificationSubscriptions.has(roomId)) {
+    notificationSubscriptions.set(roomId, [])
+  }
+
+  const roomSubscriptions = notificationSubscriptions.get(roomId)!
+  // Remove existing subscription for this user in this room
+  const existingIndex = roomSubscriptions.findIndex(sub => sub.username === username)
+  if (existingIndex !== -1) {
+    roomSubscriptions.splice(existingIndex, 1)
+  }
+
+  roomSubscriptions.push(subscription)
+  console.log(`[NOTIFICATIONS] Added subscription for ${username} in room ${roomId} for ${interval} minutes`)
+}
+
+function removeNotificationSubscription(roomId: string, username: string): void {
+  const roomSubscriptions = notificationSubscriptions.get(roomId)
+  if (!roomSubscriptions) return
+
+  const index = roomSubscriptions.findIndex(sub => sub.username === username)
+  if (index !== -1) {
+    roomSubscriptions.splice(index, 1)
+    console.log(`[NOTIFICATIONS] Removed subscription for ${username} in room ${roomId}`)
+    
+    // Clean up empty arrays
+    if (roomSubscriptions.length === 0) {
+      notificationSubscriptions.delete(roomId)
+    }
+  }
+}
+
+function getActiveSubscriptions(roomId: string): NotificationSubscription[] {
+  const roomSubscriptions = notificationSubscriptions.get(roomId)
+  if (!roomSubscriptions) return []
+
+  const now = Date.now()
+  const active = roomSubscriptions.filter(sub => sub.endTime > now)
+  
+  // If some subscriptions expired, clean them up
+  if (active.length !== roomSubscriptions.length) {
+    notificationSubscriptions.set(roomId, active)
+    console.log(`[NOTIFICATIONS] Cleaned up expired subscriptions in room ${roomId}`)
+  }
+  
+  return active
+}
+
+function cleanupExpiredSubscriptions(): void {
+  const now = Date.now()
+  let cleanedCount = 0
+  
+  for (const [roomId, subscriptions] of notificationSubscriptions.entries()) {
+    const activeSubscriptions = subscriptions.filter(sub => sub.endTime > now)
+    
+    if (activeSubscriptions.length !== subscriptions.length) {
+      if (activeSubscriptions.length === 0) {
+        notificationSubscriptions.delete(roomId)
+      } else {
+        notificationSubscriptions.set(roomId, activeSubscriptions)
+      }
+      cleanedCount += subscriptions.length - activeSubscriptions.length
+    }
+  }
+  
+  if (cleanedCount > 0) {
+    console.log(`[NOTIFICATIONS] Cleaned up ${cleanedCount} expired subscriptions`)
+  }
+}
+
+async function sendNotificationsForMessage(roomId: string, message: { username: string; text: string }): Promise<void> {
+  const activeSubscriptions = getActiveSubscriptions(roomId);
+  
+  if (activeSubscriptions.length === 0) {
+    console.log(`[NOTIFICATIONS] No active subscriptions for room ${roomId}`);
+    return;
+  }
+  // Get current users in the room to exclude them from notifications
+  // const currentUsersInRoom = new Set(rooms[roomId]?.users || []);
+  
+  // Send notifications to ALL subscribed users (including those in room for testing)
+  const usersToNotify = activeSubscriptions;
+  
+  console.log(`[NOTIFICATIONS] Sending notifications to ${usersToNotify.length} users for room ${roomId}:`, 
+    usersToNotify.map(sub => sub?.username || 'UNKNOWN_USER').filter(Boolean));
+
+  // Send notification data to all connected clients who are subscribed
+  const notificationData = {
+    type: 'pushNotification',
+    roomId,
+    message: {
+      username: message.username,
+      content: message.text
+    }
+  };
+
+  // Broadcast to all connected clients - they will handle filtering client-side
+  const allClients = Array.from(wss.clients).filter(client => client.readyState === WebSocket.OPEN);
+    for (const client of allClients) {
+    try {
+      client.send(JSON.stringify(notificationData));
+      console.log(`[NOTIFICATIONS] Sent notification to client for room ${roomId}`);
+    } catch (error) {
+      console.error(`[NOTIFICATIONS] Failed to send notification to client:`, error);
+    }
+  }
+}
+
+// Clean up expired subscriptions every minute
+setInterval(cleanupExpiredSubscriptions, 60000)
 
 const server = createServer();
 const wss = new WebSocketServer({ server, maxPayload: 150 * 1024 * 1024 }); // 150 MB max payload size
@@ -201,17 +336,26 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
               };
               
               await broadcastToRoom(roomId, 'newMessage', { message: errorMessage });
-            }} else {
+            }          } else {
             // Regular message handling
             await broadcastToRoom(roomId, 'newMessage', { message });
+            
+            // Send notifications to subscribed users who are not currently in the room
+            await sendNotificationsForMessage(roomId, message);
           }
-        }
-      } else if (msg.type === 'sendFile') {
+        }      } else if (msg.type === 'sendFile') {
         const { roomId, username, fileName, fileType, fileData, timestamp, asAudio } = msg;        console.log('[ws-server] Received sendFile:', { roomId, username, fileName, fileType, timestamp, fileDataLength: fileData?.length });
         const message = { username, fileName, fileType, fileData, timestamp, type: 'file', ...(asAudio ? { asAudio: true } : {}) };
         if (rooms[roomId]) {
           console.log('[ws-server] Broadcasting file message to room:', roomId);
           await broadcastToRoom(roomId, 'newMessage', { message });
+          
+          // Send notifications for file messages too
+          const notificationMessage = {
+            username,
+            text: asAudio ? '🎤 Voice message' : `📎 ${fileName || 'File'}`
+          };
+          await sendNotificationsForMessage(roomId, notificationMessage);
         }} else if (msg.type === 'updateRoomSettings') {
         const { roomId, username, name, maxParticipants, locked, password, visibility, updateId } = msg;
         if (rooms[roomId] && rooms[roomId].owner === username) {
@@ -252,9 +396,41 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
           await broadcastToRoom(roomId, 'roomInfo', { room: roomInfo, updateId });
           
           // Broadcast updated rooms list to all clients (visibility change affects public listing)
-          broadcastRooms();} else {
+          broadcastRooms();        } else {
           ws.send(JSON.stringify({ type: 'error', error: 'Only the room owner can update settings.' }));
         }
+      } else if (msg.type === 'subscribeNotifications') {
+        const { roomId, username, interval } = msg;
+        console.log(`[NOTIFICATIONS] Subscribe request: ${username} in room ${roomId} for ${interval} minutes`);
+        
+        if (interval > 0) {
+          addNotificationSubscription(roomId, username, interval);
+          ws.send(JSON.stringify({ 
+            type: 'notificationSubscribed', 
+            roomId, 
+            interval,
+            success: true 
+          }));
+        } else {
+          removeNotificationSubscription(roomId, username);
+          ws.send(JSON.stringify({ 
+            type: 'notificationUnsubscribed', 
+            roomId,
+            success: true 
+          }));
+        }
+      } else if (msg.type === 'getNotificationStatus') {
+        const { roomId, username } = msg;
+        const subscriptions = getActiveSubscriptions(roomId);
+        const userSubscription = subscriptions.find(sub => sub.username === username);
+        
+        ws.send(JSON.stringify({
+          type: 'notificationStatus',
+          roomId,
+          subscribed: !!userSubscription,
+          interval: userSubscription?.interval || 0,
+          remainingTime: userSubscription ? Math.max(0, userSubscription.endTime - Date.now()) : 0
+        }));
       } else if (msg.type === 'leaveRoom') {
         const { roomId, username } = msg;
         if (joinedRoom === roomId && joinedUser === username && rooms[roomId]) {

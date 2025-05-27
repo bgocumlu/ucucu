@@ -1,6 +1,7 @@
 "use client";
 
 import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from "react";
+import { notificationService } from "@/lib/notification-service";
 
 export type WSMessage = { type: string; [key: string]: unknown };
 
@@ -30,15 +31,15 @@ export const WebSocketProvider = ({ children }: { children: React.ReactNode }) =
         return;
       }
       const ws = new WebSocket(WS_URL);
-      wsRef.current = ws;
-      ws.onopen = () => {
+      wsRef.current = ws;      ws.onopen = () => {
+        console.log('[WebSocketProvider] WebSocket connected');
         setIsConnected(true);
         if (reconnectTimer.current) {
           clearTimeout(reconnectTimer.current);
           reconnectTimer.current = null;
         }
-      };
-      ws.onclose = () => {
+      };      ws.onclose = () => {
+        console.log('[WebSocketProvider] WebSocket disconnected');
         setIsConnected(false);
         if (!reconnectTimer.current) {
           reconnectTimer.current = setTimeout(connect, 3000); // Try to reconnect every 3s
@@ -49,10 +50,18 @@ export const WebSocketProvider = ({ children }: { children: React.ReactNode }) =
         if (!reconnectTimer.current) {
           reconnectTimer.current = setTimeout(connect, 3000);
         }
-      };
-      ws.onmessage = (event) => {
+      };      ws.onmessage = (event) => {
         try {
           const msg = JSON.parse(event.data);
+          
+          // Handle push notifications
+          if (msg.type === 'pushNotification') {
+            console.log('[WebSocketProvider] Received push notification:', msg);
+            notificationService.showNotification(msg.roomId, msg.message);
+            // Don't set this as lastMessage as it's not for UI updates
+            return;
+          }
+          
           setLastMessage((prev) => {
             if (JSON.stringify(prev) !== JSON.stringify(msg)) {
               if (onMessageRef.current) onMessageRef.current(msg);
@@ -72,39 +81,24 @@ export const WebSocketProvider = ({ children }: { children: React.ReactNode }) =
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
     };
   }, [connect]);
-
   const send = useCallback((msg: WSMessage) => {
     if (wsRef.current && wsRef.current.readyState === 1) {
       console.log('[WebSocketProvider] Sending message:', msg)
       wsRef.current.send(JSON.stringify(msg));
     } else {
-      console.warn('[WebSocketProvider] Tried to send but WebSocket not open', wsRef.current?.readyState);
-
-      setTimeout(() => {
-        if (wsRef.current && wsRef.current.readyState === 1) {
-          console.log('[WebSocketProvider] Retrying Sending message:', msg);
-          wsRef.current.send(JSON.stringify(msg));
-        } else {
-          console.warn('[WebSocketProvider] Tried to send but WebSocket not open', wsRef.current?.readyState);
-          setTimeout(() => {
-            if (wsRef.current && wsRef.current.readyState === 1) {
-              console.log('[WebSocketProvider] Retrying Sending message:', msg);
-              wsRef.current.send(JSON.stringify(msg));
-            } else {
-              console.warn('[WebSocketProvider] Tried to send but WebSocket not open', wsRef.current?.readyState);
-
-              setTimeout(() => {
-                if (wsRef.current && wsRef.current.readyState === 1) {
-                  console.log('[WebSocketProvider] Retrying Sending message:', msg);
-                  wsRef.current.send(JSON.stringify(msg));
-                } else {
-                  console.warn('[WebSocketProvider] Tried to send but WebSocket not open', wsRef.current?.readyState);
-                }
-              }, 4000);
-            }
-          }, 2000);
-        }
-      }, 2000);
+      console.warn('[WebSocketProvider] WebSocket not ready, current state:', wsRef.current?.readyState);
+      
+      // Simple retry after a short delay if WebSocket is connecting (state 0)
+      if (wsRef.current?.readyState === 0) {
+        setTimeout(() => {
+          if (wsRef.current && wsRef.current.readyState === 1) {
+            console.log('[WebSocketProvider] Retrying message after connection:', msg);
+            wsRef.current.send(JSON.stringify(msg));
+          } else {
+            console.warn('[WebSocketProvider] Failed to send after retry, WebSocket state:', wsRef.current?.readyState);
+          }
+        }, 1000);
+      }
     }
   }, []);
 
