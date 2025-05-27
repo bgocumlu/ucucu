@@ -122,37 +122,7 @@ export function NotificationBell({ roomId, username, className = "" }: Notificat
     })
     
     if (interval > 0) {
-      console.log('[NotificationBell] Sent subscription request to backend', { roomId, username, interval })    } else {
-      console.log('[NotificationBell] Sent unsubscription request to backend', { roomId, username })
-    }
-  }
-  const handleTestNotification = async () => {
-    console.log('[NotificationBell] Testing notification...')
-    
-    // First check permission
-    if (!hasPermission) {
-      const permission = await notificationService.requestNotificationPermission()
-      if (permission !== 'granted') {
-        console.log('[NotificationBell] No permission for test notification')
-        return
-      }
-      setHasPermission(true)
-    }
-    
-    // Test both notification service test and manual notification
-    const testResult = await notificationService.testNotification()
-    console.log('[NotificationBell] Test notification result:', testResult)
-    
-    // Also try manual notification for comparison
-    try {
-      const manualNotification = new Notification('Manual Test', {
-        body: 'This is a manual test notification from the bell component',
-        icon: '/icons/manifest-icon-192.maskable.png'
-      })
-      console.log('[NotificationBell] Manual notification created:', manualNotification)
-      setTimeout(() => manualNotification.close(), 3000)
-    } catch (error) {
-      console.error('[NotificationBell] Manual notification failed:', error)
+      console.log('[NotificationBell] Sent subscription request to backend', { roomId, username, interval })    } else {    console.log('[NotificationBell] Sent unsubscription request to backend', { roomId, username })
     }
   }
 
@@ -233,23 +203,9 @@ export function NotificationBell({ roomId, username, className = "" }: Notificat
             className={`${getBellSize()} ${
               !hasPermission || !isSubscribed 
                 ? "text-gray-400" 
-                : "text-blue-600"
-            }`} 
+                : "text-blue-600"            }`} 
           />
         </Button>
-        
-        {/* Test button for debugging */}
-        {hasPermission && (
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-6 px-2 text-xs"
-            onClick={handleTestNotification}
-            title="Test notification display"
-          >
-            Test
-          </Button>
-        )}
       </div>
       
       {/* Timer display when notifications are active */}

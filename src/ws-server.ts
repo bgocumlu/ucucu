@@ -241,6 +241,29 @@ async function sendNotificationsForMessage(roomId: string, message: { username: 
 // Clean up expired subscriptions every minute
 setInterval(cleanupExpiredSubscriptions, 60000)
 
+// Additional room cleanup check every 2 minutes to catch any edge cases
+setInterval(() => {
+  let cleanedRooms = 0;
+  
+  for (const [roomId, room] of Object.entries(rooms)) {
+    const hasUsers = room.users.size > 0;
+    const hasActiveSubscriptions = getActiveSubscriptions(roomId).length > 0;
+    
+    // Only delete room if no users AND no active subscriptions
+    if (!hasUsers && !hasActiveSubscriptions) {
+      delete rooms[roomId];
+      notificationSubscriptions.delete(roomId);
+      cleanedRooms++;
+      console.log(`[ROOM_CLEANUP][SERVER:${PORT}] Scheduled cleanup: Deleted empty room ${roomId}`);
+    }
+  }
+  
+  if (cleanedRooms > 0) {
+    broadcastRooms();
+    console.log(`[ROOM_CLEANUP][SERVER:${PORT}] Scheduled cleanup: Removed ${cleanedRooms} empty rooms`);
+  }
+}, 120000); // every 2 minutes
+
 const server = createServer();
 const wss = new WebSocketServer({ server, maxPayload: 150 * 1024 * 1024 }); // 150 MB max payload size
 
@@ -297,28 +320,96 @@ function broadcastToRoom(roomId: string, type: string, data: { [key: string]: un
   });
 }
 
-// --- Add ping/pong to detect dead connections only for clients in a room ---
-setInterval(() => {
+// --- Enhanced heartbeat system with ghost user detection and room cleanup ---
+setInterval(async () => {
+  const ghostUsers: Array<{ roomId: string; username: string; ws: WebSocket }> = [];
+  
   wss.clients.forEach((ws) => {
-    const client = ws as WebSocket & { joinedRoom?: string; isAlive?: boolean };
+    const client = ws as WebSocket & { joinedRoom?: string; joinedUser?: string; isAlive?: boolean };
     if (!client.joinedRoom) return; // Only ping if client is in a room
+    
     if (client.isAlive === false) {
-      console.log(`[HEARTBEAT][SERVER:${PORT}] Terminating dead connection in room: ${client.joinedRoom}`);
+      // This is a ghost user - connection failed to respond to previous ping
+      console.log(`[HEARTBEAT][SERVER:${PORT}] Detected ghost user: ${client.joinedUser} in room: ${client.joinedRoom}`);
+      
+      // Collect ghost user info before terminating connection
+      if (client.joinedRoom && client.joinedUser) {
+        ghostUsers.push({
+          roomId: client.joinedRoom,
+          username: client.joinedUser,
+          ws: client
+        });
+      }
+      
       client.terminate();
       return;
     }
-    client.isAlive = false;
+      client.isAlive = false;
     client.ping();
-    console.log(`[HEARTBEAT][SERVER:${PORT}] Sent ping to client in room: ${client.joinedRoom}`);
+    console.log(`[HEARTBEAT][SERVER:${PORT}] Sent ping to ${client.joinedUser} in room: ${client.joinedRoom}`);
   });
-}, 30000); // every 10 seconds
+
+  // Clean up ghost users from room data structures
+  for (const ghost of ghostUsers) {
+    const { roomId, username } = ghost;
+    
+    if (rooms[roomId] && rooms[roomId].users.has(username)) {
+      console.log(`[HEARTBEAT][SERVER:${PORT}] Removing ghost user ${username} from room ${roomId}`);
+      
+      // Remove user from room
+      rooms[roomId].users.delete(username);
+      
+      // Broadcast leave notification message (system message)
+      const leaveMsg = { 
+        username: '', 
+        text: `${username} disconnected.`, 
+        timestamp: Date.now(), 
+        system: true 
+      };
+      
+      try {
+        await broadcastToRoom(roomId, 'newMessage', { message: leaveMsg });
+        
+        // Broadcast updated room info
+        const usersArr = Array.from(rooms[roomId].users);
+        const roomInfo = { 
+          id: roomId, 
+          name: rooms[roomId].name, 
+          count: rooms[roomId].users.size, 
+          maxParticipants: rooms[roomId].maxParticipants, 
+          locked: rooms[roomId].locked, 
+          visibility: rooms[roomId].visibility, 
+          exists: true, 
+          owner: rooms[roomId].owner, 
+          users: usersArr 
+        };
+        await broadcastToRoom(roomId, 'roomInfo', { room: roomInfo });
+        
+      } catch (error) {
+        console.error(`[HEARTBEAT][SERVER:${PORT}] Error broadcasting ghost user removal:`, error);
+      }
+      
+      // Check if room should be deleted after ghost user removal
+      if (rooms[roomId].users.size === 0) {
+        checkRoomDeletionAfterSubscriptionCleanup(roomId);
+      }
+    }
+  }
+  
+  // Broadcast updated rooms list if any ghost users were removed
+  if (ghostUsers.length > 0) {
+    broadcastRooms();
+    console.log(`[HEARTBEAT][SERVER:${PORT}] Cleaned up ${ghostUsers.length} ghost users and updated room listings`);
+  }
+  
+}, 30000); // every 30 seconds
 
 wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string; isAlive?: boolean }) => {
-  ws.isAlive = true;
-  ws.on('pong', () => {
+  ws.isAlive = true;  ws.on('pong', () => {
     ws.isAlive = true;
     const room = ws.joinedRoom || 'none';
-    console.log(`[HEARTBEAT][SERVER:${PORT}] Received pong from client in room: ${room}`);
+    const user = ws.joinedUser || 'unknown';
+    console.log(`[HEARTBEAT][SERVER:${PORT}] Received pong from ${user} in room: ${room}`);
   });
 
   // Track which room and username this socket is in
@@ -674,5 +765,5 @@ server.on('request', (req, res) => {
 });
 
 server.listen(PORT as number, '0.0.0.0', () => {
-  console.log(`WebSocket server 1.5 running on ws://localhost:${PORT}`);
+  console.log(`WebSocket server 1.6 running on ws://localhost:${PORT}`);
 });
