@@ -7,11 +7,12 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
-import { Plus, Users, Lock, Search } from "lucide-react"
+import { Plus, Users, Lock, Search, Bell } from "lucide-react"
 import Link from "next/link"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog"
 import { useRouter } from "next/navigation"
 import { useWebSocket } from "@/components/WebSocketProvider"
+import { notificationService } from "@/lib/notification-service"
 
 interface Room {
   id: string
@@ -28,6 +29,7 @@ export default function HomePage() {
   const [showRoomInput, setShowRoomInput] = useState(false)
   const [roomName, setRoomName] = useState("")
   const [isOnline, setIsOnline] = useState(true)
+  const [subscribedRooms, setSubscribedRooms] = useState<{ roomId: string; username: string; remainingTime: number }[]>([])
 
   const [roomStatus, setRoomStatus] = useState<{
     exists: boolean
@@ -72,10 +74,25 @@ export default function HomePage() {
       send({ type: "getRooms" })
     }
   }, [lastMessage, send])
-
   useEffect(() => {
     setIsOnline(isConnected)
   }, [isConnected])
+
+  // Load subscribed rooms from notification service
+  useEffect(() => {
+    const updateSubscribedRooms = () => {
+      const subscribed = notificationService.getSubscribedRooms()
+      setSubscribedRooms(subscribed)
+    }
+
+    // Update immediately
+    updateSubscribedRooms()
+
+    // Update every 30 seconds to refresh remaining times
+    const interval = setInterval(updateSubscribedRooms, 30000)
+
+    return () => clearInterval(interval)
+  }, [])
 
   // Check room existence when room name changes - USE EXISTING WEBSOCKET
   useEffect(() => {
@@ -131,7 +148,6 @@ export default function HomePage() {
       .toUpperCase()
       .slice(0, 2)
   }
-
   const handleJoinOrCreateRoom = () => {
     if (!roomName.trim()) return
 
@@ -142,6 +158,20 @@ export default function HomePage() {
     router.push(`/${cleanRoomName}`)
     setShowRoomInput(false)
     setRoomName("")
+  }
+
+  const handleDirectJoinSubscribedRoom = (roomId: string, username: string) => {
+    // Navigate directly to chat with the stored username
+    router.push(`/${roomId}/chat?username=${encodeURIComponent(username)}`)
+  }
+
+  const formatRemainingTime = (seconds: number): string => {
+    const minutes = Math.floor(seconds / 60)
+    if (minutes > 0) {
+      return `${minutes}m`
+    } else {
+      return `${seconds}s`
+    }
   }
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
@@ -226,6 +256,48 @@ export default function HomePage() {
               </p>
             </CardContent>
           </Card>
+        )}
+
+        {/* Subscribed Rooms */}
+        {subscribedRooms.length > 0 && (
+          <div className="space-y-3 mb-8">
+            <h2 className="text-lg font-medium text-gray-900 mb-4 flex items-center">
+              <Bell className="h-5 w-5 mr-2 text-blue-600" />
+              Subscribed Rooms
+            </h2>
+            {subscribedRooms.map((subscribedRoom) => (
+              <Card 
+                key={`${subscribedRoom.roomId}_${subscribedRoom.username}`} 
+                className="border-blue-200 bg-blue-50 hover:bg-blue-100 transition-colors cursor-pointer"
+                onClick={() => handleDirectJoinSubscribedRoom(subscribedRoom.roomId, subscribedRoom.username)}
+              >
+                <CardContent className="p-4">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center space-x-3">
+                      {/* Room Avatar */}
+                      <div className="w-10 h-10 bg-blue-600 rounded-full flex items-center justify-center text-white font-medium">
+                        {getInitials(subscribedRoom.roomId)}
+                      </div>
+                      
+                      {/* Room Info */}
+                      <div>
+                        <h3 className="font-medium text-blue-900">/{subscribedRoom.roomId}</h3>
+                        <p className="text-sm text-blue-700">as {subscribedRoom.username}</p>
+                      </div>
+                    </div>
+
+                    {/* Notification Timer */}
+                    <div className="flex items-center space-x-2 text-blue-600">
+                      <Bell className="h-4 w-4" />
+                      <span className="text-sm font-mono">
+                        {formatRemainingTime(subscribedRoom.remainingTime)}
+                      </span>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            ))}
+          </div>
         )}
 
         {/* Active Rooms */}

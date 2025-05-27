@@ -23,6 +23,7 @@ webpush.setVapidDetails(
 interface NotificationSubscription {
   roomId: string
   username: string
+  deviceId: string // unique device identifier
   interval: number // minutes
   startTime: number
   endTime: number
@@ -54,13 +55,14 @@ const notificationSubscriptions: Map<string, PushNotificationSubscription[]> = n
 // Subscriptions will be lost on server restart, which is desired behavior
 
 // Notification management functions
-function addNotificationSubscription(roomId: string, username: string, interval: number, pushSubscription?: WebPushSubscription): void {
+function addNotificationSubscription(roomId: string, username: string, deviceId: string, interval: number, pushSubscription?: WebPushSubscription): void {
   const now = Date.now()
   const endTime = now + (interval * 60 * 1000) // Convert minutes to milliseconds
   
   const subscription: PushNotificationSubscription = {
     roomId,
     username,
+    deviceId,
     interval,
     startTime: now,
     endTime,
@@ -72,12 +74,14 @@ function addNotificationSubscription(roomId: string, username: string, interval:
   }
 
   const roomSubscriptions = notificationSubscriptions.get(roomId)!
-  // Remove existing subscription for this user in this room
-  const existingIndex = roomSubscriptions.findIndex(sub => sub.username === username)
+  // Remove existing subscription for this device and username in this room
+  const existingIndex = roomSubscriptions.findIndex(sub => sub.deviceId === deviceId && sub.username === username)
   if (existingIndex !== -1) {
     roomSubscriptions.splice(existingIndex, 1)
-  }  roomSubscriptions.push(subscription)
-  console.log(`[NOTIFICATIONS] Added subscription for ${username} in room ${roomId} for ${interval} minutes`)
+  }
+
+  roomSubscriptions.push(subscription)
+  console.log(`[NOTIFICATIONS] Added subscription for ${username} (device: ${deviceId}) in room ${roomId} for ${interval} minutes`)
   
   // Ensure room exists and won't be deleted while subscriptions are active
   if (!rooms[roomId]) {
@@ -93,12 +97,14 @@ function addNotificationSubscription(roomId: string, username: string, interval:
   }
 }
 
-function removeNotificationSubscription(roomId: string, username: string): void {
+function removeNotificationSubscription(roomId: string, username: string, deviceId: string): void {
   const roomSubscriptions = notificationSubscriptions.get(roomId)
   if (!roomSubscriptions) return
-  const index = roomSubscriptions.findIndex(sub => sub.username === username)
-  if (index !== -1) {    roomSubscriptions.splice(index, 1)
-    console.log(`[NOTIFICATIONS] Removed subscription for ${username} in room ${roomId}`)
+  
+  const index = roomSubscriptions.findIndex(sub => sub.deviceId === deviceId && sub.username === username)
+  if (index !== -1) {
+    roomSubscriptions.splice(index, 1)
+    console.log(`[NOTIFICATIONS] Removed subscription for ${username} (device: ${deviceId}) in room ${roomId}`)
     
     // Clean up empty arrays
     if (roomSubscriptions.length === 0) {
@@ -201,11 +207,10 @@ async function sendNotificationsForMessage(roomId: string, message: { username: 
         console.log(`[PUSH] Successfully sent push notification to ${sub.username} in room ${roomId} (user not currently active)`);
       } catch (error) {
         console.error(`[PUSH] Failed to send push notification to ${sub.username}:`, error);
-        
-        // If the subscription is invalid (410 Gone), remove it
+          // If the subscription is invalid (410 Gone), remove it
         if (error instanceof Error && error.message.includes('410')) {
-          console.log(`[PUSH] Removing invalid subscription for ${sub.username} in room ${roomId}`);
-          removeNotificationSubscription(roomId, sub.username);
+          console.log(`[PUSH] Removing invalid subscription for ${sub.username} (device: ${sub.deviceId}) in room ${roomId}`);
+          removeNotificationSubscription(roomId, sub.username, sub.deviceId);
         }
       }
     });
@@ -492,13 +497,13 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
           broadcastRooms();        } else {
           ws.send(JSON.stringify({ type: 'error', error: 'Only the room owner can update settings.' }));
         }      } else if (msg.type === 'subscribeNotifications') {
-        const { roomId, username, interval, pushSubscription } = msg;
-        console.log(`[NOTIFICATIONS] Subscribe request: ${username} in room ${roomId} for ${interval} minutes`, {
+        const { roomId, username, deviceId, interval, pushSubscription } = msg;
+        console.log(`[NOTIFICATIONS] Subscribe request: ${username} (device: ${deviceId}) in room ${roomId} for ${interval} minutes`, {
           hasPushSubscription: !!pushSubscription
         });
         
         if (interval > 0) {
-          addNotificationSubscription(roomId, username, interval, pushSubscription);
+          addNotificationSubscription(roomId, username, deviceId || 'unknown', interval, pushSubscription);
           ws.send(JSON.stringify({ 
             type: 'notificationSubscribed', 
             roomId, 
@@ -506,17 +511,16 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
             success: true 
           }));
         } else {
-          removeNotificationSubscription(roomId, username);
+          removeNotificationSubscription(roomId, username, deviceId || 'unknown');
           ws.send(JSON.stringify({ 
             type: 'notificationUnsubscribed', 
             roomId,
             success: true 
           }));
-        }
-      } else if (msg.type === 'getNotificationStatus') {
-        const { roomId, username } = msg;
+        }      } else if (msg.type === 'getNotificationStatus') {
+        const { roomId, username, deviceId } = msg;
         const subscriptions = getActiveSubscriptions(roomId);
-        const userSubscription = subscriptions.find(sub => sub.username === username);
+        const userSubscription = subscriptions.find(sub => sub.username === username && sub.deviceId === (deviceId || 'unknown'));
         
         ws.send(JSON.stringify({
           type: 'notificationStatus',

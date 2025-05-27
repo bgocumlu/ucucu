@@ -25,22 +25,40 @@ self.addEventListener('push', (event) => {
     tag: 'chat-notification',
     data: {}
   };
-  
-  if (event.data) {
+    if (event.data) {
     try {
       const pushData = event.data.json();
       console.log('[NotificationSW] Push data:', pushData);
       
-      notificationData = {
-        title: `/${pushData.roomId}`,
-        body: `${pushData.message.username}: ${pushData.message.content}`,
+      // Handle different push data formats
+      let title, body, roomId;
+      
+      if (pushData.message && pushData.message.username && pushData.message.content) {
+        // Format: { roomId: 'test', message: { username: 'user', content: 'text' } }
+        title = `/${pushData.roomId}`;
+        body = `${pushData.message.username}: ${pushData.message.content}`;
+        roomId = pushData.roomId;
+      } else if (pushData.title && pushData.body) {
+        // Format: { title: 'test', body: 'a: l', data: { roomId: 'test' } }
+        title = `/${pushData.data?.roomId || pushData.title}`;
+        body = pushData.body;
+        roomId = pushData.data?.roomId || pushData.title;
+      } else {
+        // Fallback format
+        title = pushData.title || 'New Message';
+        body = pushData.body || 'You have a new message';
+        roomId = pushData.roomId || 'unknown';
+      }
+        notificationData = {
+        title: title,
+        body: body,
         icon: '/icons/manifest-icon-192.maskable.png',
         badge: '/icons/manifest-icon-192.maskable.png',
-        tag: `room-${pushData.roomId}`,
+        tag: `room-${roomId}-${Date.now()}`, // Add timestamp to prevent replacement
         data: {
-          roomId: pushData.roomId,
-          message: pushData.message,
-          url: `/${pushData.roomId}/chat`
+          roomId: roomId,
+          message: pushData.message || { username: 'Unknown', content: body },
+          url: `/${roomId}/chat`
         },
         requireInteraction: false,
         silent: false
@@ -128,7 +146,43 @@ self.addEventListener('message', (event) => {
   
   if (event.data && event.data.type === 'subscribe') {
     // Handle subscription updates from main thread
-    console.log('[NotificationSW] Subscription update:', event.data);
+    console.log('[NotificationSW] Subscription update:', event.data);  } else if (event.data && event.data.type === 'SHOW_NOTIFICATION') {
+    console.log('[NotificationSW] Received SHOW_NOTIFICATION message:', event.data);
+    
+    const { title, body, roomId, username, content } = event.data;
+    const timestamp = Date.now();
+    
+    const options = {
+      body: body || `${username}: ${content}`,
+      icon: '/icons/manifest-icon-192.maskable.png',
+      badge: '/icons/manifest-icon-192.maskable.png',
+      tag: `room-${roomId}-${timestamp}`, // Add timestamp to prevent replacement
+      data: {
+        roomId: roomId,
+        url: `/${roomId}/chat`
+      },
+      actions: [
+        {
+          action: 'open',
+          title: 'Open Chat',
+          icon: '/icons/manifest-icon-192.maskable.png'
+        },
+        {
+          action: 'close',
+          title: 'Dismiss'
+        }
+      ],
+      requireInteraction: false,
+      silent: false
+    };
+
+    console.log('[NotificationSW] About to show notification with options:', { title, options });    self.registration.showNotification(title || 'New Message', options)
+      .then(() => {
+        console.log('[NotificationSW] Notification shown successfully');
+      })
+      .catch((error) => {
+        console.error('[NotificationSW] Error showing notification:', error);
+      });
   }
 });
 

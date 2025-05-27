@@ -417,6 +417,7 @@ class NotificationService {
     const now = Date.now()
     return Array.from(this.subscriptions.values()).filter(sub => sub.endTime > now)
   }
+
   // This will be called when a new message arrives
   async showNotification(roomId: string, message: { username: string; content: string }) {
     this.log(`showNotification called for room ${roomId}:`, message)
@@ -434,35 +435,22 @@ class NotificationService {
     // Show notification - backend has already filtered for subscribed users
     this.log(`Showing notification for room ${roomId}`)
 
-    try {      const title = `/${roomId}`
+    try {
+      const title = `/${roomId}`
       const body = `${message.username}: ${message.content}`
-      const timestamp = Date.now()
       const options = {
         body,
         icon: '/icons/manifest-icon-192.maskable.png',
         badge: '/icons/manifest-icon-192.maskable.png',
-        tag: `room-${roomId}-${timestamp}`, // Add timestamp to prevent replacement
-        data: { roomId, message, url: `/${roomId}/chat` },
+        tag: `room-${roomId}`,
+        data: { roomId, message },
         requireInteraction: false,
         silent: false
       }
 
-      this.log(`Creating notification with:`, { title, body, options })      // Try Service Worker notification first (works in background)
-      if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
-        // Send message to Service Worker to show notification
-        navigator.serviceWorker.controller.postMessage({
-          type: 'SHOW_NOTIFICATION',
-          title,
-          body,
-          roomId,
-          username: message.username,
-          content: message.content
-        })
-        this.log(`Service Worker notification message sent for room ${roomId}`)
-        return // Always return here when Service Worker is available
-      }
+      this.log(`Creating notification with:`, { title, body, options })
 
-      // Fallback to direct notification (only when Service Worker is not available)
+      // Try direct notification (more reliable for testing)
       const notification = new Notification(title, options)
       this.setupNotificationHandlers(notification, roomId)
       this.log(`Direct notification created for room ${roomId}`)

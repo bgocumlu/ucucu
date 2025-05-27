@@ -126,6 +126,35 @@ export function NotificationBell({ roomId, username, className = "" }: Notificat
       console.log('[NotificationBell] Sent unsubscription request to backend', { roomId, username })
     }
   }
+  const handleTestNotification = async () => {
+    console.log('[NotificationBell] Testing notification...')
+    
+    // First check permission
+    if (!hasPermission) {
+      const permission = await notificationService.requestNotificationPermission()
+      if (permission !== 'granted') {
+        console.log('[NotificationBell] No permission for test notification')
+        return
+      }
+      setHasPermission(true)
+    }
+    
+    // Test both notification service test and manual notification
+    const testResult = await notificationService.testNotification()
+    console.log('[NotificationBell] Test notification result:', testResult)
+    
+    // Also try manual notification for comparison
+    try {
+      const manualNotification = new Notification('Manual Test', {
+        body: 'This is a manual test notification from the bell component',
+        icon: '/icons/manifest-icon-192.maskable.png'
+      })
+      console.log('[NotificationBell] Manual notification created:', manualNotification)
+      setTimeout(() => manualNotification.close(), 3000)
+    } catch (error) {
+      console.error('[NotificationBell] Manual notification failed:', error)
+    }
+  }
 
   const handleBellClick = async () => {
     // If no permission, request it
@@ -142,13 +171,12 @@ export function NotificationBell({ roomId, username, className = "" }: Notificat
 
     // Cycle through intervals
     const nextInterval = notificationService.getNextInterval(currentInterval)
-    
-    if (nextInterval === 0) {
+      if (nextInterval === 0) {
       // Disable notifications
-      notificationService.unsubscribeFromRoom(roomId)
+      notificationService.unsubscribeFromRoom(roomId, username)
     } else {
       // Subscribe with new interval
-      const success = await notificationService.subscribeToRoom(roomId, nextInterval)
+      const success = await notificationService.subscribeToRoom(roomId, nextInterval, username)
       if (!success) {
         console.error('[NotificationBell] Failed to subscribe to room notifications', roomId)
       }
@@ -185,29 +213,44 @@ export function NotificationBell({ roomId, username, className = "" }: Notificat
   }
 
   const BellIcon = getBellIcon()
-
   return (
-    <div className={`flex flex-col items-center justify-center ${className}`}>      <Button
-        variant="ghost"
-        size="sm"
-        className="h-8 w-8 p-0 rounded-full hover:bg-gray-100"
-        onClick={handleBellClick}
-        title={
-          !hasPermission
-            ? "Enable notifications"
-            : !isSubscribed
-            ? "Click to enable room notifications"
-            : `Notifications active for ${Math.ceil(remainingTime / 60)} minutes`
-        }
-      >
-        <BellIcon 
-          className={`${getBellSize()} ${
-            !hasPermission || !isSubscribed 
-              ? "text-gray-400" 
-              : "text-blue-600"
-          }`} 
-        />
-      </Button>
+    <div className={`flex flex-col items-center justify-center ${className}`}>
+      <div className="flex items-center gap-2">
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-8 w-8 p-0 rounded-full hover:bg-gray-100"
+          onClick={handleBellClick}
+          title={
+            !hasPermission
+              ? "Enable notifications"
+              : !isSubscribed
+              ? "Click to enable room notifications"
+              : `Notifications active for ${Math.ceil(remainingTime / 60)} minutes`
+          }
+        >
+          <BellIcon 
+            className={`${getBellSize()} ${
+              !hasPermission || !isSubscribed 
+                ? "text-gray-400" 
+                : "text-blue-600"
+            }`} 
+          />
+        </Button>
+        
+        {/* Test button for debugging */}
+        {hasPermission && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-6 px-2 text-xs"
+            onClick={handleTestNotification}
+            title="Test notification display"
+          >
+            Test
+          </Button>
+        )}
+      </div>
       
       {/* Timer display when notifications are active */}
       {isSubscribed && remainingTime > 0 && (
