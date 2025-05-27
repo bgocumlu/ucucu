@@ -37,9 +37,14 @@ export function NotificationBell({ roomId, username, className = "" }: Notificat
     // Set the WebSocket send function in the notification service
     notificationService.setWebSocketSend(send)
     
-    // Only fetch status when WebSocket is connected
+    // Only fetch status and restore subscriptions when WebSocket is connected
     if (isConnected) {
-      console.log('[NotificationBell] Fetching notification status from backend')
+      console.log('[NotificationBell] WebSocket connected - restoring subscriptions and fetching status')
+      
+      // Restore any existing subscriptions for this user
+      notificationService.restoreSubscriptionsForUser(username)
+      
+      // Fetch current subscription status from backend for this room
       send({
         type: "getNotificationStatus",
         roomId,
@@ -136,13 +141,13 @@ export function NotificationBell({ roomId, username, className = "" }: Notificat
     if (nextInterval === 0) {
       // Disable notifications
       notificationService.unsubscribeFromRoom(roomId)
-      console.log('[NotificationBell] Notifications disabled for room', roomId)
-    } else {
+      console.log('[NotificationBell] Notifications disabled for room', roomId)    } else {
       // Subscribe with new interval
-      const success = notificationService.subscribeToRoom(roomId, nextInterval)
+      const success = await notificationService.subscribeToRoom(roomId, nextInterval)
       if (success) {
         console.log('[NotificationBell] Subscribed to room notifications', { roomId, interval: nextInterval })
-      } else {        console.error('[NotificationBell] Failed to subscribe to room notifications', roomId)
+      } else {
+        console.error('[NotificationBell] Failed to subscribe to room notifications', roomId)
       }
     }
 

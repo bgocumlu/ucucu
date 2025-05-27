@@ -30,6 +30,7 @@
     "react-dom": "^19.0.0",
     "tailwind-merge": "^3.3.0",
     "tailwindcss-animate": "^1.0.7",
+    "web-push": "^3.6.7",
     "ws": "^8.18.2"
   },
   "devDependencies": {
@@ -38,6 +39,7 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@types/web": "^0.0.235",
+    "@types/web-push": "^3.6.4",
     "eslint": "^9",
     "eslint-config-next": "15.1.8",
     "https-localhost": "^4.7.1",

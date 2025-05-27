@@ -4,15 +4,9 @@ import { useEffect } from 'react'
 
 export function ServiceWorkerRegistration() {
   useEffect(() => {
-    if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('/custom-sw.js')
-        .then((registration) => {
-          console.log('[SW] Service worker registered successfully:', registration)
-        })
-        .catch((error) => {
-          console.error('[SW] Service worker registration failed:', error)
-        })
-    }
+    // Service worker registration is now handled by the WebPushService
+    // This component is kept for compatibility but doesn't register a SW
+    console.log('[SW] Service worker registration handled by WebPushService')
   }, [])
 
   return null
