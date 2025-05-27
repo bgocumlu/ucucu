@@ -55,17 +55,8 @@ class NotificationService {
     
     // Initialize Web Push service
     this.initializeWebPush()
-    
-    // Initialize cross-tab communication
-    this.initializeCrossTabCommunication()    // Add to global window for emergency admin access (development only)
-    if (typeof window !== 'undefined' && process.env.NODE_ENV === 'development') {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (window as any).notificationServiceAdmin = {
-        clearAll: () => this.adminClearAllSubscriptions(),
-        clearLocal: () => this.clearAllSubscriptions(),
-        status: () => this.debugStatus('admin')
-      }
-    }
+      // Initialize cross-tab communication
+    this.initializeCrossTabCommunication()
   }
 
   // Set the WebSocket send function for backend communication
@@ -528,22 +519,6 @@ class NotificationService {
     }
   }
 
-  // Debug method to check system status
-  debugStatus(roomId: string): void {
-    const subscription = this.getSubscription(roomId)
-    const hasPermission = this.hasNotificationPermission()
-    const isSubscribed = this.isSubscribed(roomId)
-    const remainingTime = this.getRemainingTime(roomId)
-    
-    console.log(`[NotificationService] Debug Status for room ${roomId}:`, {
-      hasPermission,
-      isSubscribed,
-      remainingTime: `${remainingTime}s`,
-      subscription,
-      websocketSend: this.websocketSend ? 'available' : 'null',
-      notificationPermission: 'Notification' in window ? Notification.permission : 'not supported'
-    })
-  }
 
   // Cross-tab communication for better notification management
   private initializeCrossTabCommunication() {
@@ -672,7 +647,6 @@ class NotificationService {
       localStorage.removeItem('notificationSubscriptions')
     }
   }
-
   getDeviceId(): string {
     return this.deviceId
   }
@@ -687,80 +661,6 @@ class NotificationService {
         username: sub.username,
         remainingTime: Math.floor((sub.endTime - now) / 1000)
       }))
-  }
-
-  // Test method to check if notifications work at all
-  async testNotification(): Promise<boolean> {
-    this.log('Testing notification...')
-    
-    if (!this.hasNotificationPermission()) {
-      this.log('No notification permission for test')
-      return false
-    }
-
-    try {
-      const testNotification = new Notification('Test Notification', {
-        body: 'This is a test notification to check if notifications work',
-        icon: '/icons/manifest-icon-192.maskable.png',
-        tag: 'test-notification'
-      })
-      
-      this.log('Test notification created successfully')
-      
-      setTimeout(() => {
-        testNotification.close()
-      }, 3000)
-      
-      return true
-    } catch (error) {
-      this.log('Test notification failed:', error)
-      return false
-    }
-  }
-
-  // Clear all subscriptions (used when VAPID keys change)
-  clearAllSubscriptions(): void {
-    this.log('Clearing all notification subscriptions due to VAPID key change')
-    
-    // Clear in-memory subscriptions
-    this.subscriptions.clear()
-    
-    // Clear all cleanup timers
-    for (const timeout of this.intervals.values()) {
-      clearTimeout(timeout)
-    }
-    this.intervals.clear()
-    
-    // Clear localStorage
-    if (typeof window !== 'undefined') {
-      localStorage.removeItem('notificationSubscriptions')
-    }
-    
-    this.log('All notification subscriptions cleared')
-  }
-
-  // Request backend to clear all push subscriptions (when VAPID keys change)
-  requestClearAllPushSubscriptions(): void {
-    if (this.websocketSend && typeof this.websocketSend === 'function') {
-      this.log('Requesting backend to clear all push subscriptions due to VAPID key change')
-      this.websocketSend({
-        type: "clearAllPushSubscriptions"
-      })
-    } else {
-      this.log('Cannot request backend to clear push subscriptions: WebSocket send function not available')
-    }
-  }
-
-  // Admin function to force clear all subscriptions (for emergency VAPID key fixes)
-  adminClearAllSubscriptions(): void {
-    if (this.websocketSend && typeof this.websocketSend === 'function') {
-      this.log('ADMIN: Force clearing all backend subscriptions')
-      this.websocketSend({
-        type: "adminClearAllSubscriptions"
-      })
-    } else {
-      this.log('Cannot send admin clear command: WebSocket send function not available')
-    }
   }
 }
 

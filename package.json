@@ -1,14 +1,14 @@
 {
   "name": "ucucu",
   "version": "0.1.0",
-  "private": true,
-  "scripts": {
+  "private": true,  "scripts": {
     "dev": "next dev --turbopack",
     "dev:https": "next dev --turbopack --experimental-https",
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "ws": "npx tsx src/ws-server.ts"
+    "ws": "npx tsx src/ws-server.ts",
+    "generate-vapid-keys": "node scripts/generate-vapid-keys.js"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.14",

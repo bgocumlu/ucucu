@@ -86,8 +86,7 @@ export function NotificationBell({ roomId, username, className = "" }: Notificat
 
   useEffect(() => {
     updateState()
-    
-    // Update remaining time every second when subscribed
+      // Update remaining time every second when subscribed
     const interval = setInterval(() => {
       if (notificationService.isSubscribed(roomId)) {
         setRemainingTime(notificationService.getRemainingTime(roomId))
@@ -96,19 +95,8 @@ export function NotificationBell({ roomId, username, className = "" }: Notificat
       }
     }, 1000)
 
-    // Debug keyboard shortcut (Ctrl+Shift+N)
-    const handleKeyPress = (e: KeyboardEvent) => {
-      if (e.ctrlKey && e.shiftKey && e.key === 'N') {
-        console.log('[NotificationBell] Debug shortcut pressed')
-        notificationService.debugStatus(roomId)
-      }
-    }
-
-    window.addEventListener('keydown', handleKeyPress)
-
     return () => {
       clearInterval(interval)
-      window.removeEventListener('keydown', handleKeyPress)
     }
   }, [roomId, updateState])
 

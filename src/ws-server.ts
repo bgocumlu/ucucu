@@ -4,17 +4,25 @@ import bcrypt from 'bcryptjs';
 import webpush from 'web-push';
 import { aiService } from './ai-service';
 
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.WS_PORT || 3001;
 
-// VAPID keys configuration for web push (hardcoded for consistency)
+// VAPID keys from environment variables
 const VAPID_KEYS = {
-  publicKey: 'BB9hI03D1kGiSVXTToiCW3GfJP3qld9q7kZKR53EcNC9nV-JC54y1ZccBAFAZQcoM0vLTXbX1X6t9_fvhJNjbFk',
-  privateKey: 'C9wCGaWyBdumqCKK8NWu0kMlE18KMo6gaukG30kHY8Y'
+  publicKey: process.env.VAPID_PUBLIC_KEY || '',
+  privateKey: process.env.VAPID_PRIVATE_KEY || '',
+  subject: process.env.VAPID_SUBJECT || 'mailto:admin@example.com'
 };
+
+// Validate VAPID keys on startup
+if (!VAPID_KEYS.publicKey || !VAPID_KEYS.privateKey) {
+  console.error('[WebSocket Server] VAPID keys not configured. Please set VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY environment variables.');
+  console.error('[WebSocket Server] Generate new keys with: npx web-push generate-vapid-keys');
+  process.exit(1);
+}
 
 // Configure web-push with VAPID details
 webpush.setVapidDetails(
-  'mailto:your-email@example.com', // Contact email
+  VAPID_KEYS.subject,
   VAPID_KEYS.publicKey,
   VAPID_KEYS.privateKey
 );
@@ -643,24 +651,13 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
           subscribed: !!userSubscription,
           interval: userSubscription?.interval || 0,
           remainingTime: userSubscription ? Math.max(0, userSubscription.endTime - Date.now()) : 0
-        }));
-      } else if (msg.type === 'clearAllPushSubscriptions') {
+        }));      } else if (msg.type === 'clearAllPushSubscriptions') {
         // Clear all push subscriptions (when VAPID keys change)
         console.log('[NOTIFICATIONS] Received request to clear all push subscriptions due to VAPID key change');
         clearAllPushSubscriptions();
         ws.send(JSON.stringify({
           type: 'pushSubscriptionsCleared',
           success: true
-        }));
-      } else if (msg.type === 'adminClearAllSubscriptions') {
-        // Admin command to force clear all subscriptions (for VAPID key mismatch fixes)
-        console.log('[ADMIN] Force clearing ALL notification subscriptions');
-        notificationSubscriptions.clear();
-        console.log('[ADMIN] All notification subscriptions cleared');
-        ws.send(JSON.stringify({
-          type: 'adminSubscriptionsCleared',
-          success: true,
-          message: 'All subscriptions forcefully cleared'
         }));
       } else if (msg.type === 'leaveRoom') {
         const { roomId, username } = msg;
@@ -788,8 +785,7 @@ function checkRoomDeletionAfterSubscriptionCleanup(roomId: string): void {
   }
 }
 
-server.on('request', (req, res) => {
-  // Handle VAPID public key endpoint
+server.on('request', (req, res) => {  // Handle VAPID public key endpoint
   if (req.method === 'GET' && req.url === '/vapid-public-key') {
     res.writeHead(200, { 
       'Content-Type': 'application/json',
@@ -798,38 +794,6 @@ server.on('request', (req, res) => {
       'Access-Control-Allow-Headers': 'Content-Type'
     });
     res.end(JSON.stringify({ publicKey: VAPID_KEYS.publicKey }));
-    return;
-  }
-
-  // Handle admin endpoint to clear all push subscriptions
-  if (req.method === 'POST' && req.url === '/admin/clear-subscriptions') {
-    console.log('[ADMIN] HTTP request to clear all push subscriptions');
-    const clearedCount = notificationSubscriptions.size;
-    notificationSubscriptions.clear();
-    console.log(`[ADMIN] Cleared ${clearedCount} room subscription groups via HTTP`);
-    
-    res.writeHead(200, { 
-      'Content-Type': 'application/json',
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'POST',
-      'Access-Control-Allow-Headers': 'Content-Type'
-    });
-    res.end(JSON.stringify({ 
-      success: true, 
-      message: `Cleared ${clearedCount} room subscription groups`,
-      timestamp: new Date().toISOString()
-    }));
-    return;
-  }
-
-  // Handle preflight requests for CORS
-  if (req.method === 'OPTIONS') {
-    res.writeHead(200, {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type'
-    });
-    res.end();
     return;
   }
 
