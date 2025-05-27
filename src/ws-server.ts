@@ -2,8 +2,6 @@ import { WebSocket, WebSocketServer } from 'ws';
 import { createServer } from 'http';
 import bcrypt from 'bcryptjs';
 import webpush from 'web-push';
-import fs from 'fs';
-import path from 'path';
 import { aiService } from './ai-service';
 
 const PORT = 3001;
@@ -49,38 +47,11 @@ interface PushNotificationSubscription extends NotificationSubscription {
 
 const notificationSubscriptions: Map<string, PushNotificationSubscription[]> = new Map(); // roomId -> subscriptions[]
 
-// File path for persistent storage
-const SUBSCRIPTIONS_FILE = path.join(__dirname, 'notification-subscriptions.json');
+// Memory-only storage - no file persistence
+// Subscriptions will be lost on server restart, which is desired behavior
 
-// Load subscriptions from file on startup
-function loadSubscriptionsFromFile(): void {
-  try {
-    if (fs.existsSync(SUBSCRIPTIONS_FILE)) {
-      const data = fs.readFileSync(SUBSCRIPTIONS_FILE, 'utf8');
-      const subscriptionsData = JSON.parse(data);
-      
-      // Convert back to Map format
-      for (const [roomId, subscriptions] of Object.entries(subscriptionsData)) {
-        notificationSubscriptions.set(roomId, subscriptions as PushNotificationSubscription[]);
-      }
-      
-      console.log(`[PERSISTENCE] Loaded ${notificationSubscriptions.size} room subscriptions from file`);
-    }
-  } catch (error) {
-    console.error('[PERSISTENCE] Error loading subscriptions from file:', error);
-  }
-}
-
-// Save subscriptions to file
-function saveSubscriptionsToFile(): void {
-  try {
-    const subscriptionsData = Object.fromEntries(notificationSubscriptions.entries());
-    fs.writeFileSync(SUBSCRIPTIONS_FILE, JSON.stringify(subscriptionsData, null, 2));
-    console.log('[PERSISTENCE] Saved subscriptions to file');
-  } catch (error) {
-    console.error('[PERSISTENCE] Error saving subscriptions to file:', error);
-  }
-}
+// Memory-only storage - no file persistence
+// Subscriptions will be lost on server restart, which is desired behavior
 
 // Notification management functions
 function addNotificationSubscription(roomId: string, username: string, interval: number, pushSubscription?: WebPushSubscription): void {
@@ -105,12 +76,8 @@ function addNotificationSubscription(roomId: string, username: string, interval:
   const existingIndex = roomSubscriptions.findIndex(sub => sub.username === username)
   if (existingIndex !== -1) {
     roomSubscriptions.splice(existingIndex, 1)
-  }
-  roomSubscriptions.push(subscription)
+  }  roomSubscriptions.push(subscription)
   console.log(`[NOTIFICATIONS] Added subscription for ${username} in room ${roomId} for ${interval} minutes`)
-  
-  // Save to persistent storage
-  saveSubscriptionsToFile()
   
   // Ensure room exists and won't be deleted while subscriptions are active
   if (!rooms[roomId]) {
@@ -130,12 +97,8 @@ function removeNotificationSubscription(roomId: string, username: string): void 
   const roomSubscriptions = notificationSubscriptions.get(roomId)
   if (!roomSubscriptions) return
   const index = roomSubscriptions.findIndex(sub => sub.username === username)
-  if (index !== -1) {
-    roomSubscriptions.splice(index, 1)
+  if (index !== -1) {    roomSubscriptions.splice(index, 1)
     console.log(`[NOTIFICATIONS] Removed subscription for ${username} in room ${roomId}`)
-    
-    // Save to persistent storage
-    saveSubscriptionsToFile()
     
     // Clean up empty arrays
     if (roomSubscriptions.length === 0) {
@@ -179,10 +142,7 @@ function cleanupExpiredSubscriptions(): void {
       cleanedCount += subscriptions.length - activeSubscriptions.length
     }
   }
-    if (cleanedCount > 0) {
-    console.log(`[NOTIFICATIONS] Cleaned up ${cleanedCount} expired subscriptions`)
-    // Save to persistent storage after cleanup
-    saveSubscriptionsToFile()
+    if (cleanedCount > 0) {    console.log(`[NOTIFICATIONS] Cleaned up ${cleanedCount} expired subscriptions`)
   }
 }
 
@@ -194,7 +154,20 @@ async function sendNotificationsForMessage(roomId: string, message: { username: 
     return;
   }
 
-  console.log(`[NOTIFICATIONS] Sending push notifications to ${activeSubscriptions.length} users for room ${roomId}`);
+  // Get currently active users in the room (connected via WebSocket)
+  const currentlyActiveUsers = rooms[roomId] ? Array.from(rooms[roomId].users) : [];
+  
+  // Filter out users who are currently active in the room - they don't need push notifications
+  const usersNeedingNotifications = activeSubscriptions.filter(sub => 
+    !currentlyActiveUsers.includes(sub.username)
+  );
+
+  if (usersNeedingNotifications.length === 0) {
+    console.log(`[NOTIFICATIONS] No users need notifications for room ${roomId} - all ${activeSubscriptions.length} subscribed users are currently active`);
+    return;
+  }
+
+  console.log(`[NOTIFICATIONS] Sending push notifications to ${usersNeedingNotifications.length}/${activeSubscriptions.length} users for room ${roomId} (excluding ${currentlyActiveUsers.length} active users)`);
 
   // Prepare notification payload
   const notificationPayload = JSON.stringify({
@@ -219,13 +192,13 @@ async function sendNotificationsForMessage(roomId: string, message: { username: 
     ]
   });
 
-  // Send push notifications to users with valid push subscriptions
-  const pushPromises = activeSubscriptions
+  // Send push notifications to users with valid push subscriptions who are NOT currently active
+  const pushPromises = usersNeedingNotifications
     .filter(sub => sub.pushSubscription)
     .map(async (sub) => {
       try {
         await webpush.sendNotification(sub.pushSubscription!, notificationPayload);
-        console.log(`[PUSH] Successfully sent push notification to ${sub.username} in room ${roomId}`);
+        console.log(`[PUSH] Successfully sent push notification to ${sub.username} in room ${roomId} (user not currently active)`);
       } catch (error) {
         console.error(`[PUSH] Failed to send push notification to ${sub.username}:`, error);
         
@@ -698,7 +671,4 @@ server.on('request', (req, res) => {
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`WebSocket server 1.5 running on ws://localhost:${PORT}`);
-  
-  // Load persistent subscriptions on startup
-  loadSubscriptionsFromFile();
 });
