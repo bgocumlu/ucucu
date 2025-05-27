@@ -730,6 +730,18 @@ class NotificationService {
     
     this.log('All notification subscriptions cleared')
   }
+
+  // Request backend to clear all push subscriptions (when VAPID keys change)
+  requestClearAllPushSubscriptions(): void {
+    if (this.websocketSend && typeof this.websocketSend === 'function') {
+      this.log('Requesting backend to clear all push subscriptions due to VAPID key change')
+      this.websocketSend({
+        type: "clearAllPushSubscriptions"
+      })
+    } else {
+      this.log('Cannot request backend to clear push subscriptions: WebSocket send function not available')
+    }
+  }
 }
 
 export const notificationService = NotificationService.getInstance()

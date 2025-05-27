@@ -60,17 +60,26 @@ export class WebPushService {
       // Wait for service worker to be ready
       await navigator.serviceWorker.ready      // Check if VAPID key has changed (force re-subscription if needed)
       const storedVapidKey = localStorage.getItem('vapidPublicKey')
-      if (storedVapidKey && storedVapidKey !== this.vapidPublicKey) {
+      console.log('[WebPushService] Stored VAPID key:', storedVapidKey)
+      console.log('[WebPushService] Current VAPID key:', this.vapidPublicKey)
+        if (storedVapidKey && storedVapidKey !== this.vapidPublicKey) {
         console.log('[WebPushService] VAPID key changed, clearing existing subscriptions')
         await this.forceUnsubscribeAll()
         
-        // Also clear notification service subscriptions via import
+        // Also clear notification service subscriptions
         try {
           const { notificationService } = await import('./notification-service')
           notificationService.clearAllSubscriptions()
+          
+          // Request backend to clear all push subscriptions too
+          notificationService.requestClearAllPushSubscriptions()
         } catch (error) {
-          console.warn('[WebPushService] Could not clear notification subscriptions:', error)
+          console.error('[WebPushService] Error clearing notification service subscriptions:', error)
         }
+      } else if (!storedVapidKey) {
+        console.log('[WebPushService] No stored VAPID key found, first time setup')
+      } else {
+        console.log('[WebPushService] VAPID key unchanged')
       }
       
       // Store current VAPID key for future comparison

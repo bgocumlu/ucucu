@@ -148,8 +148,32 @@ function cleanupExpiredSubscriptions(): void {
       cleanedCount += subscriptions.length - activeSubscriptions.length
     }
   }
-    if (cleanedCount > 0) {    console.log(`[NOTIFICATIONS] Cleaned up ${cleanedCount} expired subscriptions`)
+  if (cleanedCount > 0) {
+    console.log(`[NOTIFICATIONS] Cleaned up ${cleanedCount} expired subscriptions`)
   }
+}
+
+// Clear all push subscriptions (when VAPID keys change)
+function clearAllPushSubscriptions(): void {
+  let clearedCount = 0
+  
+  for (const [roomId, subscriptions] of notificationSubscriptions.entries()) {
+    // Remove all subscriptions with push endpoints
+    const subscriptionsWithoutPush = subscriptions.filter(sub => !sub.pushSubscription)
+    
+    clearedCount += subscriptions.length - subscriptionsWithoutPush.length
+    
+    if (subscriptionsWithoutPush.length === 0) {
+      notificationSubscriptions.delete(roomId)
+    } else {
+      notificationSubscriptions.set(roomId, subscriptionsWithoutPush)
+    }
+  }
+  
+  console.log(`[NOTIFICATIONS] Cleared ${clearedCount} push subscriptions due to VAPID key change`)
+  
+  // Broadcast room updates since some subscriptions were removed
+  broadcastRooms()
 }
 
 async function sendNotificationsForMessage(roomId: string, message: { username: string; text: string }): Promise<void> {
@@ -620,6 +644,14 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
           interval: userSubscription?.interval || 0,
           remainingTime: userSubscription ? Math.max(0, userSubscription.endTime - Date.now()) : 0
         }));
+      } else if (msg.type === 'clearAllPushSubscriptions') {
+        // Clear all push subscriptions (when VAPID keys change)
+        console.log('[NOTIFICATIONS] Received request to clear all push subscriptions due to VAPID key change');
+        clearAllPushSubscriptions();
+        ws.send(JSON.stringify({
+          type: 'pushSubscriptionsCleared',
+          success: true
+        }));
       } else if (msg.type === 'leaveRoom') {
         const { roomId, username } = msg;
         if (joinedRoom === roomId && joinedUser === username && rooms[roomId]) {
@@ -765,5 +797,5 @@ server.on('request', (req, res) => {
 });
 
 server.listen(PORT as number, '0.0.0.0', () => {
-  console.log(`WebSocket server 1.6 running on ws://localhost:${PORT}`);
+  console.log(`WebSocket server 1.6.1 running on ws://localhost:${PORT}`);
 });
