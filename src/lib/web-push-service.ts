@@ -19,20 +19,10 @@ export class WebPushService {
       WebPushService.instance = new WebPushService()
     }
     return WebPushService.instance
-  }
-  private async fetchVapidPublicKey(): Promise<void> {
-    try {
-      // Use the WebSocket URL to determine the API URL
-      const wsUrl = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:3001/'
-      const apiUrl = wsUrl.replace('ws://', 'http://').replace('wss://', 'https://').replace(/\/$/, '')
-      const response = await fetch(`${apiUrl}/vapid-public-key`)
-      const data = await response.json()
-      this.vapidPublicKey = data.publicKey
-      console.log('[WebPushService] VAPID public key fetched:', this.vapidPublicKey)    } catch (error) {
-      console.error('[WebPushService] Failed to fetch VAPID key:', error)
-      // Fallback to hardcoded key (must match backend VAPID_KEYS.publicKey)
-      this.vapidPublicKey = 'BB9hI03D1kGiSVXTToiCW3GfJP3qld9q7kZKR53EcNC9nV-JC54y1ZccBAFAZQcoM0vLTXbX1X6t9_fvhJNjbFk'
-    }
+  }  private async fetchVapidPublicKey(): Promise<void> {
+    // Use hardcoded VAPID key for consistency (must match backend)
+    this.vapidPublicKey = 'BB9hI03D1kGiSVXTToiCW3GfJP3qld9q7kZKR53EcNC9nV-JC54y1ZccBAFAZQcoM0vLTXbX1X6t9_fvhJNjbFk'
+    console.log('[WebPushService] VAPID public key set (hardcoded):', this.vapidPublicKey)
   }
   
   async initialize(): Promise<boolean> {

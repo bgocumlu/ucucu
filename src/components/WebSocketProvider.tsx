@@ -65,6 +65,7 @@ export const WebSocketProvider = ({ children }: { children: React.ReactNode }) =
               notificationService.showNotification(msg.roomId, msg.message);
             } else {
               console.log('[WebSocketProvider] Service Worker available, skipping WebSocket notification (will be handled by SW)');
+              notificationService.showNotification(msg.roomId, msg.message);
             }
             // Don't set this as lastMessage as it's not for UI updates
             return;

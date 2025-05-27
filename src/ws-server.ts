@@ -6,10 +6,10 @@ import { aiService } from './ai-service';
 
 const PORT = process.env.PORT || 3001;
 
-// VAPID keys configuration for web push
+// VAPID keys configuration for web push (hardcoded for consistency)
 const VAPID_KEYS = {
-  publicKey: process.env.VAPID_PUBLIC_KEY || 'BB9hI03D1kGiSVXTToiCW3GfJP3qld9q7kZKR53EcNC9nV-JC54y1ZccBAFAZQcoM0vLTXbX1X6t9_fvhJNjbFk',
-  privateKey: process.env.VAPID_PRIVATE_KEY || 'C9wCGaWyBdumqCKK8NWu0kMlE18KMo6gaukG30kHY8Y'
+  publicKey: 'BB9hI03D1kGiSVXTToiCW3GfJP3qld9q7kZKR53EcNC9nV-JC54y1ZccBAFAZQcoM0vLTXbX1X6t9_fvhJNjbFk',
+  privateKey: 'C9wCGaWyBdumqCKK8NWu0kMlE18KMo6gaukG30kHY8Y'
 };
 
 // Configure web-push with VAPID details
@@ -798,6 +798,38 @@ server.on('request', (req, res) => {
       'Access-Control-Allow-Headers': 'Content-Type'
     });
     res.end(JSON.stringify({ publicKey: VAPID_KEYS.publicKey }));
+    return;
+  }
+
+  // Handle admin endpoint to clear all push subscriptions
+  if (req.method === 'POST' && req.url === '/admin/clear-subscriptions') {
+    console.log('[ADMIN] HTTP request to clear all push subscriptions');
+    const clearedCount = notificationSubscriptions.size;
+    notificationSubscriptions.clear();
+    console.log(`[ADMIN] Cleared ${clearedCount} room subscription groups via HTTP`);
+    
+    res.writeHead(200, { 
+      'Content-Type': 'application/json',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'POST',
+      'Access-Control-Allow-Headers': 'Content-Type'
+    });
+    res.end(JSON.stringify({ 
+      success: true, 
+      message: `Cleared ${clearedCount} room subscription groups`,
+      timestamp: new Date().toISOString()
+    }));
+    return;
+  }
+
+  // Handle preflight requests for CORS
+  if (req.method === 'OPTIONS') {
+    res.writeHead(200, {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type'
+    });
+    res.end();
     return;
   }
 
