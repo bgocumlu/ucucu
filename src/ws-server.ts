@@ -8,8 +8,8 @@ const PORT = process.env.PORT || 3001;
 
 // VAPID keys configuration for web push
 const VAPID_KEYS = {
-  publicKey: process.env.VAPID_PUBLIC_KEY || 'BNJzpvdPZFe6SbdKZ8HkpKYBtbUKTJ6mUUy7KFJ8F7H2xF4HcJCQy6HPHrR9n8Q4pT3Hc_zJz4b6KqZp7Xy8Jx4',
-  privateKey: process.env.VAPID_PRIVATE_KEY || 'Qy6HPHrR9n8Q4pT3Hc_zJz4b6KqZp7Xy8Jx4BNJzpvd'
+  publicKey: process.env.VAPID_PUBLIC_KEY || 'BB9hI03D1kGiSVXTToiCW3GfJP3qld9q7kZKR53EcNC9nV-JC54y1ZccBAFAZQcoM0vLTXbX1X6t9_fvhJNjbFk',
+  privateKey: process.env.VAPID_PRIVATE_KEY || 'C9wCGaWyBdumqCKK8NWu0kMlE18KMo6gaukG30kHY8Y'
 };
 
 // Configure web-push with VAPID details

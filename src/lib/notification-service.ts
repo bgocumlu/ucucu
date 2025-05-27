@@ -709,6 +709,27 @@ class NotificationService {
       return false
     }
   }
+
+  // Clear all subscriptions (used when VAPID keys change)
+  clearAllSubscriptions(): void {
+    this.log('Clearing all notification subscriptions due to VAPID key change')
+    
+    // Clear in-memory subscriptions
+    this.subscriptions.clear()
+    
+    // Clear all cleanup timers
+    for (const timeout of this.intervals.values()) {
+      clearTimeout(timeout)
+    }
+    this.intervals.clear()
+    
+    // Clear localStorage
+    if (typeof window !== 'undefined') {
+      localStorage.removeItem('notificationSubscriptions')
+    }
+    
+    this.log('All notification subscriptions cleared')
+  }
 }
 
 export const notificationService = NotificationService.getInstance()

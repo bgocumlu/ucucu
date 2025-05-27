@@ -28,11 +28,10 @@ export class WebPushService {
       const response = await fetch(`${apiUrl}/vapid-public-key`)
       const data = await response.json()
       this.vapidPublicKey = data.publicKey
-      console.log('[WebPushService] VAPID public key fetched:', this.vapidPublicKey)
-    } catch (error) {
+      console.log('[WebPushService] VAPID public key fetched:', this.vapidPublicKey)    } catch (error) {
       console.error('[WebPushService] Failed to fetch VAPID key:', error)
-      // Fallback to hardcoded key (updated with correct key)
-      this.vapidPublicKey = 'BGl9j3HkonR05k5n4JDk9Fgv4cdVRoUW0jJ569QZBhZEMieHayUiaZMqtEvoe6fCVjYTbi1-1jYqf_iVeYByxmQ'
+      // Fallback to hardcoded key (must match backend VAPID_KEYS.publicKey)
+      this.vapidPublicKey = 'BB9hI03D1kGiSVXTToiCW3GfJP3qld9q7kZKR53EcNC9nV-JC54y1ZccBAFAZQcoM0vLTXbX1X6t9_fvhJNjbFk'
     }
   }
   
@@ -59,7 +58,23 @@ export class WebPushService {
       console.log('[WebPushService] Service Worker registered:', this.registration)
       
       // Wait for service worker to be ready
-      await navigator.serviceWorker.ready
+      await navigator.serviceWorker.ready      // Check if VAPID key has changed (force re-subscription if needed)
+      const storedVapidKey = localStorage.getItem('vapidPublicKey')
+      if (storedVapidKey && storedVapidKey !== this.vapidPublicKey) {
+        console.log('[WebPushService] VAPID key changed, clearing existing subscriptions')
+        await this.forceUnsubscribeAll()
+        
+        // Also clear notification service subscriptions via import
+        try {
+          const { notificationService } = await import('./notification-service')
+          notificationService.clearAllSubscriptions()
+        } catch (error) {
+          console.warn('[WebPushService] Could not clear notification subscriptions:', error)
+        }
+      }
+      
+      // Store current VAPID key for future comparison
+      localStorage.setItem('vapidPublicKey', this.vapidPublicKey)
       
       return true
     } catch (error) {
@@ -151,6 +166,37 @@ export class WebPushService {
     }
   }
   
+  // Force clear all existing subscriptions (use when VAPID keys change)
+  async forceUnsubscribeAll(): Promise<boolean> {
+    console.log('[WebPushService] Force clearing all subscriptions due to VAPID key change')
+    
+    try {
+      if (!this.registration) {
+        await this.initialize()
+      }
+      
+      if (this.registration) {
+        // Get existing subscription
+        const existingSubscription = await this.registration.pushManager.getSubscription()
+        if (existingSubscription) {
+          console.log('[WebPushService] Unsubscribing existing subscription')
+          await existingSubscription.unsubscribe()
+        }
+        
+        // Clear local reference
+        this.subscription = null
+        
+        console.log('[WebPushService] All subscriptions cleared successfully')
+        return true
+      }
+      
+      return false
+    } catch (error) {
+      console.error('[WebPushService] Failed to clear subscriptions:', error)
+      return false
+    }
+  }
+
   // Helper functions
   private urlBase64ToUint8Array(base64String: string): Uint8Array {
     const padding = '='.repeat((4 - base64String.length % 4) % 4)
