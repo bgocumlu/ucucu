@@ -20,10 +20,11 @@ export class WebPushService {
     }
     return WebPushService.instance
   }
-  
-  private async fetchVapidPublicKey(): Promise<void> {
+    private async fetchVapidPublicKey(): Promise<void> {
     try {
-      const response = await fetch('http://localhost:3001/vapid-public-key')
+      // Use environment variable for API URL, falling back to localhost
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001'
+      const response = await fetch(`${apiUrl}/vapid-public-key`)
       const data = await response.json()
       this.vapidPublicKey = data.publicKey
       console.log('[WebPushService] VAPID public key fetched')

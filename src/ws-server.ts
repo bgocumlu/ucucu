@@ -4,7 +4,7 @@ import bcrypt from 'bcryptjs';
 import webpush from 'web-push';
 import { aiService } from './ai-service';
 
-const PORT = 3001;
+const PORT = process.env.PORT || 3001;
 
 // VAPID keys configuration for web push
 const VAPID_KEYS = {
@@ -669,6 +669,6 @@ server.on('request', (req, res) => {
   res.end('WebSocket server does not serve HTTP content. Use WebSocket protocol.');
 });
 
-server.listen(PORT, '0.0.0.0', () => {
+server.listen(PORT as number, '0.0.0.0', () => {
   console.log(`WebSocket server 1.5 running on ws://localhost:${PORT}`);
 });

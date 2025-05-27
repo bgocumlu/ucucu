@@ -160,19 +160,6 @@ export function NotificationBell({ roomId, username, className = "" }: Notificat
     updateState()
   }
 
-  const handleTestNotification = async () => {
-    console.log('[NotificationBell] Testing notification system')
-    
-    // Don't use testNotification method, instead show notification directly
-    if (notificationService.hasNotificationPermission()) {
-      await notificationService.showNotification(roomId, {
-        username: 'System',
-        content: 'Test notification! You\'ll receive notifications for new messages when away. 🔔'
-      })
-    } else {
-      console.log('[NotificationBell] No permission for test notification')
-    }
-  }
 
   const getBellIcon = () => {
     if (!hasPermission || !isSubscribed) {
@@ -200,19 +187,17 @@ export function NotificationBell({ roomId, username, className = "" }: Notificat
   const BellIcon = getBellIcon()
 
   return (
-    <div className={`flex flex-col items-center justify-center ${className}`}>
-      <Button
+    <div className={`flex flex-col items-center justify-center ${className}`}>      <Button
         variant="ghost"
         size="sm"
         className="h-8 w-8 p-0 rounded-full hover:bg-gray-100"
         onClick={handleBellClick}
-        onDoubleClick={handleTestNotification} // Double-click to test
         title={
           !hasPermission
-            ? "Enable notifications (double-click to test)"
+            ? "Enable notifications"
             : !isSubscribed
-            ? "Click to enable room notifications (double-click to test)"
-            : `Notifications active for ${Math.ceil(remainingTime / 60)} minutes (double-click to test)`
+            ? "Click to enable room notifications"
+            : `Notifications active for ${Math.ceil(remainingTime / 60)} minutes`
         }
       >
         <BellIcon 
