@@ -289,22 +289,55 @@ class NotificationService {
       clearTimeout(this.intervals.get(roomId)!)
       this.intervals.delete(roomId)
     }
-  }
-
-  async requestNotificationPermission(): Promise<NotificationPermission> {
+  }  async requestNotificationPermission(): Promise<NotificationPermission> {
+    this.log('Requesting notification permission (user triggered)')
+    
     if (!('Notification' in window)) {
       this.log('Browser does not support notifications')
       return 'denied'
     }
 
-    let permission = Notification.permission
+    // Check if we're in a PWA environment
+    const isPWA = window.matchMedia('(display-mode: standalone)').matches || 
+                  (window.navigator as { standalone?: boolean }).standalone === true ||
+                  document.referrer.includes('android-app://');
     
-    if (permission === 'default') {
-      this.log('Requesting notification permission')
-      permission = await Notification.requestPermission()
+    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent)
+    
+    this.log('Environment check', { isPWA, isIOS, userAgent: navigator.userAgent })
+
+    let permission = Notification.permission
+    this.log('Current notification permission:', permission)
+    
+    if (permission === 'granted') {
+      return 'granted'
     }
     
-    this.log('Notification permission status:', permission)
+    if (permission === 'denied') {
+      this.log('Notifications denied - user needs to enable in browser settings')
+      return 'denied'
+    }
+    
+    // For iOS PWA, we can't request permission programmatically
+    if (isIOS && isPWA) {
+      this.log('iOS PWA detected - permission must be granted in Safari first')
+      return 'denied' // This will trigger the iOS PWA alert message
+    }
+    
+    // For regular browsers or iOS Safari - only request when user interacts
+    if (permission === 'default') {
+      this.log('Requesting notification permission via browser API (user interaction)')
+      try {
+        // This MUST be called from a user gesture (click, tap, etc.)
+        permission = await Notification.requestPermission()
+        this.log('Permission request result:', permission)
+      } catch (error) {
+        this.log('Error requesting permission:', error)
+        return 'denied'
+      }
+    }
+    
+    this.log('Final notification permission status:', permission)
     return permission
   }
 
@@ -632,7 +665,6 @@ class NotificationService {
       return false
     }
   }
-
   // Initialize Web Push service
   private async initializeWebPush() {
     if (typeof window === 'undefined') return
@@ -641,14 +673,7 @@ class NotificationService {
       const initialized = await webPushService.initialize()
       if (initialized) {
         this.log('Web Push service initialized successfully')
-        
-        // Request permission for push notifications
-        const permission = await webPushService.requestPermission()
-        if (permission === 'granted') {
-          this.log('Push notification permission granted')
-        } else {
-          this.log('Push notification permission denied:', permission)
-        }
+        // Don't request permission here - only when user clicks bell
       } else {
         this.log('Web Push service initialization failed')
       }

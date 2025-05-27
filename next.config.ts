@@ -1,7 +1,7 @@
 // next.config.ts
 const nextConfig = {
   /* config options here */
-  allowedDevOrigins: ["192.168.1.223"],
+  allowedDevOrigins: ["192.168.1.2"],
   // ...other config options...
 };
 

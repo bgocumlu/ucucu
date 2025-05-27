@@ -18,7 +18,6 @@ export function NotificationBell({ roomId, username, className = "" }: Notificat
   const [isSubscribed, setIsSubscribed] = useState(false)
   const [remainingTime, setRemainingTime] = useState(0)
   const [currentInterval, setCurrentInterval] = useState<NotificationInterval>(0)
-
   // Update state from notification service
   const updateState = useCallback(() => {
     // Check notification permission status (same as web)
@@ -122,18 +121,19 @@ export function NotificationBell({ roomId, username, className = "" }: Notificat
     })
     
     if (interval > 0) {
-      console.log('[NotificationBell] Sent subscription request to backend', { roomId, username, interval })    } else {
+      console.log('[NotificationBell] Sent subscription request to backend', { roomId, username, interval })
+    } else {
       console.log('[NotificationBell] Sent unsubscription request to backend', { roomId, username })
     }
-  }
+  }  const handleBellClick = async () => {
+    console.log('[NotificationBell] Bell clicked', { hasPermission, isSubscribed, roomId })
 
-  const handleBellClick = async () => {
     // If no permission, request it
     if (!hasPermission) {
-      // Request permission using notification service
-      const permission = await notificationService.requestNotificationPermission()
+      const permission = await Notification.requestPermission()
       
       if (permission !== 'granted') {
+        console.log('[NotificationBell] Notification permission denied')
         return
       }
       
@@ -142,14 +142,18 @@ export function NotificationBell({ roomId, username, className = "" }: Notificat
 
     // Cycle through intervals
     const nextInterval = notificationService.getNextInterval(currentInterval)
+    console.log('[NotificationBell] Cycling interval', { currentInterval, nextInterval })
     
     if (nextInterval === 0) {
       // Disable notifications
       notificationService.unsubscribeFromRoom(roomId)
+      console.log('[NotificationBell] Notifications disabled for room', roomId)
     } else {
       // Subscribe with new interval
       const success = await notificationService.subscribeToRoom(roomId, nextInterval)
-      if (!success) {
+      if (success) {
+        console.log('[NotificationBell] Subscribed to room notifications', { roomId, interval: nextInterval })
+      } else {
         console.error('[NotificationBell] Failed to subscribe to room notifications', roomId)
       }
     }
