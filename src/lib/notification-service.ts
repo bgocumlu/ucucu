@@ -422,7 +422,6 @@ class NotificationService {
     const now = Date.now()
     return Array.from(this.subscriptions.values()).filter(sub => sub.endTime > now)
   }
-
   // This will be called when a new message arrives
   async showNotification(roomId: string, message: { username: string; content: string }) {
     this.log(`showNotification called with:`, { roomId, message, roomIdType: typeof roomId })
@@ -432,21 +431,18 @@ class NotificationService {
       return
     }
 
-    const subscription = this.getSubscription(roomId)
-    if (!subscription) {
-      this.log(`Not showing notification for room ${roomId}: not subscribed`)
-      return
-    }
-
     if (!this.hasNotificationPermission()) {
       this.log(`Not showing notification for room ${roomId}: no permission`)
       return
-    }
-
-    // Always show notifications - let the backend handle filtering
-    this.log(`Showing notification for room ${roomId} - backend controls timing`)
+    }    // Show notification - backend has already filtered for subscribed users
+    this.log(`Showing notification for room ${roomId} - backend has authorized this notification`)
 
     try {
+      // Check notification permission again before creating
+      this.log(`Browser notification permission: ${Notification.permission}`)
+      this.log(`Document visibility: ${document.visibilityState}`)
+      this.log(`Window focus: ${document.hasFocus()}`)
+      
       // Direct notification API (more reliable for testing)
       const notification = new Notification(`New message in /${roomId}`, {
         body: `${message.username}: ${message.content}`,
@@ -458,14 +454,32 @@ class NotificationService {
         silent: false
       })
 
+      this.log(`Notification object created:`, notification)
+
       notification.onclick = () => {
+        this.log(`Notification clicked for room ${roomId}`)
         window.focus()
         window.location.href = `/${roomId}/chat`
         notification.close()
       }
 
+      notification.onshow = () => {
+        this.log(`Notification successfully displayed for room ${roomId}`)
+      }
+
+      notification.onerror = (error) => {
+        this.log(`Notification error for room ${roomId}:`, error)
+      }
+
+      notification.onclose = () => {
+        this.log(`Notification closed for room ${roomId}`)
+      }
+
       // Auto-close after 5 seconds
-      setTimeout(() => notification.close(), 5000)
+      setTimeout(() => {
+        this.log(`Auto-closing notification for room ${roomId}`)
+        notification.close()
+      }, 5000)
       
       this.log(`Notification shown for room ${roomId}`, message)
     } catch (error) {
