@@ -13,7 +13,7 @@ const configExport = async () => {
     dest: "public",
     register: true,
     skipWaiting: true,
-    disable: isDev,
+    disable: true, // Disable PWA service worker completely to avoid conflicts
     sw: "sw.js",
   })(nextConfig);
 };

@@ -303,6 +303,7 @@ class NotificationService {
     }
     
     this.log('Permission already set:', Notification.permission)
+    alert(`Notification permission is set to ${Notification.permission}.`)
     return Notification.permission
   }
 
@@ -416,10 +417,10 @@ class NotificationService {
   getAllActiveSubscriptions(): NotificationSubscription[] {
     const now = Date.now()
     return Array.from(this.subscriptions.values()).filter(sub => sub.endTime > now)
-  }
-  // This will be called when a new message arrives
+  }  // This will be called when a new message arrives
   async showNotification(roomId: string, message: { username: string; content: string }) {
-    this.log(`showNotification called for room ${roomId}:`, message)
+    const timestamp = Date.now()
+    this.log(`showNotification called for room ${roomId} at ${timestamp}:`, message)
     
     if (!roomId) {
       this.log(`Error: roomId is ${roomId}`)
@@ -434,41 +435,34 @@ class NotificationService {
     // Show notification - backend has already filtered for subscribed users
     this.log(`Showing notification for room ${roomId}`)
 
-    try {      const title = `/${roomId}`
+    try {
+      const title = `/${roomId}`
       const body = `${message.username}: ${message.content}`
-      const timestamp = Date.now()
-      const options = {
-        body,
-        icon: '/icons/manifest-icon-192.maskable.png',
-        badge: '/icons/manifest-icon-192.maskable.png',
-        tag: `room-${roomId}-${timestamp}`, // Add timestamp to prevent replacement
-        data: { roomId, message, url: `/${roomId}/chat` },
-        requireInteraction: false,
-        silent: false
-      }
 
-      this.log(`Creating notification with:`, { title, body, options })      // Try Service Worker notification first (works in background)
+      this.log(`Creating notification with title: ${title}, body: ${body}`)
+
+      // ONLY use Service Worker notifications - no fallback to direct notifications
       if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
-        // Send message to Service Worker to show notification
+        // Check which service worker is active
+        const registration = await navigator.serviceWorker.ready
+        this.log(`Active Service Worker: ${registration.active?.scriptURL}`)
+        
         navigator.serviceWorker.controller.postMessage({
           type: 'SHOW_NOTIFICATION',
           title,
           body,
           roomId,
           username: message.username,
-          content: message.content
+          content: message.content,
+          timestamp
         })
-        this.log(`Service Worker notification message sent for room ${roomId}`)
-        return // Always return here when Service Worker is available
+        this.log(`Service Worker notification message sent for room ${roomId} with timestamp ${timestamp}`)
+      } else {
+        this.log(`Service Worker not available for room ${roomId} - notification not shown`)
       }
-
-      // Fallback to direct notification (only when Service Worker is not available)
-      const notification = new Notification(title, options)
-      this.setupNotificationHandlers(notification, roomId)
-      this.log(`Direct notification created for room ${roomId}`)
       
     } catch (error) {
-      console.error('[NotificationService] Failed to show notification:', error)
+      console.error('[NotificationService] Failed to send notification to Service Worker:', error)
     }
   }
 

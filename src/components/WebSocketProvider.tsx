@@ -57,7 +57,15 @@ export const WebSocketProvider = ({ children }: { children: React.ReactNode }) =
           // Handle push notifications
           if (msg.type === 'pushNotification') {
             console.log('[WebSocketProvider] Received push notification:', msg);
-            notificationService.showNotification(msg.roomId, msg.message);
+            
+            // Only show notification via WebSocket if Service Worker is not available
+            // If Service Worker is available, it will handle the push notification directly
+            if (!('serviceWorker' in navigator) || !navigator.serviceWorker.controller) {
+              console.log('[WebSocketProvider] Service Worker not available, showing notification via WebSocket');
+              notificationService.showNotification(msg.roomId, msg.message);
+            } else {
+              console.log('[WebSocketProvider] Service Worker available, skipping WebSocket notification (will be handled by SW)');
+            }
             // Don't set this as lastMessage as it's not for UI updates
             return;
           }
