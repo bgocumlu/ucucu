@@ -57,7 +57,15 @@ class NotificationService {
     this.initializeWebPush()
     
     // Initialize cross-tab communication
-    this.initializeCrossTabCommunication()
+    this.initializeCrossTabCommunication()    // Add to global window for emergency admin access (development only)
+    if (typeof window !== 'undefined' && process.env.NODE_ENV === 'development') {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (window as any).notificationServiceAdmin = {
+        clearAll: () => this.adminClearAllSubscriptions(),
+        clearLocal: () => this.clearAllSubscriptions(),
+        status: () => this.debugStatus('admin')
+      }
+    }
   }
 
   // Set the WebSocket send function for backend communication
@@ -740,6 +748,18 @@ class NotificationService {
       })
     } else {
       this.log('Cannot request backend to clear push subscriptions: WebSocket send function not available')
+    }
+  }
+
+  // Admin function to force clear all subscriptions (for emergency VAPID key fixes)
+  adminClearAllSubscriptions(): void {
+    if (this.websocketSend && typeof this.websocketSend === 'function') {
+      this.log('ADMIN: Force clearing all backend subscriptions')
+      this.websocketSend({
+        type: "adminClearAllSubscriptions"
+      })
+    } else {
+      this.log('Cannot send admin clear command: WebSocket send function not available')
     }
   }
 }

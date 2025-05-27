@@ -652,6 +652,16 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
           type: 'pushSubscriptionsCleared',
           success: true
         }));
+      } else if (msg.type === 'adminClearAllSubscriptions') {
+        // Admin command to force clear all subscriptions (for VAPID key mismatch fixes)
+        console.log('[ADMIN] Force clearing ALL notification subscriptions');
+        notificationSubscriptions.clear();
+        console.log('[ADMIN] All notification subscriptions cleared');
+        ws.send(JSON.stringify({
+          type: 'adminSubscriptionsCleared',
+          success: true,
+          message: 'All subscriptions forcefully cleared'
+        }));
       } else if (msg.type === 'leaveRoom') {
         const { roomId, username } = msg;
         if (joinedRoom === roomId && joinedUser === username && rooms[roomId]) {
