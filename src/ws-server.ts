@@ -192,23 +192,7 @@ async function sendNotificationsForMessage(roomId: string, message: { username: 
     return;
   }
 
-  // Get currently active users in the room (connected via WebSocket)
-  const currentlyActiveUsers = rooms[roomId] ? Array.from(rooms[roomId].users) : [];
-  
-  // Filter out users who are currently active in the room - they don't need push notifications
-  const usersNeedingNotifications = activeSubscriptions.filter(sub => 
-    !currentlyActiveUsers.includes(sub.username)
-  );
-
-  // If no users need notifications, exit early
-  // Uncomment this block if you want to skip sending notifications when all users are active
-  // I Dont want to skip sending notifications when all users are active, because some users may have closed the browser or tab, but still have active subscriptions
-  // if (usersNeedingNotifications.length === 0) {
-  //   console.log(`[NOTIFICATIONS] No users need notifications for room ${roomId} - all ${activeSubscriptions.length} subscribed users are currently active`);
-  //   return;
-  // }
-  // console.log(`[NOTIFICATIONS] Sending push notifications to ${usersNeedingNotifications.length}/${activeSubscriptions.length} users for room ${roomId} (excluding ${currentlyActiveUsers.length} active users)`);
-
+  console.log(`[NOTIFICATIONS] Sending notifications to ALL ${activeSubscriptions.length} subscribed users for room ${roomId} (including active users)`);
 
   // Prepare notification payload
   const notificationPayload = JSON.stringify({
@@ -233,13 +217,13 @@ async function sendNotificationsForMessage(roomId: string, message: { username: 
     ]
   });
 
-  // Send push notifications to users with valid push subscriptions who are NOT currently active
-  const pushPromises = usersNeedingNotifications
+  // Send push notifications to ALL users with valid push subscriptions (including active users)
+  const pushPromises = activeSubscriptions
     .filter(sub => sub.pushSubscription)
     .map(async (sub) => {
       try {
         await webpush.sendNotification(sub.pushSubscription!, notificationPayload);
-        console.log(`[PUSH] Successfully sent push notification to ${sub.username} (${sub.deviceId}) in room ${roomId} (user not currently active)`);
+        console.log(`[PUSH] Successfully sent push notification to ${sub.username} (${sub.deviceId}) in room ${roomId}`);
       } catch (error) {
         console.error(`[PUSH] Failed to send push notification to ${sub.username}:`, error);
           // If the subscription is invalid (410 Gone), remove it
