@@ -54,6 +54,13 @@ export const WebSocketProvider = ({ children }: { children: React.ReactNode }) =
         try {
           const msg = JSON.parse(event.data);
           
+          // Handle notification status responses
+          if (msg.type === 'notificationStatus' || msg.type === 'allNotificationStatus') {
+            console.log('[WebSocketProvider] Received notification status:', msg);
+            notificationService.handleBackendSubscriptionUpdate(msg);
+            return;
+          }
+          
           // Handle push notifications
           if (msg.type === 'pushNotification') {
             console.log('[WebSocketProvider] Received push notification:', msg);
@@ -81,9 +88,7 @@ export const WebSocketProvider = ({ children }: { children: React.ReactNode }) =
         } catch {}
       };
     });
-  }, []);
-
-  useEffect(() => {
+  }, []);  useEffect(() => {
     connect();
     return () => {
       if (wsRef.current) wsRef.current.close();
@@ -114,6 +119,11 @@ export const WebSocketProvider = ({ children }: { children: React.ReactNode }) =
   const setOnMessage = useCallback((cb: ((msg: WSMessage) => void) | null) => {
     onMessageRef.current = cb;
   }, []);
+
+  // Set up notification service WebSocket integration
+  useEffect(() => {
+    notificationService.setWebSocketSend(send);
+  }, [send]);
 
   // Memoize context value to avoid triggering renders from wsRef.current changes
   const contextValue = React.useMemo(() => ({

@@ -67,29 +67,33 @@ class NotificationService {
     // Restore any pending subscriptions now that WebSocket is available
     this.restoreSubscriptionsToBackend()
   }
-
-  // Restore all active local subscriptions to the backend
+  // Restore all active local subscriptions (only restore local state, fetch data from backend)
   private restoreSubscriptionsToBackend() {
     if (!this.websocketSend) {
-      this.log('Cannot restore subscriptions to backend: WebSocket not available')
+      this.log('Cannot restore subscriptions: WebSocket not available')
       return
     }
 
     const activeSubscriptions = this.getAllActiveSubscriptions()
     
     if (activeSubscriptions.length === 0) {
-      this.log('No active subscriptions to restore to backend')
+      this.log('No active subscriptions to restore')
       return
     }
 
-    this.log(`Restoring ${activeSubscriptions.length} subscriptions to backend`)
+    this.log(`Restoring ${activeSubscriptions.length} subscriptions locally (fetching current data from backend)`)
     
+    // Only set up local timers and fetch current status from backend
     for (const subscription of activeSubscriptions) {
-      const remainingMinutes = Math.ceil((subscription.endTime - Date.now()) / (60 * 1000))
-      if (remainingMinutes > 0) {
-        this.syncWithBackend(subscription.roomId, subscription.username, remainingMinutes as NotificationInterval, subscription.pushSubscription)
+      const remainingTime = subscription.endTime - Date.now()
+      if (remainingTime > 0) {
+        // Set up auto-cleanup timer
+        this.setupAutoCleanup(subscription.roomId, remainingTime)
       }
     }
+    
+    // Fetch all current subscription data from backend to sync state
+    this.fetchAllSubscriptionsFromBackend()
   }
 
   // Restore subscriptions for a specific user when they reconnect
@@ -103,17 +107,18 @@ class NotificationService {
       return
     }
     
-    this.log(`Restoring ${activeSubscriptions.length} subscriptions for device ${this.deviceId}`)
+    this.log(`Restoring ${activeSubscriptions.length} subscriptions for device ${this.deviceId} (updating username only)`)
     
     for (const subscription of activeSubscriptions) {
-      const remainingMinutes = Math.ceil((subscription.endTime - Date.now()) / (60 * 1000))
-      if (remainingMinutes > 0) {
-        // Update subscription with current username
+      const remainingTime = subscription.endTime - Date.now()
+      if (remainingTime > 0) {
+        // Update subscription with current username (local state only)
         subscription.username = username
         this.subscriptions.set(subscription.roomId, subscription)
         this.saveSubscriptionsToStorage()
         
-        this.syncWithBackend(subscription.roomId, username, remainingMinutes as NotificationInterval)
+        // Set up auto-cleanup timer
+        this.setupAutoCleanup(subscription.roomId, remainingTime)
       }
     }
   }
@@ -179,9 +184,8 @@ class NotificationService {
       this.log('Failed to save subscriptions to storage:', error)
     }
   }
-
-  // Sync subscription with backend
-  private syncWithBackend(roomId: string, username: string, interval: NotificationInterval, pushSubscription?: PushSubscriptionData) {
+  // Send actual subscription/unsubscription request to backend (only called by bell clicks)
+  private sendSubscriptionToBackend(roomId: string, username: string, interval: NotificationInterval, pushSubscription?: PushSubscriptionData) {
     if (this.websocketSend && typeof this.websocketSend === 'function') {
       this.websocketSend({
         type: "subscribeNotifications",
@@ -191,14 +195,28 @@ class NotificationService {
         interval,
         pushSubscription
       })
-      this.log(`Synced subscription with backend: ${username} (device: ${this.deviceId}) in room ${roomId} for ${interval} minutes`)
+      this.log(`Sent subscription request to backend: ${username} (device: ${this.deviceId}) in room ${roomId} for ${interval} minutes`)
     } else {
-      this.log('Cannot sync with backend: WebSocket send function not available')
-    }  }
+      this.log('Cannot send subscription to backend: WebSocket send function not available')
+    }
+  }
 
-  // Public method to sync subscription with backend (includes deviceId)
+  // Public method to send subscription to backend (only for bell clicks)
   syncSubscriptionWithBackend(roomId: string, username: string, interval: NotificationInterval, pushSubscription?: PushSubscriptionData) {
-    this.syncWithBackend(roomId, username, interval, pushSubscription)
+    this.sendSubscriptionToBackend(roomId, username, interval, pushSubscription)
+  }
+
+  // Fetch all subscriptions for this device from backend (for state restoration)
+  async fetchAllSubscriptionsFromBackend(): Promise<void> {
+    if (this.websocketSend && typeof this.websocketSend === 'function') {
+      this.websocketSend({
+        type: "getAllNotificationStatus",
+        deviceId: this.deviceId
+      })
+      this.log(`Requested all subscription statuses from backend for device ${this.deviceId}`)
+    } else {
+      this.log('Cannot fetch all subscriptions from backend: WebSocket send function not available')
+    }
   }
 
   // Fetch subscription status from backend
@@ -215,7 +233,6 @@ class NotificationService {
       this.log('Cannot fetch subscription from backend: WebSocket send function not available')
     }
   }
-
   // Handle backend subscription response
   handleBackendSubscriptionUpdate(data: WebSocketMessage) {
     if (data.type === 'notificationStatus' && data.roomId) {
@@ -236,8 +253,36 @@ class NotificationService {
         })
       } else {
         // No active subscription
-        this.removeSubscriptionFromBackend(roomId)
+        // this.removeSubscriptionFromBackend(roomId)
       }
+    } else if (data.type === 'allNotificationStatus' && Array.isArray(data.subscriptions)) {
+      // Handle bulk subscription update
+      this.log(`Received ${data.subscriptions.length} subscription statuses from backend`)
+      
+      // Clear current subscriptions for this device
+      const currentSubscriptions = Array.from(this.subscriptions.keys())
+      for (const roomId of currentSubscriptions) {
+        this.subscriptions.delete(roomId)
+        this.clearAutoCleanup(roomId)
+      }
+      
+      // Add all active subscriptions from backend
+      const now = Date.now()
+      for (const sub of data.subscriptions) {
+        if (sub.roomId && sub.interval && sub.interval > 0 && sub.remainingTime && sub.remainingTime > 0) {
+          const endTime = now + sub.remainingTime
+          this.updateSubscriptionFromBackend(sub.roomId, {
+            roomId: sub.roomId,
+            interval: sub.interval,
+            startTime: now - (sub.interval * 60 * 1000) + sub.remainingTime,
+            endTime,
+            deviceId: this.deviceId,
+            username: sub.username || 'unknown'
+          })
+        }
+      }
+      
+      this.log(`Updated ${this.subscriptions.size} subscriptions from backend bulk response`)
     }
   }
 
@@ -260,12 +305,12 @@ class NotificationService {
   }
 
   // Remove subscription (used when backend reports no subscription)
-  removeSubscriptionFromBackend(roomId: string) {
-    this.subscriptions.delete(roomId)
-    this.clearAutoCleanup(roomId)
-    this.saveSubscriptionsToStorage() // Save to localStorage
-    this.log(`Removed subscription from backend for room ${roomId}`)
-  }
+  // removeSubscriptionFromBackend(roomId: string) {
+  //   this.subscriptions.delete(roomId)
+  //   this.clearAutoCleanup(roomId)
+  //   this.saveSubscriptionsToStorage() // Save to localStorage
+  //   this.log(`Removed subscription from backend for room ${roomId}`)
+  // }
 
   private setupAutoCleanup(roomId: string, remainingTime: number) {
     if (this.intervals.has(roomId)) {
@@ -352,16 +397,14 @@ class NotificationService {
 
     this.subscriptions.set(roomId, subscription)
     
-    this.log(`Subscribed to room ${roomId} for ${interval} minutes`, subscription)
-
-    // Set up auto-unsubscribe timer
+    this.log(`Subscribed to room ${roomId} for ${interval} minutes`, subscription)    // Set up auto-unsubscribe timer
     this.setupAutoCleanup(roomId, interval * 60 * 1000)
     
     // Save to localStorage for persistence
     this.saveSubscriptionsToStorage()
     
-    // Sync with backend
-    this.syncWithBackend(roomId, username, interval, pushSubscription)
+    // Send subscription request to backend
+    this.sendSubscriptionToBackend(roomId, username, interval, pushSubscription)
 
     return true
   }
@@ -381,12 +424,11 @@ class NotificationService {
     
     this.subscriptions.delete(roomId)
     this.clearAutoCleanup(roomId)
-    
-    // Save to localStorage for persistence
+      // Save to localStorage for persistence
     this.saveSubscriptionsToStorage()
     
-    // Sync with backend
-    this.syncWithBackend(roomId, username, 0)
+    // Send unsubscription request to backend
+    this.sendSubscriptionToBackend(roomId, username, 0)
     
     this.log(`Unsubscribed from room ${roomId}`)
   }

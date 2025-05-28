@@ -200,12 +200,15 @@ async function sendNotificationsForMessage(roomId: string, message: { username: 
     !currentlyActiveUsers.includes(sub.username)
   );
 
-  if (usersNeedingNotifications.length === 0) {
-    console.log(`[NOTIFICATIONS] No users need notifications for room ${roomId} - all ${activeSubscriptions.length} subscribed users are currently active`);
-    return;
-  }
+  // If no users need notifications, exit early
+  // Uncomment this block if you want to skip sending notifications when all users are active
+  // I Dont want to skip sending notifications when all users are active, because some users may have closed the browser or tab, but still have active subscriptions
+  // if (usersNeedingNotifications.length === 0) {
+  //   console.log(`[NOTIFICATIONS] No users need notifications for room ${roomId} - all ${activeSubscriptions.length} subscribed users are currently active`);
+  //   return;
+  // }
+  // console.log(`[NOTIFICATIONS] Sending push notifications to ${usersNeedingNotifications.length}/${activeSubscriptions.length} users for room ${roomId} (excluding ${currentlyActiveUsers.length} active users)`);
 
-  console.log(`[NOTIFICATIONS] Sending push notifications to ${usersNeedingNotifications.length}/${activeSubscriptions.length} users for room ${roomId} (excluding ${currentlyActiveUsers.length} active users)`);
 
   // Prepare notification payload
   const notificationPayload = JSON.stringify({
@@ -236,7 +239,7 @@ async function sendNotificationsForMessage(roomId: string, message: { username: 
     .map(async (sub) => {
       try {
         await webpush.sendNotification(sub.pushSubscription!, notificationPayload);
-        console.log(`[PUSH] Successfully sent push notification to ${sub.username} in room ${roomId} (user not currently active)`);
+        console.log(`[PUSH] Successfully sent push notification to ${sub.username} (${sub.deviceId}) in room ${roomId} (user not currently active)`);
       } catch (error) {
         console.error(`[PUSH] Failed to send push notification to ${sub.username}:`, error);
           // If the subscription is invalid (410 Gone), remove it
@@ -651,7 +654,41 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
           subscribed: !!userSubscription,
           interval: userSubscription?.interval || 0,
           remainingTime: userSubscription ? Math.max(0, userSubscription.endTime - Date.now()) : 0
-        }));      } else if (msg.type === 'clearAllPushSubscriptions') {
+        }));
+      } else if (msg.type === 'getAllNotificationStatus') {
+        const { deviceId } = msg;
+        console.log(`[NOTIFICATIONS] Getting all notification status for device: ${deviceId}`);
+        
+        // Find all subscriptions for this device across all rooms
+        const deviceSubscriptions: Array<{
+          roomId: string;
+          interval: number;
+          remainingTime: number;
+          username: string;
+        }> = [];
+        
+        for (const subscriptions of notificationSubscriptions.values()) {
+          for (const sub of subscriptions) {
+            if (sub.deviceId === deviceId) {
+              const remainingTime = Math.max(0, sub.endTime - Date.now());
+              if (remainingTime > 0) { // Only include active subscriptions
+                deviceSubscriptions.push({
+                  roomId: sub.roomId,
+                  interval: sub.interval,
+                  remainingTime,
+                  username: sub.username
+                });
+              }
+            }
+          }
+        }
+        
+        console.log(`[NOTIFICATIONS] Found ${deviceSubscriptions.length} active subscriptions for device ${deviceId}`);
+        
+        ws.send(JSON.stringify({
+          type: 'allNotificationStatus',
+          subscriptions: deviceSubscriptions
+        }));} else if (msg.type === 'clearAllPushSubscriptions') {
         // Clear all push subscriptions (when VAPID keys change)
         console.log('[NOTIFICATIONS] Received request to clear all push subscriptions due to VAPID key change');
         clearAllPushSubscriptions();

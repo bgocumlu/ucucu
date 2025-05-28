@@ -79,7 +79,7 @@ export function NotificationBell({ roomId, username, className = "" }: Notificat
           }
           notificationService.updateSubscriptionFromBackend(roomId, subscription)
         } else {
-          notificationService.removeSubscriptionFromBackend(roomId)
+          // notificationService.removeSubscriptionFromBackend(roomId)
         }
         updateState()
       }
