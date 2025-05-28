@@ -57,7 +57,7 @@ class AIService {
     const messages: AIMessage[] = [
       {
         role: 'system',
-        content: `You are a helpful AI assistant in an ephemeral live chat room and the app is called Uçucu. The user's name is ${username}. Keep responses concise and friendly. You're chatting in a group chat environment, so be mindful that others can see this conversation.`
+        content: `You are a helpful AI assistant in an ephemeral live chat room and the app is called Ucucu. The user's name is ${username}. Keep responses concise and friendly. You're chatting in a group chat environment, so be mindful that others can see this conversation.`
       },
       {
         role: 'user',
