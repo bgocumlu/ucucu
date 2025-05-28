@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect } from "react"
-import { useParams, useRouter } from "next/navigation"
+import { useParams, useRouter, useSearchParams } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
@@ -25,6 +25,7 @@ interface RoomInfo {
 export default function RoomPage() {
   const params = useParams()
   const router = useRouter()
+  const searchParams = useSearchParams()
   const rawRoomId = params.roomId as string
   const roomId = decodeURIComponent(rawRoomId)
 
@@ -72,11 +73,34 @@ export default function RoomPage() {
         }))
       }
       setLoading(false)
-    }
-  }, [lastMessage, roomId])
+    }  }, [lastMessage, roomId])
   useEffect(() => {
     setIsSubmitting(false)
   }, [isConnected])
+
+  // Handle error messages from URL (redirected from chat page)
+  useEffect(() => {
+    const errorFromUrl = searchParams.get('error')
+    if (errorFromUrl) {
+      const errorMessage = decodeURIComponent(errorFromUrl)
+      
+      // Check if it's a username error
+      if (errorMessage.toLowerCase().includes("username") && 
+          (errorMessage.toLowerCase().includes("taken") || 
+           errorMessage.toLowerCase().includes("exists") ||
+           errorMessage.toLowerCase().includes("already") ||
+           errorMessage.toLowerCase().includes("use"))) {
+        setErrors({ username: errorMessage })
+      } else {
+        setErrors({ general: errorMessage })
+      }
+      
+      // Clean up the URL by removing the error parameter
+      const newUrl = new URL(window.location.href)
+      newUrl.searchParams.delete('error')
+      router.replace(newUrl.pathname, { scroll: false })
+    }
+  }, [searchParams, router])
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !isSubmitting && !isRoomFull) {
