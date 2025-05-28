@@ -130,14 +130,23 @@ export default function HomePage() {
       })
     } else {
       setRoomStatus({ exists: false })
-    }
-    setCheckingRoom(false)
+    }    setCheckingRoom(false)
   }, [lastMessage, checkingRoom, roomName])
+
   const filteredRooms = rooms.filter(
-    (room) =>
-      room.visibility === 'public' &&
-      (room.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-       room.id.toLowerCase().includes(searchQuery.toLowerCase()))
+    (room) => {
+      // Filter by search query and visibility
+      const matchesSearch = room.visibility === 'public' &&
+        (room.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+         room.id.toLowerCase().includes(searchQuery.toLowerCase()));
+      
+      // Exclude rooms that user is already subscribed to
+      const isSubscribed = subscribedRooms.some(
+        (subscribedRoom) => subscribedRoom.roomId === room.id
+      );
+      
+      return matchesSearch && !isSubscribed;
+    }
   )
 
   const getInitials = (name: string) => {
