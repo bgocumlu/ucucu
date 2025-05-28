@@ -6,6 +6,9 @@ import { aiService } from './ai-service';
 
 const PORT = process.env.WS_PORT || 3001;
 
+// Notification configuration
+const NOTIFY_ACTIVE_USERS = process.env.NOTIFY_ACTIVE_USERS !== 'false'; // Default to true, set to 'false' to disable notifications for active users
+
 // VAPID keys from environment variables
 const VAPID_KEYS = {
   publicKey: process.env.VAPID_PUBLIC_KEY || '',
@@ -18,6 +21,14 @@ if (!VAPID_KEYS.publicKey || !VAPID_KEYS.privateKey) {
   console.error('[WebSocket Server] VAPID keys not configured. Please set VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY environment variables.');
   console.error('[WebSocket Server] Generate new keys with: npx web-push generate-vapid-keys');
   process.exit(1);
+}
+
+// Log notification configuration
+console.log(`[WebSocket Server] Notification configuration: NOTIFY_ACTIVE_USERS = ${NOTIFY_ACTIVE_USERS}`);
+if (NOTIFY_ACTIVE_USERS) {
+  console.log('[WebSocket Server] Notifications will be sent to ALL subscribed users (including those currently active in rooms)');
+} else {
+  console.log('[WebSocket Server] Notifications will only be sent to subscribed users who are NOT currently active in rooms');
 }
 
 // Configure web-push with VAPID details
@@ -192,7 +203,28 @@ async function sendNotificationsForMessage(roomId: string, message: { username: 
     return;
   }
 
-  console.log(`[NOTIFICATIONS] Sending notifications to ALL ${activeSubscriptions.length} subscribed users for room ${roomId} (including active users)`);
+  // Get currently active users in the room (connected via WebSocket)
+  const currentlyActiveUsers = rooms[roomId] ? Array.from(rooms[roomId].users) : [];
+  
+  let usersToNotify: PushNotificationSubscription[];
+  
+  if (NOTIFY_ACTIVE_USERS) {
+    // Send notifications to ALL subscribed users (including active users)
+    usersToNotify = activeSubscriptions;
+    console.log(`[NOTIFICATIONS] Sending notifications to ALL ${activeSubscriptions.length} subscribed users for room ${roomId} (including active users)`);
+  } else {
+    // Filter out users who are currently active in the room
+    usersToNotify = activeSubscriptions.filter(sub => 
+      !currentlyActiveUsers.includes(sub.username)
+    );
+    console.log(`[NOTIFICATIONS] Sending notifications to ${usersToNotify.length}/${activeSubscriptions.length} subscribed users for room ${roomId} (excluding ${currentlyActiveUsers.length} active users)`);
+  }
+
+  // If no users need notifications, exit early
+  if (usersToNotify.length === 0) {
+    console.log(`[NOTIFICATIONS] No users need notifications for room ${roomId}`);
+    return;
+  }
 
   // Prepare notification payload
   const notificationPayload = JSON.stringify({
@@ -217,8 +249,8 @@ async function sendNotificationsForMessage(roomId: string, message: { username: 
     ]
   });
 
-  // Send push notifications to ALL users with valid push subscriptions (including active users)
-  const pushPromises = activeSubscriptions
+  // Send push notifications to users with valid push subscriptions
+  const pushPromises = usersToNotify
     .filter(sub => sub.pushSubscription)
     .map(async (sub) => {
       try {
