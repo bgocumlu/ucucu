@@ -25,7 +25,8 @@ interface RoomInfo {
 export default function RoomPage() {
   const params = useParams()
   const router = useRouter()
-  const roomId = params.roomId as string
+  const rawRoomId = params.roomId as string
+  const roomId = decodeURIComponent(rawRoomId)
 
   const [roomInfo, setRoomInfo] = useState<RoomInfo | null>(null)
   const [loading, setLoading] = useState(true)
@@ -117,12 +118,10 @@ export default function RoomPage() {
         typeof msg.room === "object" &&
         msg.room &&
         "id" in msg.room &&
-        (msg.room as { id: string }).id === roomId
-      ) {
-        setIsSubmitting(false);
+        (msg.room as { id: string }).id === roomId      ) {        setIsSubmitting(false);
         sessionStorage.setItem(`username:${roomId}`, formData.username);
         setOnMessage(null);
-        router.push(`/${roomId}/chat`);
+        router.push(`/${encodeURIComponent(roomId)}/chat`);
       } else if (msg.type === "error") {
         setIsSubmitting(false);
         setErrors({ general: String(msg.error) });
@@ -133,7 +132,6 @@ export default function RoomPage() {
     setOnMessage(handler);
     return () => setOnMessage(null);
   }, [isSubmitting, formData.username, roomId, router, setOnMessage]);
-
   const generateRoomId = () => {
     const adjectives = ["cool", "awesome", "epic", "fun", "chill", "cozy", "bright", "swift"]
     const nouns = ["chat", "room", "space", "hub", "zone", "lounge", "corner", "spot"]
@@ -142,7 +140,7 @@ export default function RoomPage() {
     const randomNum = Math.floor(Math.random() * 1000)
 
     const newRoomId = `${randomAdj}-${randomNoun}-${randomNum}`
-    router.push(`/${newRoomId}`)
+    router.push(`/${encodeURIComponent(newRoomId)}`)
   }
 
   const getInitials = (name: string) => {
@@ -223,10 +221,9 @@ export default function RoomPage() {
   return (
     <div className="h-screen bg-gray-50 flex flex-col">
       {/* Header */}
-      <header className="bg-white border-b border-gray-200 px-4 py-3 flex-shrink-0">
-        <div className="max-w-md mx-auto flex items-center space-x-3">
+      <header className="bg-white border-b border-gray-200 px-4 py-3 flex-shrink-0">        <div className="max-w-md mx-auto flex items-center space-x-3">
           <Link href="/">
-            <Button variant="ghost" size="sm">
+            <Button variant="ghost" size="sm" aria-label="Go back to home page">
               <ArrowLeft className="h-4 w-4" />
             </Button>
           </Link>
@@ -284,12 +281,10 @@ export default function RoomPage() {
                     </Button>
                   </div>
                 </div>
-              )}
-
-              {/* Username */}              <div className="space-y-2">
-                <Label htmlFor="username">Your Username</Label>
-                <Input
+              )}              {/* Username */}              <div className="space-y-2">
+                <Label htmlFor="username">Your Username</Label>                <Input
                   id="username"
+                  name="username"
                   placeholder="Enter your username (1-20 characters)"
                   value={formData.username}
                   onChange={(e) => setFormData((prev) => ({ ...prev, username: e.target.value }))}
@@ -334,8 +329,7 @@ export default function RoomPage() {
               {/* Password */}
               {((roomInfo.exists && roomInfo.locked) || (!roomInfo.exists && formData.requirePassword)) && (
                 <div className="space-y-2">
-                  <Label htmlFor="password">{roomInfo.exists ? "Room Password" : "Password"}</Label>
-                  <div className="relative">                    <Input
+                  <Label htmlFor="password">{roomInfo.exists ? "Room Password" : "Password"}</Label>                  <div className="relative">                    <Input
                       id="password"
                       type={showPassword ? "text" : "password"}
                       placeholder={roomInfo.exists ? "Enter room password" : "Enter room password"}
@@ -352,15 +346,14 @@ export default function RoomPage() {
                       className="absolute right-0 top-0 h-full px-3"
                       onClick={() => setShowPassword(!showPassword)}
                       disabled={isRoomFull}
+                      aria-label={showPassword ? "Hide password" : "Show password"}
                     >
                       {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                     </Button>
                   </div>
                   {errors.password && <p className="text-sm text-red-500">{errors.password}</p>}
                 </div>
-              )}
-
-              {/* Max Participants (only for create) */}
+              )}              {/* Max Participants (only for create) */}
               {!roomInfo.exists && (
                 <div className="space-y-2">
                   <Label htmlFor="maxParticipants">Max Participants</Label>
@@ -368,7 +361,7 @@ export default function RoomPage() {
                     value={formData.maxParticipants}
                     onValueChange={(value) => setFormData((prev) => ({ ...prev, maxParticipants: value }))}
                   >
-                    <SelectTrigger>
+                    <SelectTrigger id="maxParticipants">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -380,15 +373,14 @@ export default function RoomPage() {
                     </SelectContent>
                   </Select>
                 </div>
-              )}
-
-              {/* Visibility (only for create) */}
+              )}              {/* Visibility (only for create) */}
               {!roomInfo.exists && (
                 <div className="space-y-2">
-                  <Label>Visibility</Label>
+                  <Label htmlFor="visibility-public">Visibility</Label>
                   <div className="flex space-x-4">
-                    <label className="flex items-center space-x-2 cursor-pointer">
+                    <label htmlFor="visibility-public" className="flex items-center space-x-2 cursor-pointer">
                       <input
+                        id="visibility-public"
                         type="radio"
                         name="visibility"
                         value="public"
@@ -400,8 +392,9 @@ export default function RoomPage() {
                       />
                       <span className="text-sm">Public</span>
                     </label>
-                    <label className="flex items-center space-x-2 cursor-pointer">
+                    <label htmlFor="visibility-private" className="flex items-center space-x-2 cursor-pointer">
                       <input
+                        id="visibility-private"
                         type="radio"
                         name="visibility"
                         value="private"

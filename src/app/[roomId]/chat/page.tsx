@@ -37,8 +37,8 @@ export default function ChatPage() {
   const params = useParams()
   const router = useRouter()
   const searchParams = useSearchParams()
-  const roomId = params.roomId as string
-
+  const rawRoomId = params.roomId as string
+  const roomId = decodeURIComponent(rawRoomId)
   const { send, lastMessage, isConnected } = useWebSocket()
   const [messages, setMessages] = useState<Message[]>([])
   const [participants, setParticipants] = useState<Participant[]>([])
@@ -57,14 +57,16 @@ export default function ChatPage() {
     reject: (error: Error) => void
     timeout: NodeJS.Timeout
   } | null>(null)
-  const fileInputRef = useRef<HTMLInputElement>(null)  // Join room on mount
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  
+  // Join room on mount
   useEffect(() => {
     // First check for username in URL parameters (from subscribed room direct join)
     const urlUsername = searchParams.get('username')
     const username = urlUsername || sessionStorage.getItem(`username:${roomId}`) || ""
     
     if (!username) {
-      router.replace(`/${roomId}`)
+      router.replace(`/${encodeURIComponent(roomId)}`);
       return
     }
     
@@ -877,8 +879,7 @@ export default function ChatPage() {
             +{participants.length - 2}
           </div>
         )}
-      </div>
-      <Button variant="ghost" size="sm" onClick={() => setShowSettings(true)}>
+      </div>      <Button variant="ghost" size="sm" onClick={() => setShowSettings(true)} aria-label="Open room settings">
         <MoreVertical className="h-4 w-4" />
       </Button>
     </div>
@@ -923,10 +924,9 @@ export default function ChatPage() {
       )}
 
       {/* Input Area */}
-      <div className="border-t border-gray-200 p-4 flex-shrink-0">
-        <div className="flex items-end space-x-2">
+      <div className="border-t border-gray-200 p-4 flex-shrink-0">        <div className="flex items-end space-x-2">
           {/* File Upload */}
-          <Button variant="ghost" size="sm" onClick={() => fileInputRef.current?.click()} className="flex-shrink-0" disabled={!isConnected}>
+          <Button variant="ghost" size="sm" onClick={() => fileInputRef.current?.click()} className="flex-shrink-0" disabled={!isConnected} aria-label="Upload file">
             <Paperclip className="h-4 w-4" />
           </Button>
 
@@ -940,11 +940,9 @@ export default function ChatPage() {
               className="resize-none"
               disabled={isRecording || !isConnected}
             />
-          </div>
-
-          {/* Audio Record / Send */}
+          </div>          {/* Audio Record / Send */}
           {messageText.trim() ? (
-            <Button onClick={sendMessage} size="sm" className="flex-shrink-0" disabled={!isConnected}>
+            <Button onClick={sendMessage} size="sm" className="flex-shrink-0" disabled={!isConnected} aria-label="Send message">
               <Send className="h-4 w-4" />
             </Button>
           ) : (
@@ -954,6 +952,7 @@ export default function ChatPage() {
               onClick={toggleRecording}
               className="flex-shrink-0"
               disabled={!isConnected}
+              aria-label={isRecording ? "Stop recording voice message" : "Start recording voice message"}
             >
               <Mic className="h-4 w-4" />
             </Button>

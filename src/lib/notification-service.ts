@@ -5,7 +5,7 @@ import { webPushService, type PushSubscriptionData } from "./web-push-service"
 
 export interface NotificationSubscription {
   roomId: string
-  interval: number // minutes: 1, 3, 5, 10, 15, or 0 (disabled)
+  interval: number // minutes: 1, 3, 5, 10, 15, or 0 (disabled) for regular rooms; 5, 10, 30, 60, 360, 1440, or 0 for global room
   startTime: number // timestamp when subscription started
   endTime: number // timestamp when subscription expires
   deviceId: string // unique device identifier
@@ -13,7 +13,12 @@ export interface NotificationSubscription {
   pushSubscription?: PushSubscriptionData // Web Push subscription data
 }
 
-export type NotificationInterval = 1 | 3 | 5 | 10 | 15 | 0
+export type NotificationInterval = 1 | 3 | 5 | 10 | 15 | 30 | 60 | 360 | 1440 | 0
+
+// Global room constants
+export const GLOBAL_ROOM_ID = 'global';
+export const GLOBAL_ROOM_INTERVALS: NotificationInterval[] = [5, 10, 30, 60, 360, 1440, 0];
+export const REGULAR_ROOM_INTERVALS: NotificationInterval[] = [1, 3, 5, 10, 15, 0];
 
 interface WebSocketMessage {
   type: string
@@ -530,10 +535,12 @@ class NotificationService {
       notification.close()
     }, 5000)
   }
-
-  // Cycle through notification intervals: 1 -> 3 -> 5 -> 10 -> 15 -> 0 (disabled) -> 1
-  getNextInterval(currentInterval: NotificationInterval): NotificationInterval {
-    const intervals: NotificationInterval[] = [1, 3, 5, 10, 15, 0]
+  // Cycle through notification intervals
+  // Regular rooms: 1 -> 3 -> 5 -> 10 -> 15 -> 0 (disabled) -> 1
+  // Global room: 5 -> 10 -> 30 -> 60 -> 360 -> 1440 -> 0 (disabled) -> 5
+  getNextInterval(currentInterval: NotificationInterval, roomId?: string): NotificationInterval {
+    const isGlobalRoom = roomId === GLOBAL_ROOM_ID;
+    const intervals = isGlobalRoom ? GLOBAL_ROOM_INTERVALS : REGULAR_ROOM_INTERVALS;
     const currentIndex = intervals.indexOf(currentInterval)
     const nextIndex = (currentIndex + 1) % intervals.length
     return intervals[nextIndex]

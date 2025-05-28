@@ -63,9 +63,11 @@ export function RoomSettingsModal({ open, onOpenChange, roomId, participants, cu
       setIsSaving(false)
     }
   }, [open])
-
   const currentUserData = participants.find((p) => p.username === currentUser)
   const isOwner = owner ? currentUser === owner : currentUserData?.isOwner || false
+  
+  // Check if this is the global room (cannot be modified)
+  const isGlobalRoom = roomId === 'global'
 
   const handleKickUser = (username: string) => {
     // In real app, this would send a WebSocket message
@@ -175,12 +177,11 @@ export function RoomSettingsModal({ open, onOpenChange, roomId, participants, cu
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="roomName">Room Name</Label>
-              <Input
+              <Label htmlFor="roomName">Room Name</Label>              <Input
                 id="roomName"
                 value={displayRoomName}
                 onChange={(e) => setRoomName(e.target.value.slice(0, 35))}
-                disabled={!isOwner}
+                disabled={!isOwner || isGlobalRoom}
                 placeholder="Enter room name"
                 maxLength={35}
               />
@@ -188,7 +189,7 @@ export function RoomSettingsModal({ open, onOpenChange, roomId, participants, cu
 
             <div className="space-y-2">
               <Label htmlFor="visibility">Visibility</Label>
-              <Select value={visibility} onValueChange={(v) => setVisibility(v as 'public' | 'private')} disabled={!isOwner}>
+              <Select value={visibility} onValueChange={(v) => setVisibility(v as 'public' | 'private')} disabled={!isOwner || isGlobalRoom}>
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
@@ -230,8 +231,7 @@ export function RoomSettingsModal({ open, onOpenChange, roomId, participants, cu
                 </div>
               </div>
             )}
-            
-            {isOwner && (
+              {isOwner && !isGlobalRoom && (
               <Button 
                 className="w-full" 
                 onClick={handleSave}
@@ -240,9 +240,11 @@ export function RoomSettingsModal({ open, onOpenChange, roomId, participants, cu
                 {isSaving ? 'Saving...' : 'Save Changes'}
               </Button>
             )}
-            {!isOwner && (
+            {(!isOwner || isGlobalRoom) && (
               <div className="text-center text-gray-500 text-sm py-4">
-                Only the room owner can edit room info
+                {isGlobalRoom 
+                  ? 'Global room settings cannot be modified'
+                  : 'Only the room owner can edit room info'}
               </div>
             )}
           </TabsContent>
@@ -251,7 +253,7 @@ export function RoomSettingsModal({ open, onOpenChange, roomId, participants, cu
           <TabsContent value="security" className="space-y-4">
             <div className="space-y-2">
               <Label htmlFor="maxParticipants">Max Participants</Label>
-              <Select value={maxParticipants} onValueChange={setMaxParticipants} disabled={!isOwner}>
+              <Select value={maxParticipants} onValueChange={setMaxParticipants} disabled={!isOwner || isGlobalRoom}>
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
@@ -263,9 +265,7 @@ export function RoomSettingsModal({ open, onOpenChange, roomId, participants, cu
                   <SelectItem value="50">50</SelectItem>
                 </SelectContent>
               </Select>
-            </div>
-
-            {isOwner && (
+            </div>            {isOwner && !isGlobalRoom && (
               <>
                 <div className="space-y-2">
                   <Label htmlFor="newPassword">Change Password</Label>
@@ -288,7 +288,7 @@ export function RoomSettingsModal({ open, onOpenChange, roomId, participants, cu
                     </div>
                   </div>
                 )}
-                
+
                 {saveError && (
                   <div className="p-3 bg-red-50 border border-red-200 rounded-md">
                     <div className="flex">
@@ -309,9 +309,11 @@ export function RoomSettingsModal({ open, onOpenChange, roomId, participants, cu
               </>
             )}
 
-            {!isOwner && (
+            {(!isOwner || isGlobalRoom) && (
               <div className="text-center text-gray-500 text-sm py-4">
-                Only the room owner can modify security settings
+                {isGlobalRoom 
+                  ? 'Global room security settings cannot be modified'
+                  : 'Only the room owner can modify security settings'}
               </div>
             )}
           </TabsContent>
@@ -342,9 +344,7 @@ export function RoomSettingsModal({ open, onOpenChange, roomId, participants, cu
                         </div>
                         <p className="text-sm text-gray-600">{participant.isOwner ? "Room Owner" : "Participant"}</p>
                       </div>
-                    </div>
-
-                    {isOwner && participant.username !== currentUser && (
+                    </div>                    {isOwner && !isGlobalRoom && participant.username !== currentUser && (
                       <div className="flex space-x-1">
                         <Button
                           variant="ghost"
