@@ -233,36 +233,13 @@ export default function ChatPage() {
             isOwner: info.owner ? username === info.owner : false,
           }))
         )
-      }    } else if (lastMessage.type === "error") {
-      const errorMessage = String(lastMessage.error);
-      
-      if (pendingUpdateRef.current) {
-        // Handle errors for room updates
-        clearTimeout(pendingUpdateRef.current.timeout)
-        setPendingUpdate(null)
-        pendingUpdateRef.current.reject(new Error(errorMessage || 'Failed to update room settings'))
-        pendingUpdateRef.current = null
-      } else {
-        // Handle general errors (like join room errors)
-        console.log('[CHAT ERROR] Received error:', errorMessage);
-        
-        // Check if it's a username error - redirect back to room setup page
-        if (errorMessage.toLowerCase().includes("username") && 
-            (errorMessage.toLowerCase().includes("taken") || 
-             errorMessage.toLowerCase().includes("exists") ||
-             errorMessage.toLowerCase().includes("already") ||
-             errorMessage.toLowerCase().includes("use"))) {
-          // Clear the stored username and redirect back to room setup
-          sessionStorage.removeItem(`username:${roomId}`);
-          router.replace(`/${encodeURIComponent(roomId)}?error=${encodeURIComponent(errorMessage)}`);
-        } else {
-          // For other errors, show an alert and redirect back
-          alert(`Error: ${errorMessage}`);
-          sessionStorage.removeItem(`username:${roomId}`);
-          router.replace(`/${encodeURIComponent(roomId)}`);
-        }
-      }
-    }else if (lastMessage.type === "rooms" && Array.isArray(lastMessage.rooms)) {
+      }    } else if (lastMessage.type === "error" && pendingUpdateRef.current) {
+      // Handle errors for room updates
+      clearTimeout(pendingUpdateRef.current.timeout)
+      setPendingUpdate(null)
+      pendingUpdateRef.current.reject(new Error(String(lastMessage.error) || 'Failed to update room settings'))
+      pendingUpdateRef.current = null
+    } else if (lastMessage.type === "rooms" && Array.isArray(lastMessage.rooms)) {
       type Room = { id: string; name: string; users?: string[]; owner?: string }
       const found = (lastMessage.rooms as Room[]).find((r) => r.id === roomId)
       if (found && found.users) {
@@ -273,7 +250,7 @@ export default function ChatPage() {
           }))
         )
       }
-    }  }, [lastMessage, roomId, currentUser, pendingUpdate, router])
+    }  }, [lastMessage, roomId, currentUser, pendingUpdate])
 
   // Auto-scroll to bottom
   useEffect(() => {

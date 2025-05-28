@@ -545,15 +545,6 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
           ws.send(JSON.stringify({ type: 'error', error: 'Username already taken in this room.' }));
           return;
         }
-
-        // Check if username is already in use by someone with an active notification subscription
-        const activeSubscriptions = getActiveSubscriptions(roomId);
-        const usernameInSubscriptions = activeSubscriptions.some(sub => sub.username === username);
-        if (usernameInSubscriptions) {
-          ws.send(JSON.stringify({ type: 'error', error: 'Username already taken by a subscribed user in this room.' }));
-          return;
-        }
-        
         // Prevent joining if room is full
         if (rooms[roomId].users.size >= rooms[roomId].maxParticipants) {
           ws.send(JSON.stringify({ type: 'error', error: 'Room is full.' }));
