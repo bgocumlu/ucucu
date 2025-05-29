@@ -542,7 +542,7 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
         }
         // Prevent duplicate usernames
         if (rooms[roomId].users.has(username)) {
-          ws.send(JSON.stringify({ type: 'error', error: 'Username already taken in this room.' }));
+          ws.send(JSON.stringify({ type: 'error', error: 'Username already taken in this room', requestId: Date.now() + Math.random() }));
           return;
         }
         // Prevent joining if room is full
