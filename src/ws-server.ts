@@ -51,32 +51,6 @@ interface NotificationSubscription {
 // In-memory store for rooms and messages
 const rooms: Record<string, { name: string; users: Set<string>; locked: boolean; maxParticipants: number; visibility: 'public' | 'private'; owner?: string; password?: string }> = {};
 
-// Create the global room like any other room, just with no admin
-rooms['global'] = {
-  name: 'Global Room',
-  users: new Set(),
-  locked: false,
-  maxParticipants: 50,
-  visibility: 'public',
-  // No owner for global room
-};
-console.log('[WebSocket Server] Created global room: global');
-
-// Function to ensure global room exists (recreate if deleted)
-function ensureGlobalRoomExists(): void {
-  if (!rooms['global']) {
-    rooms['global'] = {
-      name: 'Global Room',
-      users: new Set(),
-      locked: false,
-      maxParticipants: 50,
-      visibility: 'public',
-      // No owner for global room
-    };
-    console.log('[WebSocket Server] Recreated global room: global');
-  }
-}
-
 // In-memory store for notification subscriptions with push endpoint support
 interface WebPushSubscription {
   endpoint: string;
@@ -320,15 +294,9 @@ setInterval(cleanupExpiredSubscriptions, 60000)
 
 // Additional room cleanup check every 2 minutes to catch any edge cases
 setInterval(() => {
-  // Ensure global room always exists
-  ensureGlobalRoomExists();
-  
   let cleanedRooms = 0;
   
   for (const [roomId, room] of Object.entries(rooms)) {
-    // Never delete the global room
-    if (roomId === 'global') continue;
-    
     const hasUsers = room.users.size > 0;
     const hasActiveSubscriptions = getActiveSubscriptions(roomId).length > 0;
     
@@ -503,20 +471,11 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
 
   ws.on('message', async (data: WebSocket.RawData) => {
     try {
-      const msg = JSON.parse(data.toString());      if (msg.type === 'getRooms') {
-        console.log('[WebSocket Server] getRooms request - Current rooms:', Object.keys(rooms))
-        console.log('[WebSocket Server] Global room exists:', !!rooms['global'])
-        
-        // Include all rooms including global room
-        const allRooms = Object.entries(rooms)
-          .map(([id, r]) => ({ id, name: r.name, count: r.users.size, maxParticipants: r.maxParticipants, locked: r.locked, visibility: r.visibility }));
-        
-        console.log('[WebSocket Server] Sending rooms:', allRooms.map(r => r.id))
-        ws.send(JSON.stringify({ type: 'rooms', rooms: allRooms }));      } else if (msg.type === 'joinRoom') {
+      const msg = JSON.parse(data.toString());
+      if (msg.type === 'getRooms') {
+        ws.send(JSON.stringify({ type: 'rooms', rooms: Object.entries(rooms).map(([id, r]) => ({ id, name: r.name, count: r.users.size, maxParticipants: r.maxParticipants, locked: r.locked, visibility: r.visibility })) }));
+      } else if (msg.type === 'joinRoom') {
         const { roomId, username, password } = msg;
-        console.log(`[WebSocket Server] joinRoom request - roomId: ${roomId}, username: ${username}`)
-        console.log(`[WebSocket Server] Room exists: ${!!rooms[roomId]}`)
-        
         // Validate username and roomId
         if (!username || typeof username !== 'string' || username.length < 1 || username.length > 20) {
           ws.send(JSON.stringify({ type: 'error', error: 'Invalid username. Must be 1-20 characters.' }));
@@ -526,12 +485,6 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
           ws.send(JSON.stringify({ type: 'error', error: 'Invalid room ID.' }));
           return;
         }        if (!rooms[roomId]) {
-          // Prevent recreating the global room
-          if (roomId === 'global') {
-            ws.send(JSON.stringify({ type: 'error', error: 'Cannot create global room - it already exists.' }));
-            return;
-          }
-          
           // Create new room
           const hashedPassword = password ? bcrypt.hashSync(password, 8) : undefined;
           const displayName = typeof msg.displayName === 'string' && msg.displayName.trim().length > 0 ? msg.displayName.trim() : `${roomId}`;
@@ -564,11 +517,10 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
           if (!password || !rooms[roomId].password || !bcrypt.compareSync(password, rooms[roomId].password)) {
             ws.send(JSON.stringify({ type: 'error', error: 'Room is locked. Password required or incorrect.' }));
             return;
-          }        }
-        rooms[roomId].users.add(username);        // Set owner only for rooms that don't have one (except global room)
-        if (roomId !== 'global' && !rooms[roomId].owner) {
-          rooms[roomId].owner = username;
+          }
         }
+        rooms[roomId].users.add(username);
+        if (!rooms[roomId].owner) rooms[roomId].owner = username;
         joinedRoom = roomId;
         joinedUser = username;
         ws.joinedRoom = roomId;
@@ -653,13 +605,8 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
             text: asAudio ? '🎤 Voice message' : `📎 ${fileName || 'File'}`
           };
           await sendNotificationsForMessage(roomId, notificationMessage);
-        }      } else if (msg.type === 'updateRoomSettings') {
-        const { roomId, username, name, maxParticipants, locked, password, visibility, updateId } = msg;        // Prevent updating global room settings
-        if (roomId === 'global') {
-          ws.send(JSON.stringify({ type: 'error', error: 'Global room settings cannot be modified.' }));
-          return;
-        }
-        
+        }} else if (msg.type === 'updateRoomSettings') {
+        const { roomId, username, name, maxParticipants, locked, password, visibility, updateId } = msg;
         if (rooms[roomId] && rooms[roomId].owner === username) {
           // Prevent setting maxParticipants lower than current user count
           if (typeof maxParticipants === 'number') {
@@ -873,9 +820,7 @@ wss.on('error', (err) => {
 });
 
 function broadcastRooms() {
-  // Include all rooms including global room
-  const roomList = Object.entries(rooms)
-    .map(([id, r]) => ({ id, name: r.name, count: r.users.size, maxParticipants: r.maxParticipants, locked: r.locked, visibility: r.visibility }));
+  const roomList = Object.entries(rooms).map(([id, r]) => ({ id, name: r.name, count: r.users.size, maxParticipants: r.maxParticipants, locked: r.locked, visibility: r.visibility }));
   wss.clients.forEach((client) => {
     if (client.readyState === 1) {
       client.send(JSON.stringify({ type: 'rooms', rooms: roomList }));
@@ -887,9 +832,6 @@ function broadcastRooms() {
 function checkRoomDeletionAfterSubscriptionCleanup(roomId: string): void {
   const room = rooms[roomId]
   if (!room) return
-  
-  // Never delete the global room
-  if (roomId === 'global') return
   
   const hasUsers = room.users.size > 0
   const hasActiveSubscriptions = getActiveSubscriptions(roomId).length > 0

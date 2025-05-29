@@ -151,9 +151,11 @@ export function NotificationBell({ roomId, username, className = "" }: Notificat
       // No need to call syncWithBackend - unsubscribeFromRoom handles it internally
       updateState()
       return
-    }    // If in grace period or no notifications active, cycle through intervals
+    }
+
+    // If in grace period or no notifications active, cycle through intervals
     const baseInterval = pendingInterval !== null ? pendingInterval : currentInterval
-    const nextInterval = notificationService.getNextInterval(baseInterval, roomId)
+    const nextInterval = notificationService.getNextInterval(baseInterval)
     
     // Set pending interval and start/restart 5-second grace period
     setPendingInterval(nextInterval)
@@ -171,19 +173,15 @@ export function NotificationBell({ roomId, username, className = "" }: Notificat
     // When timer is active or in grace period, make bell smaller
     return (isSubscribed || graceTimeRemaining > 0) ? "h-3 w-3" : "h-4 w-4"
   }
+
   const formatTime = (seconds: number): string => {
     const minutes = Math.floor(seconds / 60)
-    const hours = Math.floor(minutes / 60)
-    const days = Math.floor(hours / 24)
+    const remainingSeconds = seconds % 60
     
-    if (days > 0) {
-      return `${days}d`
-    } else if (hours > 0) {
-      return `${hours}h`
-    } else if (minutes > 0) {
+    if (minutes > 0) {
       return `${minutes}m`
     } else {
-      return `${seconds}s`
+      return `${remainingSeconds}s`
     }
   }
 
@@ -199,10 +197,10 @@ export function NotificationBell({ roomId, username, className = "" }: Notificat
             !hasPermission
               ? "Enable notifications"
               : graceTimeRemaining > 0
-              ? `Setting ${pendingInterval === 360 ? '6h' : pendingInterval === 1440 ? '24h' : `${pendingInterval}min`} notifications in ${graceTimeRemaining}s (click to cycle)`
+              ? `Setting ${pendingInterval}min notifications in ${graceTimeRemaining}s (click to cycle)`
               : !isSubscribed
               ? "Click to enable room notifications"
-              : `Notifications active for ${formatTime(remainingTime)} (click to disable)`
+              : `Notifications active for ${Math.ceil(remainingTime / 60)} minutes (click to disable)`
           }
         >          <BellIcon 
             className={`${getBellSize()} ${
@@ -215,8 +213,9 @@ export function NotificationBell({ roomId, username, className = "" }: Notificat
         </Button>
       </div>
         {/* Timer display when notifications are active or in grace period */}
-      {graceTimeRemaining > 0 ? (        <div className="text-xs text-orange-500 font-mono leading-none -mt-1">
-          {pendingInterval === 360 ? '6h' : pendingInterval === 1440 ? '24h' : `${pendingInterval}m`} in {graceTimeRemaining}s
+      {graceTimeRemaining > 0 ? (
+        <div className="text-xs text-orange-500 font-mono leading-none -mt-1">
+          {pendingInterval}m in {graceTimeRemaining}s
         </div>
       ) : isSubscribed && remainingTime > 0 && (
         <div className="text-xs text-gray-500 font-mono leading-none -mt-1">
