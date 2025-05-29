@@ -16,7 +16,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "Ucucu",
-  description: "Ephemeral chat rooms",
+  description: "Create and join ephemeral chat rooms instantly. Real-time messaging with notification bells, global rooms, and temporary conversations that disappear when empty. No registration required.",
   manifest: "/manifest.json",
 };
 
