@@ -4,7 +4,7 @@
 import type React from "react"
 
 import { useState, useEffect, useRef } from "react"
-import { useParams, useRouter, useSearchParams } from "next/navigation"
+import { useParams, useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { ArrowLeft, Send, Paperclip, Mic, MoreVertical, ArrowDown } from "lucide-react"
@@ -36,7 +36,6 @@ type RoomInfoMsg = { id: string; name: string; count: number; maxParticipants: n
 export default function ChatPage() {
   const params = useParams()
   const router = useRouter()
-  const searchParams = useSearchParams()
   const rawRoomId = params.roomId as string
   const roomId = decodeURIComponent(rawRoomId)
   const { send, lastMessage, isConnected } = useWebSocket()
@@ -58,21 +57,14 @@ export default function ChatPage() {
     timeout: NodeJS.Timeout
   } | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
-  
-  // Join room on mount
+    // Join room on mount
   useEffect(() => {
-    // First check for username in URL parameters (from subscribed room direct join)
-    const urlUsername = searchParams.get('username')
-    const username = urlUsername || sessionStorage.getItem(`username:${roomId}`) || ""
+    // Check for username in sessionStorage
+    const username = sessionStorage.getItem(`username:${roomId}`) || ""
     
     if (!username) {
       router.replace(`/${encodeURIComponent(roomId)}`);
       return
-    }
-    
-    // If username came from URL, store it in sessionStorage for future use
-    if (urlUsername) {
-      sessionStorage.setItem(`username:${roomId}`, urlUsername)
     }
     
     setCurrentUser(username)
@@ -80,7 +72,7 @@ export default function ChatPage() {
 
     // Initialize empty messages
     setMessages([])
-  }, [roomId, send, router, searchParams])// Track room owner and info for RoomSettingsModal
+  }, [roomId, send, router])// Track room owner and info for RoomSettingsModal
   const [roomOwner, setRoomOwner] = useState<string>("")
   const [roomInfo, setRoomInfo] = useState<{
     name?: string

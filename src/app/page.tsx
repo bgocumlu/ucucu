@@ -176,10 +176,10 @@ export default function HomePage() {
     setShowRoomInput(false)
     setRoomName("")
   }
-
   const handleDirectJoinSubscribedRoom = (roomId: string, username: string) => {
-    // Navigate directly to chat with the stored username
-    router.push(`/${roomId}/chat?username=${encodeURIComponent(username)}`)
+    // Store the username in sessionStorage and navigate to the regular join page
+    sessionStorage.setItem(`prefilled-username:${roomId}`, username)
+    router.push(`/${roomId}`)
   }
   const formatRemainingTime = (seconds: number): string => {
     const minutes = Math.floor(seconds / 60)

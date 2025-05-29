@@ -42,10 +42,20 @@ export default function RoomPage() {
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [isSubmitting, setIsSubmitting] = useState(false)
   const { send, lastMessage, isConnected, setOnMessage } = useWebSocket()
-
   useEffect(() => {
     setLoading(true)
     send({ type: "getRooms" })
+    
+    // Check for prefilled username from subscribed room join
+    const prefilledUsername = sessionStorage.getItem(`prefilled-username:${roomId}`)
+    if (prefilledUsername) {
+      setFormData(prev => ({
+        ...prev,
+        username: prefilledUsername
+      }))
+      // Clear the prefilled username after using it
+      sessionStorage.removeItem(`prefilled-username:${roomId}`)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roomId])
 
