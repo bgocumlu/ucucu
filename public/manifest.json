@@ -2,9 +2,6 @@
   "name": "Ucucu",
   "short_name": "Ucucu",
   "description": "Lightweight, ephemeral chat rooms with no message history",
-  "id": "/",
-  "lang": "en-US",
-  "dir": "ltr",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#ffffff",
@@ -45,9 +42,9 @@
       "url": "/room234",
       "icons": [
         {
-          "src": "icons/blue96.png",
+          "src": "/placeholder.svg?height=96&width=96",
           "sizes": "96x96",
-          "type": "image/png"
+          "type": "image/svg+xml"
         }
       ]
     }
