@@ -24,9 +24,90 @@ export default function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
-}>) {
-  return (
+}>) {  return (
     <html lang="en">
+      <head>
+        {/* Apple PWA Meta Tags */}
+        <meta name="apple-mobile-web-app-capable" content="yes" />
+        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+        <meta name="apple-mobile-web-app-title" content="Ucucu" />
+        
+        {/* Apple Touch Icon */}
+        <link rel="apple-touch-icon" href="/icons/apple-icon-180.png" />
+        
+        {/* Apple Splash Screens */}
+        <link 
+          rel="apple-touch-startup-image" 
+          href="/icons/apple-splash-portrait.png"
+          media="(device-width: 375px) and (device-height: 812px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)"
+        />
+        <link 
+          rel="apple-touch-startup-image" 
+          href="/icons/apple-splash-landscape.png"
+          media="(device-width: 375px) and (device-height: 812px) and (-webkit-device-pixel-ratio: 3) and (orientation: landscape)"
+        />
+        <link 
+          rel="apple-touch-startup-image" 
+          href="/icons/apple-splash-portrait.png"
+          media="(device-width: 414px) and (device-height: 896px) and (-webkit-device-pixel-ratio: 2) and (orientation: portrait)"
+        />
+        <link 
+          rel="apple-touch-startup-image" 
+          href="/icons/apple-splash-landscape.png"
+          media="(device-width: 414px) and (device-height: 896px) and (-webkit-device-pixel-ratio: 2) and (orientation: landscape)"
+        />
+        <link 
+          rel="apple-touch-startup-image" 
+          href="/icons/apple-splash-portrait.png"
+          media="(device-width: 390px) and (device-height: 844px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)"
+        />
+        <link 
+          rel="apple-touch-startup-image" 
+          href="/icons/apple-splash-landscape.png"
+          media="(device-width: 390px) and (device-height: 844px) and (-webkit-device-pixel-ratio: 3) and (orientation: landscape)"
+        />
+        <link 
+          rel="apple-touch-startup-image" 
+          href="/icons/apple-splash-portrait.png"
+          media="(device-width: 428px) and (device-height: 926px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)"
+        />
+        <link 
+          rel="apple-touch-startup-image" 
+          href="/icons/apple-splash-landscape.png"
+          media="(device-width: 428px) and (device-height: 926px) and (-webkit-device-pixel-ratio: 3) and (orientation: landscape)"
+        />
+        {/* iPad */}
+        <link 
+          rel="apple-touch-startup-image" 
+          href="/icons/apple-splash-portrait.png"
+          media="(device-width: 768px) and (device-height: 1024px) and (-webkit-device-pixel-ratio: 2) and (orientation: portrait)"
+        />
+        <link 
+          rel="apple-touch-startup-image" 
+          href="/icons/apple-splash-landscape.png"
+          media="(device-width: 768px) and (device-height: 1024px) and (-webkit-device-pixel-ratio: 2) and (orientation: landscape)"
+        />
+        <link 
+          rel="apple-touch-startup-image" 
+          href="/icons/apple-splash-portrait.png"
+          media="(device-width: 834px) and (device-height: 1194px) and (-webkit-device-pixel-ratio: 2) and (orientation: portrait)"
+        />
+        <link 
+          rel="apple-touch-startup-image" 
+          href="/icons/apple-splash-landscape.png"
+          media="(device-width: 834px) and (device-height: 1194px) and (-webkit-device-pixel-ratio: 2) and (orientation: landscape)"
+        />
+        <link 
+          rel="apple-touch-startup-image" 
+          href="/icons/apple-splash-portrait.png"
+          media="(device-width: 1024px) and (device-height: 1366px) and (-webkit-device-pixel-ratio: 2) and (orientation: portrait)"
+        />
+        <link 
+          rel="apple-touch-startup-image" 
+          href="/icons/apple-splash-landscape.png"
+          media="(device-width: 1024px) and (device-height: 1366px) and (-webkit-device-pixel-ratio: 2) and (orientation: landscape)"
+        />
+      </head>
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
