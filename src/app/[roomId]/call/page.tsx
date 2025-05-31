@@ -3,7 +3,7 @@
 import React, { useEffect, useRef, useState } from "react"
 import { useParams, useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
-import { ArrowLeft, Phone, Mic, MicOff, Volume2, Video, VideoOff, Monitor, MonitorOff } from "lucide-react"
+import { ArrowLeft, Phone, Mic, MicOff, Volume2, Video, VideoOff, Monitor, MonitorOff, RotateCcw } from "lucide-react"
 import { NotificationBell } from "@/components/notification-bell"
 
 // Extend Window interface for webkit AudioContext
@@ -21,11 +21,11 @@ export default function CallPage() {
   const router = useRouter()
   const rawRoomId = params.roomId as string
   const roomId = decodeURIComponent(rawRoomId)
-  
-  const [currentUser, setCurrentUser] = useState("")
+    const [currentUser, setCurrentUser] = useState("")
   const [actualIsListener, setActualIsListener] = useState(false) // Track actual operational mode
   const [joined, setJoined] = useState(false)
   const [connecting, setConnecting] = useState(false)
+  const [reconnecting, setReconnecting] = useState(false)
   const [error, setError] = useState("")
   const [remoteStreams, setRemoteStreams] = useState<Record<string, MediaStream>>({})
   const [remoteVideoStreams, setRemoteVideoStreams] = useState<Record<string, MediaStream>>({})
@@ -902,6 +902,282 @@ export default function CallPage() {
     }
   }
 
+  // Reconnect to call - manually reset and reconnect all WebRTC connections
+  const reconnectCall = async () => {
+    if (!joined || reconnecting) return
+    
+    setReconnecting(true)
+    setError("")
+    console.log("Manual reconnection initiated...")
+    
+    try {
+      // Store current media state to restore after reconnection
+      const wasVideoEnabled = videoEnabled
+      const wasScreenSharing = screenSharing
+      const wasMuted = muted
+      
+      // Close all existing peer connections
+      Object.values(peerConnections.current).forEach(pc => {
+        console.log('Closing peer connection:', pc.signalingState)
+        pc.close()
+      })
+      peerConnections.current = {}
+      
+      // Clear remote streams but keep participants list
+      setRemoteStreams({})
+      setRemoteVideoStreams({})
+      setRemoteScreenStreams({})
+      
+      // Reset selected participant
+      setSelectedParticipant(null)
+      
+      // Close and recreate WebSocket connection
+      if (wsRef.current) {
+        wsRef.current.close()
+        wsRef.current = null
+      }
+      
+      // Wait a moment for cleanup
+      await new Promise(resolve => setTimeout(resolve, 500))
+      
+      // Recreate media streams if they were active
+      let newLocalStream: MediaStream | null = null
+      
+      // Recreate audio stream if not muted
+      if (!wasMuted) {
+        try {
+          newLocalStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+          localStreamRef.current = newLocalStream
+          if (localAudioRef.current) {
+            localAudioRef.current.srcObject = newLocalStream
+          }
+          newLocalStream.getAudioTracks().forEach(track => {
+            track.enabled = true
+            console.log('Reconnect: Audio track enabled:', track.label)
+          })
+          setMuted(false)
+        } catch (err) {
+          console.warn("Reconnect: Mic access denied:", err)
+          setMuted(true)
+        }
+      }
+      
+      // Recreate video stream if it was enabled
+      if (wasVideoEnabled) {
+        try {
+          const videoStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false })
+          localVideoStreamRef.current = videoStream
+          setVideoEnabled(true)
+          console.log('Reconnect: Video stream recreated')
+        } catch (err) {
+          console.warn("Reconnect: Video access denied:", err)
+          setVideoEnabled(false)
+        }
+      }
+      
+      // Recreate screen share if it was active
+      if (wasScreenSharing) {
+        try {
+          const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false })
+          localScreenStreamRef.current = screenStream
+          setScreenSharing(true)
+          console.log('Reconnect: Screen share recreated')
+          
+          // Handle screen share end
+          screenStream.getVideoTracks()[0].addEventListener('ended', () => {
+            setScreenSharing(false)
+            localScreenStreamRef.current = null
+          })
+        } catch (err) {
+          console.warn("Reconnect: Screen share access denied:", err)
+          setScreenSharing(false)
+        }
+      }
+      
+      // Reconnect WebSocket
+      const ws = new WebSocket(SIGNALING_SERVER_URL)
+      wsRef.current = ws
+        ws.onopen = () => {
+        console.log('Reconnect: WebSocket reconnected')
+        ws.send(JSON.stringify({ type: "call-join", roomId, username: currentUser, isListener: false }))
+        setJoined(true) // Ensure we stay in the call
+        setReconnecting(false)
+      }
+      
+      // Reuse the same message handler as joinCall
+      ws.onmessage = async (event) => {
+        const msg = JSON.parse(event.data)
+        switch (msg.type) {
+          case "call-new-peer": {
+            const newPeer = msg.username
+            if (newPeer === currentUser) return
+            
+            // Add to participants list (might already be there)
+            setParticipants(prev => new Set([...prev, newPeer]))
+            
+            let pc = peerConnections.current[newPeer]
+            if (!pc) {
+              pc = createPeerConnection(newPeer)
+            }
+            
+            // Check if we have any media to share
+            const hasAudio = localStreamRef.current && localStreamRef.current.getTracks().length > 0
+            const hasVideo = localVideoStreamRef.current && localVideoStreamRef.current.getTracks().length > 0
+            const hasScreenShare = localScreenStreamRef.current && localScreenStreamRef.current.getTracks().length > 0
+            const hasAnyMedia = hasAudio || hasVideo || hasScreenShare
+            
+            // Perfect negotiation: Only create offer if we're the impolite peer
+            const isImpolite = currentUser > newPeer
+            const shouldCreateOffer = !actualIsListener && isImpolite && hasAnyMedia
+            
+            if (shouldCreateOffer) {
+              setTimeout(async () => {
+                if (pc && pc.signalingState === 'stable') {
+                  try {
+                    console.log(`Reconnect: Creating offer for peer ${newPeer}`)
+                    const offer = await pc.createOffer()
+                    await pc.setLocalDescription(offer)
+                    ws.send(JSON.stringify({ 
+                      type: "call-offer", 
+                      roomId, 
+                      from: currentUser, 
+                      to: newPeer, 
+                      payload: pc.localDescription 
+                    }))
+                  } catch (error) {
+                    console.error('Reconnect: Error creating offer:', error)
+                  }
+                }
+              }, 100)
+            }
+            break
+          }
+          
+          // Handle other message types (same as joinCall)
+          case "call-offer": {
+            const from = msg.from
+            let pc = peerConnections.current[from]
+            if (!pc) {
+              pc = createPeerConnection(from)
+            }
+            
+            const isPolite = currentUser < from
+            const result = await safeSetRemoteDescription(pc, msg.payload, isPolite)
+            
+            if (result === 'recreate') {
+              await recreatePeerConnection(from)
+              pc = peerConnections.current[from]
+              if (pc) {
+                await safeSetRemoteDescription(pc, msg.payload, isPolite)
+              }
+            } else if (result === 'ignored') {
+              console.log(`Reconnect: Offer from ${from} was ignored due to collision`)
+              break
+            }
+            
+            if (pc && pc.signalingState !== 'closed' && result === 'success') {
+              try {
+                const answer = await pc.createAnswer()
+                await pc.setLocalDescription(answer)
+                ws.send(JSON.stringify({ 
+                  type: "call-answer", 
+                  roomId, 
+                  from: currentUser, 
+                  to: from, 
+                  payload: pc.localDescription 
+                }))
+              } catch (error) {
+                console.error('Reconnect: Error creating answer:', error)
+              }
+            }
+            break
+          }
+          
+          case "call-answer": {
+            const from = msg.from
+            const pc = peerConnections.current[from]
+            if (pc) {
+              if (pc.signalingState === 'have-local-offer') {
+                const result = await safeSetRemoteDescription(pc, msg.payload, currentUser < from)
+                if (result === 'recreate') {
+                  await recreatePeerConnection(from)
+                }
+              } else {
+                console.log(`Reconnect: Unexpected answer from ${from} in state ${pc.signalingState}`)
+              }
+            }
+            break
+          }
+          
+          case "call-ice": {
+            const from = msg.from
+            const pc = peerConnections.current[from]
+            if (pc && msg.payload) {
+              try { 
+                await pc.addIceCandidate(new RTCIceCandidate(msg.payload)) 
+              } catch (error) {
+                console.error('Reconnect: ICE candidate error:', error)
+              }
+            }
+            break
+          }
+          
+          case "call-peer-left": {
+            const left = msg.username
+            setParticipants(prev => {
+              const newSet = new Set(prev)
+              newSet.delete(left)
+              return newSet
+            })
+            
+            if (peerConnections.current[left]) {
+              peerConnections.current[left].close()
+              delete peerConnections.current[left]
+            }
+            
+            setRemoteStreams(prev => {
+              const copy = { ...prev }
+              delete copy[left]
+              return copy
+            })
+            setRemoteVideoStreams(prev => {
+              const copy = { ...prev }
+              delete copy[left]
+              return copy
+            })
+            setRemoteScreenStreams(prev => {
+              const copy = { ...prev }
+              delete copy[left]
+              return copy
+            })
+            
+            setSelectedParticipant(prev => prev === left ? null : prev)
+            break
+          }
+        }
+      }
+        ws.onclose = () => {
+        console.log('Reconnect: WebSocket closed')
+        // Don't set joined to false during reconnection - keep the user in the call UI
+        if (!reconnecting) {
+          setJoined(false)
+        }
+        setReconnecting(false)
+      }
+      
+      ws.onerror = (error) => {
+        console.error('Reconnect: WebSocket error:', error)
+        setError("Reconnection failed: WebSocket error")
+        setReconnecting(false)
+      }
+      
+    } catch (error) {
+      console.error('Reconnection failed:', error)
+      setError("Reconnection failed. Please try again.")
+      setReconnecting(false)
+    }
+  }
+
   return (
     <div className="h-screen bg-white flex flex-col">
       <header className="bg-white border-b border-gray-200 px-4 py-3 flex-shrink-0">
@@ -976,9 +1252,21 @@ export default function CallPage() {
                     >
                       {screenSharing ? <Monitor className="h-4 w-4" /> : <MonitorOff className="h-4 w-4" />}
                       <span className="hidden sm:inline">Screen</span>
-                    </Button>
-                  )}
-                    {/* Leave Call */}
+                    </Button>                  )}
+                  
+                  {/* Reconnect Button */}
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={reconnectCall}
+                    disabled={reconnecting || connecting}
+                    className="flex items-center gap-1"
+                  >
+                    <RotateCcw className={`h-4 w-4 ${reconnecting ? 'animate-spin' : ''}`} />
+                    <span className="hidden sm:inline">{reconnecting ? 'Reconnecting...' : 'Reconnect'}</span>
+                  </Button>
+                  
+                  {/* Leave Call */}
                   <Button
                     size="sm"
                     variant="destructive"
