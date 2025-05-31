@@ -3,7 +3,7 @@
 import React, { useEffect, useRef, useState } from "react"
 import { useParams, useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
-import { ArrowLeft, Phone, Mic, MicOff, Volume2, Video, VideoOff, Monitor, MonitorOff, RotateCcw } from "lucide-react"
+import { ArrowLeft, Phone, Mic, MicOff, Volume2, Video, VideoOff, Monitor, MonitorOff, RotateCcw, RotateCw } from "lucide-react"
 import { NotificationBell } from "@/components/notification-bell"
 
 // Extend Window interface for webkit AudioContext
@@ -46,6 +46,10 @@ export default function CallPage() {
   const [peerMuted, setPeerMuted] = useState<Record<string, boolean>>({}) // <--- NEW: track muted state for each remote peer
   const [speakingPeers, setSpeakingPeers] = useState<Record<string, boolean>>({})
   const [localSpeaking, setLocalSpeaking] = useState(false)
+  
+  // Add state for camera switching
+  const [currentCamera, setCurrentCamera] = useState<'user' | 'environment'>('user') // 'user' = front, 'environment' = back
+
   const analyserRef = useRef<AnalyserNode | null>(null)
   const localAudioContextRef = useRef<AudioContext | null>(null)  // For each participant, create refs for audio, video, and screen
   const remoteAudioRefs = useRef<Record<string, React.RefObject<HTMLAudioElement | null>>>({})
@@ -712,7 +716,67 @@ export default function CallPage() {
       ...prev,
       [peer]: !prev[peer]
     }))
-  }  // --- Toggle video with proper renegotiation ---
+  }  // --- Switch camera between front and back ---
+  const switchCamera = async () => {
+    if (!videoEnabled) return
+
+    const newCamera = currentCamera === 'user' ? 'environment' : 'user'
+    
+    try {
+      // Stop current video stream
+      if (localVideoStreamRef.current) {
+        localVideoStreamRef.current.getTracks().forEach(track => track.stop())
+      }
+
+      // Get new video stream with the opposite camera
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        video: { facingMode: newCamera }, 
+        audio: false 
+      })
+      localVideoStreamRef.current = stream
+
+      // Update all peer connections with the new video track
+      for (const [remote, pc] of Object.entries(peerConnections.current)) {
+        // Remove old video tracks
+        pc.getSenders().forEach(sender => {
+          if (sender.track && sender.track.kind === 'video' && !sender.track.label.includes('screen')) {
+            pc.removeTrack(sender)
+          }
+        })
+
+        // Add new video tracks
+        stream.getTracks().forEach(track => {
+          if (!pc.getSenders().some(sender => sender.track === track)) {
+            pc.addTrack(track, stream)
+          }
+        })
+        
+        // Trigger renegotiation
+        try {
+          const offer = await pc.createOffer()
+          await pc.setLocalDescription(offer)
+          if (wsRef.current) {
+            wsRef.current.send(JSON.stringify({ 
+              type: "call-offer", 
+              roomId, 
+              from: currentUser, 
+              to: remote, 
+              payload: pc.localDescription 
+            }))
+          }
+        } catch (error) {
+          console.error('Error creating camera switch offer:', error)
+        }
+      }
+
+      setCurrentCamera(newCamera)
+    } catch (error) {
+      console.error('Error switching camera:', error)
+      setError('Camera switch failed - the requested camera may not be available')
+    }
+  }
+
+  // --- Toggle video with proper renegotiation ---
   const toggleVideo = async () => {
     if (videoEnabled) {
       // Turn off video
@@ -751,7 +815,10 @@ export default function CallPage() {
     } else {
       // Turn on video
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false })
+        const stream = await navigator.mediaDevices.getUserMedia({ 
+          video: { facingMode: currentCamera }, 
+          audio: false 
+        })
         localVideoStreamRef.current = stream
         
         // Add video tracks to all peer connections and trigger renegotiation
@@ -786,7 +853,7 @@ export default function CallPage() {
         setError('Camera access denied')
       }
     }
-  }  // --- Toggle screen sharing with proper renegotiation ---
+  }// --- Toggle screen sharing with proper renegotiation ---
   const toggleScreenShare = async () => {
     if (screenSharing) {
       // Turn off screen sharing
@@ -961,11 +1028,13 @@ export default function CallPage() {
           setMuted(true)
         }
       }
-      
-      // Recreate video stream if it was enabled
+        // Recreate video stream if it was enabled
       if (wasVideoEnabled) {
         try {
-          const videoStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false })
+          const videoStream = await navigator.mediaDevices.getUserMedia({ 
+            video: { facingMode: currentCamera }, 
+            audio: false 
+          })
           localVideoStreamRef.current = videoStream
           setVideoEnabled(true)
           console.log('Reconnect: Video stream recreated')
@@ -1228,8 +1297,7 @@ export default function CallPage() {
                       <span className="hidden sm:inline">{muted ? "Unmute" : "Mic"}</span>
                     </Button>
                   )}
-                  
-                  {/* Video Controls */}
+                    {/* Video Controls */}
                   {!actualIsListener && (
                     <Button
                       size="sm"
@@ -1239,6 +1307,20 @@ export default function CallPage() {
                     >
                       {videoEnabled ? <Video className="h-4 w-4" /> : <VideoOff className="h-4 w-4" />}
                       <span className="hidden sm:inline">Video</span>
+                    </Button>
+                  )}
+                  
+                  {/* Camera Switch Controls - only show when video is enabled */}
+                  {!actualIsListener && videoEnabled && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={switchCamera}
+                      className="flex items-center gap-1"
+                      title={`Switch to ${currentCamera === 'user' ? 'back' : 'front'} camera`}
+                    >
+                      <RotateCw className="h-4 w-4" />
+                      <span className="hidden sm:inline">Flip</span>
                     </Button>
                   )}
                   
