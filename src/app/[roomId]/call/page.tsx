@@ -3,7 +3,7 @@
 import React, { useEffect, useRef, useState } from "react"
 import { useParams, useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
-import { ArrowLeft, Phone, Mic, MicOff, Volume2, Video, VideoOff, Monitor, MonitorOff, Maximize2 } from "lucide-react"
+import { ArrowLeft, Phone, Mic, MicOff, Volume2, Video, VideoOff, Monitor, MonitorOff } from "lucide-react"
 import { NotificationBell } from "@/components/notification-bell"
 
 // Extend Window interface for webkit AudioContext
@@ -918,7 +918,7 @@ export default function CallPage() {
           </div>
         </div>
       </header>
-      <main className="flex-1 overflow-y-auto px-4 py-6">        {!joined ? (
+      <main className="flex-1 overflow-y-auto px-4 py-6 min-h-0">        {!joined ? (
           <div className="max-w-md mx-auto flex flex-col items-center gap-4">
             <div className="text-center mb-4">
               <h2 className="text-lg font-semibold mb-2">Join the Call</h2>
@@ -936,12 +936,11 @@ export default function CallPage() {
               If denied, you&apos;ll join muted and can unmute to try again.
             </div>
           </div>) : (
-          <div className="h-full flex flex-col">
-            {/* Control Panel */}
-            <div className="bg-gray-50 rounded-lg p-4 mb-4 flex-shrink-0">
+          <div className="h-full flex flex-col min-h-0 space-y-4">            {/* Control Panel */}
+            <div className="bg-gray-50 rounded-lg p-3 flex-shrink-0">
               <div className="flex items-center justify-between flex-wrap gap-2">
                 <div className="text-sm font-medium text-gray-700">Controls</div>
-                <div className="flex items-center gap-2">                  {/* Audio Controls */}
+                <div className="flex items-center gap-2 flex-wrap">{/* Audio Controls */}
                   {!actualIsListener && (
                     <Button
                       size="sm"
@@ -979,8 +978,7 @@ export default function CallPage() {
                       <span className="hidden sm:inline">Screen</span>
                     </Button>
                   )}
-                  
-                  {/* Leave Call */}
+                    {/* Leave Call */}
                   <Button
                     size="sm"
                     variant="destructive"
@@ -1000,60 +998,9 @@ export default function CallPage() {
                   <span>You are speaking</span>
                 </div>
               )}
-            </div>
-
-            {/* Selected Participant Large View */}
-            {selectedParticipant && (
-              <div className="bg-black rounded-lg mb-4 relative flex-shrink-0" style={{ height: '200px' }}>
-                <div className="absolute top-2 left-2 bg-black bg-opacity-50 text-white px-2 py-1 rounded text-xs">
-                  {selectedParticipant}
-                </div>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="absolute top-2 right-2 text-white hover:bg-white hover:bg-opacity-20"
-                  onClick={() => setSelectedParticipant(null)}
-                >
-                  <Maximize2 className="h-4 w-4" />
-                </Button>
-                
-                {/* Selected participant's video */}
-                {remoteVideoStreams[selectedParticipant] && (
-                  <video
-                    ref={remoteVideoRefs.current[selectedParticipant]}
-                    autoPlay
-                    playsInline
-                    className="w-full h-full object-cover rounded-lg"
-                  />
-                )}
-                
-                {/* Selected participant's screen share */}
-                {remoteScreenStreams[selectedParticipant] && (
-                  <video
-                    ref={remoteScreenRefs.current[selectedParticipant]}
-                    autoPlay
-                    playsInline
-                    className="w-full h-full object-contain rounded-lg bg-gray-900"
-                  />
-                )}
-                
-                {/* Fallback if no video */}
-                {!remoteVideoStreams[selectedParticipant] && !remoteScreenStreams[selectedParticipant] && (
-                  <div className="w-full h-full flex items-center justify-center text-white">
-                    <div className="text-center">
-                      <div className="w-16 h-16 bg-gray-600 rounded-full flex items-center justify-center mx-auto mb-2">
-                        <span className="text-xl font-semibold">{selectedParticipant[0]?.toUpperCase()}</span>
-                      </div>
-                      <div className="text-sm">No video</div>
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Local Video Preview */}
+            </div>{/* Remove the selected participant modal view - we'll handle it in the grid */}            {/* Local Video Preview - smaller and positioned at top */}
             {videoEnabled && localVideoStreamRef.current && (
-              <div className="bg-black rounded-lg mb-4 relative flex-shrink-0" style={{ height: '120px' }}>
+              <div className="bg-black rounded-lg mb-4 relative flex-shrink-0 w-full sm:w-64 self-start" style={{ aspectRatio: '16/9', height: 'auto' }}>
                 <div className="absolute top-2 left-2 bg-black bg-opacity-50 text-white px-2 py-1 rounded text-xs">
                   You (Video)
                 </div>
@@ -1065,11 +1012,9 @@ export default function CallPage() {
                   className="w-full h-full object-cover rounded-lg"
                 />
               </div>
-            )}
-
-            {/* Local Screen Share Preview */}
+            )}            {/* Local Screen Share Preview - same size as video preview */}
             {screenSharing && localScreenStreamRef.current && (
-              <div className="bg-black rounded-lg mb-4 relative flex-shrink-0" style={{ height: '120px' }}>
+              <div className="bg-black rounded-lg mb-4 relative flex-shrink-0 w-full sm:w-80 self-start" style={{ aspectRatio: '16/9', height: 'auto' }}>
                 <div className="absolute top-2 left-2 bg-black bg-opacity-50 text-white px-2 py-1 rounded text-xs">
                   Your Screen
                 </div>
@@ -1081,67 +1026,75 @@ export default function CallPage() {
                   className="w-full h-full object-contain rounded-lg"
                 />
               </div>
-            )}
-
-            {/* Participants Sliding View */}
-            <div className="flex-1 overflow-hidden">
-              <div className="font-semibold mb-2 text-sm">Participants</div>
-                {participants.size === 0 ? (
+            )}{/* Participants Grid */}
+            <div className="flex-1 overflow-y-auto">
+              <div className="font-semibold mb-4 text-sm">Participants</div>
+              {participants.size === 0 ? (
                 <div className="text-gray-400 text-sm text-center py-8">
                   No one else in the call yet.
                 </div>
-              ) : (
-                <div className="overflow-x-auto pb-2">
-                  <div className="flex gap-3" style={{ width: 'max-content' }}>
-                    {Array.from(participants).map(peer => (
+              ) : (                <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3 sm:gap-4">
+                  {Array.from(participants).map(peer => {
+                    const isSelected = selectedParticipant === peer;
+                    const hasVideo = remoteVideoStreams[peer];
+                    const hasScreenShare = remoteScreenStreams[peer];
+                    
+                    return (
                       <div
                         key={peer}
-                        className={`flex-shrink-0 bg-gray-50 rounded-lg p-3 border-2 transition-all cursor-pointer ${
-                          selectedParticipant === peer ? 'border-blue-500 bg-blue-50' : 'border-transparent hover:border-gray-300'
+                        className={`bg-gray-50 rounded-lg p-2 sm:p-3 border-2 transition-all cursor-pointer ${
+                          isSelected ? 'border-blue-500 bg-blue-50 col-span-2 sm:col-span-2' : 'border-transparent hover:border-gray-300'
                         }`}
-                        onClick={() => setSelectedParticipant(selectedParticipant === peer ? null : peer)}
-                        style={{ width: '160px' }}
-                      >
-                        {/* Participant Video Thumbnail */}
-                        <div className="relative bg-black rounded mb-2" style={{ height: '90px' }}>
-                          {remoteVideoStreams[peer] ? (
+                        onClick={() => setSelectedParticipant(isSelected ? null : peer)}
+                      >                        {/* Participant Video Container */}
+                        <div 
+                          className="relative bg-black rounded mb-2 sm:mb-3 aspect-video"
+                        >
+                          {hasVideo ? (
                             <video
                               ref={remoteVideoRefs.current[peer]}
                               autoPlay
                               playsInline
                               className="w-full h-full object-cover rounded"
                             />
-                          ) : remoteScreenStreams[peer] ? (
+                          ) : hasScreenShare ? (
                             <video
                               ref={remoteScreenRefs.current[peer]}
                               autoPlay
                               playsInline
                               className="w-full h-full object-contain rounded bg-gray-900"
                             />
-                          ) : (
-                            <div className="w-full h-full flex items-center justify-center text-white">
-                              <div className="w-8 h-8 bg-gray-600 rounded-full flex items-center justify-center">
-                                <span className="text-sm font-semibold">{peer[0]?.toUpperCase()}</span>
+                          ) : (                            <div className="w-full h-full flex items-center justify-center text-white">
+                              <div className={`bg-gray-600 rounded-full flex items-center justify-center ${
+                                isSelected ? 'w-12 h-12 sm:w-16 sm:h-16' : 'w-8 h-8 sm:w-12 sm:h-12'
+                              }`}>
+                                <span className={`font-semibold ${isSelected ? 'text-lg sm:text-xl' : 'text-sm sm:text-lg'}`}>
+                                  {peer[0]?.toUpperCase()}
+                                </span>
                               </div>
                             </div>
                           )}
                           
                           {/* Screen share indicator */}
-                          {remoteScreenStreams[peer] && (
-                            <div className="absolute top-1 right-1 bg-green-500 text-white p-1 rounded">
+                          {hasScreenShare && (
+                            <div className="absolute top-2 right-2 bg-green-500 text-white p-1 rounded">
                               <Monitor className="h-3 w-3" />
                             </div>
                           )}
+                          
+                          {/* Selected indicator */}
+                          {isSelected && (
+                            <div className="absolute top-2 left-2 bg-blue-500 text-white px-2 py-1 rounded text-xs">
+                              Expanded
+                            </div>
+                          )}
                         </div>
-                        
-                        {/* Participant Name and Controls */}
-                        <div className="text-xs font-medium text-gray-900 truncate mb-2">{peer}</div>
-                        
-                        <div className="flex items-center justify-between">
-                          {/* Speaking Indicator */}
-                          <div className={`flex items-center ${speakingPeers[peer] ? 'text-green-600' : 'text-gray-400'}`}>
-                            <Volume2 className="h-3 w-3" />
-                            {speakingPeers[peer] && <span className="ml-1 text-xs">Speaking</span>}
+                          {/* Participant Name and Controls */}
+                        <div className="flex items-center justify-between mb-1 sm:mb-2">
+                          <div className={`font-medium text-gray-900 truncate ${
+                            isSelected ? 'text-sm sm:text-base' : 'text-xs sm:text-sm'
+                          }`}>
+                            {peer}
                           </div>
                           
                           {/* Mute Button */}
@@ -1152,10 +1105,19 @@ export default function CallPage() {
                               e.stopPropagation()
                               togglePeerMute(peer)
                             }}
-                            className="p-1 h-6 w-6"
+                            className="p-1 h-6 w-6 sm:h-7 sm:w-7"
                           >
-                            {peerMuted[peer] ? <MicOff className="h-3 w-3" /> : <Mic className="h-3 w-3" />}
+                            <MicOff className="h-2.5 w-2.5 sm:h-3 sm:w-3" style={{ display: peerMuted[peer] ? 'block' : 'none' }} />
+                            <Mic className="h-2.5 w-2.5 sm:h-3 sm:w-3" style={{ display: peerMuted[peer] ? 'none' : 'block' }} />
                           </Button>
+                        </div>
+                        
+                        {/* Speaking Indicator */}
+                        <div className={`flex items-center text-xs ${
+                          speakingPeers[peer] ? 'text-green-600' : 'text-gray-400'
+                        }`}>
+                          <Volume2 className="h-2.5 w-2.5 sm:h-3 sm:w-3 mr-1" />
+                          <span className="text-xs">{speakingPeers[peer] ? 'Speaking' : 'Silent'}</span>
                         </div>
                         
                         {/* Hidden audio element */}
@@ -1168,8 +1130,8 @@ export default function CallPage() {
                           className="hidden"
                         />
                       </div>
-                    ))}
-                  </div>
+                    );
+                  })}
                 </div>
               )}
             </div>
