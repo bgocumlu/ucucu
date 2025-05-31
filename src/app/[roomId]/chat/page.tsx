@@ -812,6 +812,20 @@ export default function ChatPage() {
   //   };
   // }, []);
 
+  // Update document title when room information changes
+  useEffect(() => {
+    if (roomInfo.name) {
+      document.title = `Ucucu - ${roomInfo.name}`;
+    } else if (roomId) {
+      document.title = `Ucucu - ${roomId}`;
+    }
+
+    // Cleanup: Reset title when component unmounts (user leaves room)
+    return () => {
+      document.title = "Ucucu";
+    };
+  }, [roomInfo.name, roomId]);
+
   return (
     <div className="h-screen bg-white flex flex-col">
       {/* Header */}

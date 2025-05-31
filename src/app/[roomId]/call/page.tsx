@@ -21,7 +21,7 @@ export default function CallPage() {
   const router = useRouter()
   const rawRoomId = params.roomId as string
   const roomId = decodeURIComponent(rawRoomId)
-    const [currentUser, setCurrentUser] = useState("")
+  const [currentUser, setCurrentUser] = useState("")
   const [actualIsListener, setActualIsListener] = useState(false) // Track actual operational mode
   const [joined, setJoined] = useState(false)
   const [connecting, setConnecting] = useState(false)
@@ -1251,6 +1251,17 @@ export default function CallPage() {
       setReconnecting(false)
     }
   }
+
+  // Update document title when component mounts/unmounts
+  useEffect(() => {
+    // Set title to show we're in a call
+    document.title = `Ucucu - Call`;
+
+    // Cleanup: Reset title when component unmounts (user leaves call)
+    return () => {
+      document.title = "Ucucu";
+    };
+  }, []);
 
   return (
     <div className="h-screen bg-white flex flex-col">      <header className="bg-white border-b border-gray-200 px-4 py-3 flex-shrink-0">
