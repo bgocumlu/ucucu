@@ -3,7 +3,7 @@
 import React, { useEffect, useRef, useState } from "react"
 import { useParams, useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
-import { ArrowLeft, Phone, Mic, MicOff, Volume2 } from "lucide-react"
+import { ArrowLeft, Phone, Mic, MicOff, Volume2, Video, VideoOff, Monitor, MonitorOff, Maximize2 } from "lucide-react"
 import { NotificationBell } from "@/components/notification-bell"
 
 // Extend Window interface for webkit AudioContext
@@ -16,42 +16,66 @@ declare global {
 const SIGNALING_SERVER_URL = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:3001"
 const ICE_CONFIG = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] }
 
-export default function CallPage() {  const params = useParams()
+export default function CallPage() {
+  const params = useParams()
   const router = useRouter()
   const rawRoomId = params.roomId as string
   const roomId = decodeURIComponent(rawRoomId)
+  
   const [currentUser, setCurrentUser] = useState("")
-  const [isListener, setIsListener] = useState(false)
   const [actualIsListener, setActualIsListener] = useState(false) // Track actual operational mode
   const [joined, setJoined] = useState(false)
   const [connecting, setConnecting] = useState(false)
   const [error, setError] = useState("")
   const [remoteStreams, setRemoteStreams] = useState<Record<string, MediaStream>>({})
+  const [remoteVideoStreams, setRemoteVideoStreams] = useState<Record<string, MediaStream>>({})
+  const [remoteScreenStreams, setRemoteScreenStreams] = useState<Record<string, MediaStream>>({})
+  const [participants, setParticipants] = useState<Set<string>>(new Set()) // Track all participants
   const localAudioRef = useRef<HTMLAudioElement>(null)
+  const localVideoRef = useRef<HTMLVideoElement>(null)
+  const localScreenRef = useRef<HTMLVideoElement>(null)
   const wsRef = useRef<WebSocket | null>(null)
   const localStreamRef = useRef<MediaStream | null>(null)
+  const localVideoStreamRef = useRef<MediaStream | null>(null)
+  const localScreenStreamRef = useRef<MediaStream | null>(null)
   const peerConnections = useRef<Record<string, RTCPeerConnection>>({})
   const [muted, setMuted] = useState(false)
+  const [videoEnabled, setVideoEnabled] = useState(false)
+  const [screenSharing, setScreenSharing] = useState(false)
+  const [selectedParticipant, setSelectedParticipant] = useState<string | null>(null)
   const [peerMuted, setPeerMuted] = useState<Record<string, boolean>>({}) // <--- NEW: track muted state for each remote peer
   const [speakingPeers, setSpeakingPeers] = useState<Record<string, boolean>>({})
   const [localSpeaking, setLocalSpeaking] = useState(false)
   const analyserRef = useRef<AnalyserNode | null>(null)
-  const localAudioContextRef = useRef<AudioContext | null>(null)
-  // For each remote stream, create a ref and attach srcObject
+  const localAudioContextRef = useRef<AudioContext | null>(null)  // For each participant, create refs for audio, video, and screen
   const remoteAudioRefs = useRef<Record<string, React.RefObject<HTMLAudioElement | null>>>({})
-  Object.keys(remoteStreams).forEach(peer => {
+  const remoteVideoRefs = useRef<Record<string, React.RefObject<HTMLVideoElement | null>>>({})
+  const remoteScreenRefs = useRef<Record<string, React.RefObject<HTMLVideoElement | null>>>({})
+  
+  // Create refs for all participants (not just those with streams)
+  Array.from(participants).forEach(peer => {
     if (!remoteAudioRefs.current[peer]) {
       remoteAudioRefs.current[peer] = React.createRef<HTMLAudioElement>()
     }
-  })
-  // Attach srcObject for local audio
+    if (!remoteVideoRefs.current[peer]) {
+      remoteVideoRefs.current[peer] = React.createRef<HTMLVideoElement>()
+    }
+    if (!remoteScreenRefs.current[peer]) {
+      remoteScreenRefs.current[peer] = React.createRef<HTMLVideoElement>()
+    }
+  })// Attach srcObject for local audio, video, and screen
   useEffect(() => {
     if (localAudioRef.current && localStreamRef.current) {
       localAudioRef.current.srcObject = localStreamRef.current
     }
-  }, [localAudioRef, joined, actualIsListener])
-
-  // --- Ensure remote audio elements are always "live" and NOT muted unless user muted ---
+    if (localVideoRef.current && localVideoStreamRef.current) {
+      localVideoRef.current.srcObject = localVideoStreamRef.current
+    }
+    if (localScreenRef.current && localScreenStreamRef.current) {
+      localScreenRef.current.srcObject = localScreenStreamRef.current
+    }
+  }, [localAudioRef, localVideoRef, localScreenRef, joined, actualIsListener, videoEnabled, screenSharing])
+  // --- Ensure remote audio/video/screen elements are always "live" and properly set ---
   useEffect(() => {
     Object.entries(remoteStreams).forEach(([peer, stream]) => {
       const ref = remoteAudioRefs.current[peer]
@@ -68,7 +92,43 @@ export default function CallPage() {  const params = useParams()
           })
       }
     })
-  }, [remoteStreams, peerMuted])  // --- Local speaking detection ---
+  }, [remoteStreams, peerMuted])
+
+  // Attach video streams to video elements
+  useEffect(() => {
+    Object.entries(remoteVideoStreams).forEach(([peer, stream]) => {
+      const ref = remoteVideoRefs.current[peer]
+      if (ref && ref.current && stream) {
+        if (ref.current.srcObject !== stream) {
+          ref.current.srcObject = stream
+        }
+        ref.current.controls = false
+        ref.current
+          .play()
+          .catch(() => {
+            // Ignore play errors (autoplay policy)
+          })
+      }
+    })
+  }, [remoteVideoStreams])
+
+  // Attach screen streams to screen elements
+  useEffect(() => {
+    Object.entries(remoteScreenStreams).forEach(([peer, stream]) => {
+      const ref = remoteScreenRefs.current[peer]
+      if (ref && ref.current && stream) {
+        if (ref.current.srcObject !== stream) {
+          ref.current.srcObject = stream
+        }
+        ref.current.controls = false
+        ref.current
+          .play()
+          .catch(() => {
+            // Ignore play errors (autoplay policy)
+          })
+      }
+    })
+  }, [remoteScreenStreams])// --- Local speaking detection ---
   useEffect(() => {
     if (!joined || actualIsListener || !localStreamRef.current) return
     let raf: number | undefined
@@ -139,16 +199,68 @@ export default function CallPage() {  const params = useParams()
       peerIds.forEach(peer => {
         if (audioContexts[peer]) audioContexts[peer].close()
       })
+    }  }, [remoteStreams])  // Handle mute/unmute without stopping tracks to maintain WebRTC connections
+  const handleMute = async () => {
+    if (!muted) {
+      // Muting - disable audio tracks without stopping them
+      setMuted(true)
+      if (localStreamRef.current) {
+        localStreamRef.current.getAudioTracks().forEach(track => {
+          track.enabled = false // Disable instead of stopping
+        })
+      }
+    } else {
+      // Unmuting
+      if (localStreamRef.current) {
+        // If we have a stream, just enable the tracks
+        localStreamRef.current.getAudioTracks().forEach(track => {
+          track.enabled = true
+        })
+        setMuted(false)
+        setError("")
+      } else {
+        // If no stream, request permission and create new stream
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+          localStreamRef.current = stream
+          if (localAudioRef.current) {
+            localAudioRef.current.srcObject = stream
+          }
+          
+          // Add audio tracks to all existing peer connections and trigger renegotiation
+          for (const [remote, pc] of Object.entries(peerConnections.current)) {
+            stream.getTracks().forEach(track => {
+              if (!pc.getSenders().some(sender => sender.track === track)) {
+                pc.addTrack(track, stream)
+              }
+            })
+            
+            // Always trigger renegotiation for both sides
+            try {
+              const offer = await pc.createOffer()
+              await pc.setLocalDescription(offer)
+              if (wsRef.current) {
+                wsRef.current.send(JSON.stringify({ 
+                  type: "call-offer", 
+                  roomId, 
+                  from: currentUser, 
+                  to: remote, 
+                  payload: pc.localDescription 
+                }))
+              }
+            } catch (error) {
+              console.error('Error creating unmute offer:', error)
+            }
+          }
+          
+          setMuted(false)
+          setError("")
+        } catch {
+          setError("Microphone access denied. Please check browser permissions.")
+        }
+      }
     }
-  }, [remoteStreams])
-
-  // --- Mute/unmute mic ---
-  useEffect(() => {
-    if (!localStreamRef.current) return
-    localStreamRef.current.getAudioTracks().forEach(track => {
-      track.enabled = !muted
-    })
-  }, [muted])
+  }
 
   // Consistent join logic (same as chat)
   useEffect(() => {
@@ -214,35 +326,36 @@ export default function CallPage() {  const params = useParams()
         return;
       }
     }
-  }// Join call room
+  }  // Join call room
   const joinCall = async () => {
     setConnecting(true)
     setError("")
     let localStream: MediaStream | null = null
-    let actualIsListenerLocal = isListener
     
-    if (!isListener) {
-      try {
-        localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false })
-        localStreamRef.current = localStream
-        if (localAudioRef.current) {
-          localAudioRef.current.srcObject = localStream
-        }
-      } catch {
-        actualIsListenerLocal = true
-        setIsListener(true)
-        setError("Mic access denied, joining as listener.")
+    // Always try to get microphone permission
+    try {
+      localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+      localStreamRef.current = localStream
+      if (localAudioRef.current) {
+        localAudioRef.current.srcObject = localStream
       }
+      // Start unmuted if permission granted
+      setMuted(false)
+    } catch (err) {
+      console.warn("Mic access denied, joining muted:", err)
+      // Join as normal participant but start muted
+      setMuted(true)
+      setError("Microphone access denied. You're muted - click unmute to grant permission.")
     }
     
-    // Set the actual operational mode for this session
-    setActualIsListener(actualIsListenerLocal)
-    
-    // Connect to signaling
+    // Always join as a normal participant (never as listener)
+    setActualIsListener(false)
+      // Connect to signaling
     const ws = new WebSocket(SIGNALING_SERVER_URL)
     wsRef.current = ws
+    
     ws.onopen = () => {
-      ws.send(JSON.stringify({ type: "call-join", roomId, username: currentUser, isListener: actualIsListenerLocal }))
+      ws.send(JSON.stringify({ type: "call-join", roomId, username: currentUser, isListener: false }))
       setJoined(true)
       setConnecting(false)
     }
@@ -251,6 +364,10 @@ export default function CallPage() {  const params = useParams()
       switch (msg.type) {        case "call-new-peer": {
           const newPeer = msg.username
           if (newPeer === currentUser) return
+          
+          // Add to participants list
+          setParticipants(prev => new Set([...prev, newPeer]))
+          
           let pc = peerConnections.current[newPeer]
           if (!pc) {
             pc = createPeerConnection(newPeer)
@@ -302,26 +419,45 @@ export default function CallPage() {  const params = useParams()
             try { await pc.addIceCandidate(new RTCIceCandidate(msg.payload)) } catch {}
           }
           break
-        }
-        case "call-peer-left": {
+        }        case "call-peer-left": {
           const left = msg.username
+          
+          // Remove from participants list
+          setParticipants(prev => {
+            const newSet = new Set(prev)
+            newSet.delete(left)
+            return newSet
+          })
+          
           if (peerConnections.current[left]) {
             peerConnections.current[left].close()
             delete peerConnections.current[left]
-          }
-          setRemoteStreams(prev => {
+          }          setRemoteStreams(prev => {
             const copy = { ...prev }
             delete copy[left]
             return copy
           })
+          setRemoteVideoStreams(prev => {
+            const copy = { ...prev }
+            delete copy[left]
+            return copy
+          })
+          setRemoteScreenStreams(prev => {
+            const copy = { ...prev }
+            delete copy[left]
+            return copy
+          })
+          
+          // Reset selected participant if they left
+          setSelectedParticipant(prev => prev === left ? null : prev)
+          
           break
         }
       }
     }
     ws.onclose = () => setJoined(false)
     ws.onerror = () => setError("WebSocket error")
-  }
-  // Leave call room
+  }  // Leave call room
   const leaveCall = () => {
     // Send leave message to server
     if (wsRef.current && currentUser) {
@@ -338,15 +474,32 @@ export default function CallPage() {  const params = useParams()
       localStreamRef.current = null
     }
     
+    // Stop video stream tracks
+    if (localVideoStreamRef.current) {
+      localVideoStreamRef.current.getTracks().forEach(track => track.stop())
+      localVideoStreamRef.current = null
+    }
+    
+    // Stop screen stream tracks
+    if (localScreenStreamRef.current) {
+      localScreenStreamRef.current.getTracks().forEach(track => track.stop())
+      localScreenStreamRef.current = null
+    }
+    
     // Close WebSocket connection
     if (wsRef.current) {
       wsRef.current.close()
       wsRef.current = null
     }
-    
-    // Reset state
+      // Reset state
     setJoined(false)
     setRemoteStreams({})
+    setRemoteVideoStreams({})
+    setRemoteScreenStreams({})
+    setParticipants(new Set()) // Clear participants list
+    setVideoEnabled(false)
+    setScreenSharing(false)
+    setSelectedParticipant(null)
     setError("")
     
     // Navigate back to chat
@@ -361,9 +514,32 @@ export default function CallPage() {  const params = useParams()
         wsRef.current.send(JSON.stringify({ type: "call-ice", roomId, from: currentUser, to: remote, payload: e.candidate }))
       }
     }
-    pc.ontrack = (e) => {
-      setRemoteStreams(prev => ({ ...prev, [remote]: e.streams[0] }))
+      pc.ontrack = (e) => {
+      const track = e.track
+      const stream = e.streams[0]
+      
+      console.log('Received track:', track.kind, track.label, 'from', remote)
+      
+      if (track.kind === 'audio') {
+        setRemoteStreams(prev => ({ ...prev, [remote]: stream }))
+      } else if (track.kind === 'video') {
+        // Check track label or use track settings to determine if it's screen share
+        // Screen share tracks typically have labels containing 'screen' or have specific constraints
+        const isScreenShare = track.label.toLowerCase().includes('screen') || 
+                             track.label.toLowerCase().includes('monitor') ||
+                             track.label.toLowerCase().includes('display') ||
+                             track.getSettings().displaySurface === 'monitor'
+        
+        if (isScreenShare) {
+          console.log('Setting as screen share for', remote)
+          setRemoteScreenStreams(prev => ({ ...prev, [remote]: stream }))
+        } else {
+          console.log('Setting as video for', remote)
+          setRemoteVideoStreams(prev => ({ ...prev, [remote]: stream }))
+        }
+      }
     }
+    
     // --- ADD: Always add local tracks to new peer connection if available ---
     if (!actualIsListener && localStreamRef.current) {
       localStreamRef.current.getTracks().forEach(track => {
@@ -372,8 +548,26 @@ export default function CallPage() {  const params = useParams()
         }
       })
     }
-    return pc
-  }  // Add local tracks to all peer connections when localStreamRef.current becomes available
+    
+    // Add video tracks if enabled
+    if (localVideoStreamRef.current) {
+      localVideoStreamRef.current.getTracks().forEach(track => {
+        if (!pc.getSenders().some(sender => sender.track === track)) {
+          pc.addTrack(track, localVideoStreamRef.current!)
+        }
+      })
+    }
+    
+    // Add screen tracks if enabled
+    if (localScreenStreamRef.current) {
+      localScreenStreamRef.current.getTracks().forEach(track => {
+        if (!pc.getSenders().some(sender => sender.track === track)) {
+          pc.addTrack(track, localScreenStreamRef.current!)
+        }
+      })
+    }return pc
+  }
+  // Add local tracks to all peer connections when localStreamRef.current becomes available
   useEffect(() => {
     if (!localStreamRef.current || actualIsListener) return
     Object.values(peerConnections.current).forEach(pc => {
@@ -382,8 +576,26 @@ export default function CallPage() {  const params = useParams()
           pc.addTrack(track, localStreamRef.current!)
         }
       })
+      
+      // Also add video tracks if enabled
+      if (localVideoStreamRef.current) {
+        localVideoStreamRef.current.getTracks().forEach(track => {
+          if (!pc.getSenders().some(sender => sender.track === track)) {
+            pc.addTrack(track, localVideoStreamRef.current!)
+          }
+        })
+      }
+      
+      // Also add screen tracks if enabled  
+      if (localScreenStreamRef.current) {
+        localScreenStreamRef.current.getTracks().forEach(track => {
+          if (!pc.getSenders().some(sender => sender.track === track)) {
+            pc.addTrack(track, localScreenStreamRef.current!)
+          }
+        })
+      }
     })
-  }, [joined, actualIsListener]) // Changed dependency to use actualIsListener
+  }, [joined, actualIsListener, videoEnabled, screenSharing]) // Updated dependencies
 
   // Clean up on leave
   useEffect(() => {
@@ -394,13 +606,200 @@ export default function CallPage() {  const params = useParams()
       if (localStreamRef.current) localStreamRef.current.getTracks().forEach(t => t.stop())
     }
   }, [roomId])
-
   // --- Mute/unmute a remote participant ---
   const togglePeerMute = (peer: string) => {
     setPeerMuted(prev => ({
       ...prev,
       [peer]: !prev[peer]
     }))
+  }  // --- Toggle video with proper renegotiation ---
+  const toggleVideo = async () => {
+    if (videoEnabled) {
+      // Turn off video
+      if (localVideoStreamRef.current) {
+        localVideoStreamRef.current.getTracks().forEach(track => track.stop())
+        localVideoStreamRef.current = null
+      }
+      
+      // Remove video tracks from all peer connections and trigger renegotiation
+      for (const [remote, pc] of Object.entries(peerConnections.current)) {
+        pc.getSenders().forEach(sender => {
+          if (sender.track && sender.track.kind === 'video' && !sender.track.label.includes('screen')) {
+            pc.removeTrack(sender)
+          }
+        })
+        
+        // Always trigger renegotiation for both sides
+        try {
+          const offer = await pc.createOffer()
+          await pc.setLocalDescription(offer)
+          if (wsRef.current) {
+            wsRef.current.send(JSON.stringify({ 
+              type: "call-offer", 
+              roomId, 
+              from: currentUser, 
+              to: remote, 
+              payload: pc.localDescription 
+            }))
+          }
+        } catch (error) {
+          console.error('Error creating video-off offer:', error)
+        }
+      }
+      
+      setVideoEnabled(false)
+    } else {
+      // Turn on video
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false })
+        localVideoStreamRef.current = stream
+        
+        // Add video tracks to all peer connections and trigger renegotiation
+        for (const [remote, pc] of Object.entries(peerConnections.current)) {
+          stream.getTracks().forEach(track => {
+            if (!pc.getSenders().some(sender => sender.track === track)) {
+              pc.addTrack(track, stream)
+            }
+          })
+          
+          // Always trigger renegotiation for both sides  
+          try {
+            const offer = await pc.createOffer()
+            await pc.setLocalDescription(offer)
+            if (wsRef.current) {
+              wsRef.current.send(JSON.stringify({ 
+                type: "call-offer", 
+                roomId, 
+                from: currentUser, 
+                to: remote, 
+                payload: pc.localDescription 
+              }))
+            }
+          } catch (error) {
+            console.error('Error creating video offer:', error)
+          }
+        }
+        
+        setVideoEnabled(true)
+      } catch (error) {
+        console.error('Error accessing camera:', error)
+        setError('Camera access denied')
+      }
+    }
+  }  // --- Toggle screen sharing with proper renegotiation ---
+  const toggleScreenShare = async () => {
+    if (screenSharing) {
+      // Turn off screen sharing
+      if (localScreenStreamRef.current) {
+        localScreenStreamRef.current.getTracks().forEach(track => track.stop())
+        localScreenStreamRef.current = null
+      }
+      
+      // Remove screen tracks from all peer connections and trigger renegotiation
+      for (const [remote, pc] of Object.entries(peerConnections.current)) {
+        pc.getSenders().forEach(sender => {
+          if (sender.track && sender.track.kind === 'video' && 
+              (sender.track.label.toLowerCase().includes('screen') || 
+               sender.track.label.toLowerCase().includes('monitor') ||
+               sender.track.label.toLowerCase().includes('display'))) {
+            pc.removeTrack(sender)
+          }
+        })
+        
+        // Always trigger renegotiation for both sides
+        try {
+          const offer = await pc.createOffer()
+          await pc.setLocalDescription(offer)
+          if (wsRef.current) {
+            wsRef.current.send(JSON.stringify({ 
+              type: "call-offer", 
+              roomId, 
+              from: currentUser, 
+              to: remote, 
+              payload: pc.localDescription 
+            }))
+          }
+        } catch (error) {
+          console.error('Error creating screen-off offer:', error)
+        }
+      }
+      
+      setScreenSharing(false)
+    } else {
+      // Turn on screen sharing
+      try {        
+        const stream = await navigator.mediaDevices.getDisplayMedia({ 
+          video: true, 
+          audio: false 
+        })
+        localScreenStreamRef.current = stream
+        
+        console.log('Screen share started, track label:', stream.getVideoTracks()[0]?.label)
+        
+        // Add screen tracks to all peer connections and trigger renegotiation
+        for (const [remote, pc] of Object.entries(peerConnections.current)) {
+          stream.getTracks().forEach(track => {
+            console.log('Adding screen track to peer connection:', track.label)
+            if (!pc.getSenders().some(sender => sender.track === track)) {
+              pc.addTrack(track, stream)
+            }
+          })
+          
+          // Always trigger renegotiation for both sides
+          try {
+            const offer = await pc.createOffer()
+            await pc.setLocalDescription(offer)
+            if (wsRef.current) {
+              wsRef.current.send(JSON.stringify({ 
+                type: "call-offer", 
+                roomId, 
+                from: currentUser, 
+                to: remote, 
+                payload: pc.localDescription 
+              }))
+            }
+          } catch (error) {
+            console.error('Error creating screen offer:', error)
+          }        }
+        
+        // Auto-stop when user stops sharing via browser UI
+        stream.getVideoTracks()[0].addEventListener('ended', () => {
+          console.log('Screen share ended by user')
+          setScreenSharing(false)
+          localScreenStreamRef.current = null
+          
+          // Clean up from peer connections and trigger renegotiation
+          Object.entries(peerConnections.current).forEach(async ([remote, pc]) => {
+            pc.getSenders().forEach(sender => {
+              if (sender.track && sender.track.readyState === 'ended') {
+                pc.removeTrack(sender)
+              }
+            })
+            
+            // Trigger renegotiation
+            try {
+              const offer = await pc.createOffer()
+              await pc.setLocalDescription(offer)
+              if (wsRef.current) {
+                wsRef.current.send(JSON.stringify({ 
+                  type: "call-offer", 
+                  roomId, 
+                  from: currentUser, 
+                  to: remote, 
+                  payload: pc.localDescription 
+                }))
+              }
+            } catch (error) {
+              console.error('Error creating cleanup offer:', error)
+            }
+          })
+        })
+          setScreenSharing(true)
+      } catch (error) {
+        console.error('Error accessing screen:', error)
+        setError('Screen sharing access denied or not supported')
+      }
+    }
   }
 
   return (
@@ -419,79 +818,266 @@ export default function CallPage() {  const params = useParams()
           </div>
         </div>
       </header>
-      <main className="flex-1 overflow-y-auto px-4 py-6">
-        {!joined ? (
+      <main className="flex-1 overflow-y-auto px-4 py-6">        {!joined ? (
           <div className="max-w-md mx-auto flex flex-col items-center gap-4">
-            <label className="flex items-center gap-2">
-              <input type="checkbox" checked={isListener} onChange={e => setIsListener(e.target.checked)} />
-              Listen only (no mic)
-            </label>
-            <Button onClick={joinCall} disabled={connecting} className="w-full">
-              <Phone className="h-5 w-5 mr-2" /> Join Call
-            </Button>
-            {error && <div className="text-red-600 text-sm">{error}</div>}
-          </div>
-        ) : (
-          <div className="max-w-md mx-auto w-full">
-            {!isListener && (
-              <div className="mb-4">
-                <div className="font-semibold mb-1 flex items-center gap-2">
-                  Your Mic
-                  <span className={`inline-flex items-center ml-2 ${localSpeaking ? "text-green-600" : "text-gray-400"}`}>
-                    <Volume2 className="h-4 w-4" />
-                    {localSpeaking && <span className="ml-1 text-xs">Speaking</span>}
-                  </span>                  <Button
-                    size="icon"
-                    variant={muted ? "destructive" : "outline"}
-                    className="ml-2"
-                    onClick={() => setMuted(m => !m)}
-                    aria-label={muted ? "Unmute" : "Mute"}
-                  >
-                    {muted ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
-                  </Button>
+            <div className="text-center mb-4">
+              <h2 className="text-lg font-semibold mb-2">Join the Call</h2>
+              <p className="text-sm text-gray-600">Choose how you want to join</p>
+            </div>
+              <div className="w-full space-y-3">
+              <Button onClick={() => joinCall()} disabled={connecting} className="w-full">
+                <Mic className="h-5 w-5 mr-2" /> Join Call
+              </Button>
+            </div>
+            
+            {error && <div className="text-red-600 text-sm mt-4 p-3 bg-red-50 rounded">{error}</div>}
+              <div className="text-xs text-gray-500 text-center">
+              Microphone permission will be requested automatically.<br/>
+              If denied, you&apos;ll join muted and can unmute to try again.
+            </div>
+          </div>) : (
+          <div className="h-full flex flex-col">
+            {/* Control Panel */}
+            <div className="bg-gray-50 rounded-lg p-4 mb-4 flex-shrink-0">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <div className="text-sm font-medium text-gray-700">Controls</div>
+                <div className="flex items-center gap-2">                  {/* Audio Controls */}
+                  {!actualIsListener && (
+                    <Button
+                      size="sm"
+                      variant={muted ? "destructive" : "outline"}
+                      onClick={handleMute}
+                      className="flex items-center gap-1"
+                    >
+                      {muted ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
+                      <span className="hidden sm:inline">{muted ? "Unmute" : "Mic"}</span>
+                    </Button>
+                  )}
+                  
+                  {/* Video Controls */}
+                  {!actualIsListener && (
+                    <Button
+                      size="sm"
+                      variant={videoEnabled ? "default" : "outline"}
+                      onClick={toggleVideo}
+                      className="flex items-center gap-1"
+                    >
+                      {videoEnabled ? <Video className="h-4 w-4" /> : <VideoOff className="h-4 w-4" />}
+                      <span className="hidden sm:inline">Video</span>
+                    </Button>
+                  )}
+                  
+                  {/* Screen Share Controls */}
+                  {!actualIsListener && (
+                    <Button
+                      size="sm"
+                      variant={screenSharing ? "default" : "outline"}
+                      onClick={toggleScreenShare}
+                      className="flex items-center gap-1"
+                    >
+                      {screenSharing ? <Monitor className="h-4 w-4" /> : <MonitorOff className="h-4 w-4" />}
+                      <span className="hidden sm:inline">Screen</span>
+                    </Button>
+                  )}
+                  
+                  {/* Leave Call */}
                   <Button
-                    size="icon"
+                    size="sm"
                     variant="destructive"
-                    className="ml-2"
                     onClick={leaveCall}
-                    aria-label="Leave call"
+                    className="flex items-center gap-1"
                   >
                     <Phone className="h-4 w-4" />
+                    <span className="hidden sm:inline">Leave</span>
                   </Button>
                 </div>
-                <audio ref={localAudioRef} autoPlay controls muted={true} className="w-full" />
               </div>
-            )}
-            <div className="font-semibold mb-1">Remote Participants</div>
-            <div className="space-y-2">
-              {Object.keys(remoteStreams).length === 0 && <div className="text-gray-400 text-sm">No one else in the call yet.</div>}
-              {Object.keys(remoteStreams).map(peer => (
-                <div key={peer} className="flex items-center gap-2">
-                  <audio
-                    ref={remoteAudioRefs.current[peer]}
+              
+              {/* Local Speaking Indicator */}
+              {!actualIsListener && localSpeaking && (
+                <div className="mt-2 text-xs text-green-600 flex items-center gap-1">
+                  <Volume2 className="h-3 w-3" />
+                  <span>You are speaking</span>
+                </div>
+              )}
+            </div>
+
+            {/* Selected Participant Large View */}
+            {selectedParticipant && (
+              <div className="bg-black rounded-lg mb-4 relative flex-shrink-0" style={{ height: '200px' }}>
+                <div className="absolute top-2 left-2 bg-black bg-opacity-50 text-white px-2 py-1 rounded text-xs">
+                  {selectedParticipant}
+                </div>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="absolute top-2 right-2 text-white hover:bg-white hover:bg-opacity-20"
+                  onClick={() => setSelectedParticipant(null)}
+                >
+                  <Maximize2 className="h-4 w-4" />
+                </Button>
+                
+                {/* Selected participant's video */}
+                {remoteVideoStreams[selectedParticipant] && (
+                  <video
+                    ref={remoteVideoRefs.current[selectedParticipant]}
                     autoPlay
                     playsInline
-                    controls={false}
-                    muted={!!peerMuted[peer]}
-                    className="w-full"
+                    className="w-full h-full object-cover rounded-lg"
                   />
-                  <span className="text-xs text-gray-500">{peer}</span>
-                  <span className={`ml-2 ${speakingPeers[peer] ? "text-green-600" : "text-gray-400"}`}>
-                    <Volume2 className="h-4 w-4 inline" />
-                    {speakingPeers[peer] && <span className="ml-1 text-xs">Speaking</span>}
-                  </span>
-                  <Button
-                    size="icon"
-                    variant={peerMuted[peer] ? "destructive" : "outline"}
-                    className="ml-2"
-                    onClick={() => togglePeerMute(peer)}
-                    aria-label={peerMuted[peer] ? "Unmute participant" : "Mute participant"}
-                  >
-                    {peerMuted[peer] ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
-                  </Button>
-                </div>
-              ))}            
+                )}
+                
+                {/* Selected participant's screen share */}
+                {remoteScreenStreams[selectedParticipant] && (
+                  <video
+                    ref={remoteScreenRefs.current[selectedParticipant]}
+                    autoPlay
+                    playsInline
+                    className="w-full h-full object-contain rounded-lg bg-gray-900"
+                  />
+                )}
+                
+                {/* Fallback if no video */}
+                {!remoteVideoStreams[selectedParticipant] && !remoteScreenStreams[selectedParticipant] && (
+                  <div className="w-full h-full flex items-center justify-center text-white">
+                    <div className="text-center">
+                      <div className="w-16 h-16 bg-gray-600 rounded-full flex items-center justify-center mx-auto mb-2">
+                        <span className="text-xl font-semibold">{selectedParticipant[0]?.toUpperCase()}</span>
+                      </div>
+                      <div className="text-sm">No video</div>
+                    </div>
+                  </div>
+                )}
               </div>
+            )}
+
+            {/* Local Video Preview */}
+            {videoEnabled && localVideoStreamRef.current && (
+              <div className="bg-black rounded-lg mb-4 relative flex-shrink-0" style={{ height: '120px' }}>
+                <div className="absolute top-2 left-2 bg-black bg-opacity-50 text-white px-2 py-1 rounded text-xs">
+                  You (Video)
+                </div>
+                <video
+                  ref={localVideoRef}
+                  autoPlay
+                  playsInline
+                  muted
+                  className="w-full h-full object-cover rounded-lg"
+                />
+              </div>
+            )}
+
+            {/* Local Screen Share Preview */}
+            {screenSharing && localScreenStreamRef.current && (
+              <div className="bg-black rounded-lg mb-4 relative flex-shrink-0" style={{ height: '120px' }}>
+                <div className="absolute top-2 left-2 bg-black bg-opacity-50 text-white px-2 py-1 rounded text-xs">
+                  Your Screen
+                </div>
+                <video
+                  ref={localScreenRef}
+                  autoPlay
+                  playsInline
+                  muted
+                  className="w-full h-full object-contain rounded-lg"
+                />
+              </div>
+            )}
+
+            {/* Participants Sliding View */}
+            <div className="flex-1 overflow-hidden">
+              <div className="font-semibold mb-2 text-sm">Participants</div>
+                {participants.size === 0 ? (
+                <div className="text-gray-400 text-sm text-center py-8">
+                  No one else in the call yet.
+                </div>
+              ) : (
+                <div className="overflow-x-auto pb-2">
+                  <div className="flex gap-3" style={{ width: 'max-content' }}>
+                    {Array.from(participants).map(peer => (
+                      <div
+                        key={peer}
+                        className={`flex-shrink-0 bg-gray-50 rounded-lg p-3 border-2 transition-all cursor-pointer ${
+                          selectedParticipant === peer ? 'border-blue-500 bg-blue-50' : 'border-transparent hover:border-gray-300'
+                        }`}
+                        onClick={() => setSelectedParticipant(selectedParticipant === peer ? null : peer)}
+                        style={{ width: '160px' }}
+                      >
+                        {/* Participant Video Thumbnail */}
+                        <div className="relative bg-black rounded mb-2" style={{ height: '90px' }}>
+                          {remoteVideoStreams[peer] ? (
+                            <video
+                              ref={remoteVideoRefs.current[peer]}
+                              autoPlay
+                              playsInline
+                              className="w-full h-full object-cover rounded"
+                            />
+                          ) : remoteScreenStreams[peer] ? (
+                            <video
+                              ref={remoteScreenRefs.current[peer]}
+                              autoPlay
+                              playsInline
+                              className="w-full h-full object-contain rounded bg-gray-900"
+                            />
+                          ) : (
+                            <div className="w-full h-full flex items-center justify-center text-white">
+                              <div className="w-8 h-8 bg-gray-600 rounded-full flex items-center justify-center">
+                                <span className="text-sm font-semibold">{peer[0]?.toUpperCase()}</span>
+                              </div>
+                            </div>
+                          )}
+                          
+                          {/* Screen share indicator */}
+                          {remoteScreenStreams[peer] && (
+                            <div className="absolute top-1 right-1 bg-green-500 text-white p-1 rounded">
+                              <Monitor className="h-3 w-3" />
+                            </div>
+                          )}
+                        </div>
+                        
+                        {/* Participant Name and Controls */}
+                        <div className="text-xs font-medium text-gray-900 truncate mb-2">{peer}</div>
+                        
+                        <div className="flex items-center justify-between">
+                          {/* Speaking Indicator */}
+                          <div className={`flex items-center ${speakingPeers[peer] ? 'text-green-600' : 'text-gray-400'}`}>
+                            <Volume2 className="h-3 w-3" />
+                            {speakingPeers[peer] && <span className="ml-1 text-xs">Speaking</span>}
+                          </div>
+                          
+                          {/* Mute Button */}
+                          <Button
+                            size="sm"
+                            variant={peerMuted[peer] ? "destructive" : "ghost"}
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              togglePeerMute(peer)
+                            }}
+                            className="p-1 h-6 w-6"
+                          >
+                            {peerMuted[peer] ? <MicOff className="h-3 w-3" /> : <Mic className="h-3 w-3" />}
+                          </Button>
+                        </div>
+                        
+                        {/* Hidden audio element */}
+                        <audio
+                          ref={remoteAudioRefs.current[peer]}
+                          autoPlay
+                          playsInline
+                          controls={false}
+                          muted={!!peerMuted[peer]}
+                          className="hidden"
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+            
+            {/* Hidden local audio element */}
+            {!actualIsListener && (
+              <audio ref={localAudioRef} autoPlay controls={false} muted={true} className="hidden" />
+            )}
           </div>
         )}
       </main>
