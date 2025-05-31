@@ -7,7 +7,7 @@ import { useState, useEffect, useRef } from "react"
 import { useParams, useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { ArrowLeft, Send, Paperclip, Mic, MoreVertical, ArrowDown } from "lucide-react"
+import { ArrowLeft, Send, Paperclip, Mic, MoreVertical, ArrowDown, Phone } from "lucide-react"
 import { ChatMessage } from "@/components/chat-message"
 import { RoomSettingsModal } from "@/components/room-settings-modal"
 import { RoomLeaveDialog } from "@/components/room-leave-dialog"
@@ -932,7 +932,20 @@ export default function ChatPage() {
               className="resize-none"
               disabled={isRecording || !isConnected}
             />
-          </div>          {/* Audio Record / Send */}
+          </div>  
+          
+          {/* Phone/Call Button */}
+          <Button
+            variant="ghost"
+            size="sm"
+            className="flex-shrink-0"
+            aria-label="Join group call"
+            onClick={() => router.push(`/${encodeURIComponent(roomId)}/call`)}
+          >
+            <Phone className="h-4 w-4" />
+          </Button>
+
+          {/* Audio Record / Send */}
           {messageText.trim() ? (
             <Button onClick={sendMessage} size="sm" className="flex-shrink-0" disabled={!isConnected} aria-label="Send message">
               <Send className="h-4 w-4" />
