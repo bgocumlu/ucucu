@@ -207,6 +207,7 @@ export default function CallPage() {
       if (localStreamRef.current) {
         localStreamRef.current.getAudioTracks().forEach(track => {
           track.enabled = false // Disable instead of stopping
+          console.log('Audio track muted:', track.label, track.enabled)
         })
       }
     } else {
@@ -215,6 +216,7 @@ export default function CallPage() {
         // If we have a stream, just enable the tracks
         localStreamRef.current.getAudioTracks().forEach(track => {
           track.enabled = true
+          console.log('Audio track unmuted:', track.label, track.enabled)
         })
         setMuted(false)
         setError("")
@@ -226,6 +228,12 @@ export default function CallPage() {
           if (localAudioRef.current) {
             localAudioRef.current.srcObject = stream
           }
+          
+          // Ensure audio tracks are enabled
+          stream.getAudioTracks().forEach(track => {
+            track.enabled = true
+            console.log('New audio track enabled:', track.label, track.enabled)
+          })
           
           // Add audio tracks to all existing peer connections and trigger renegotiation
           for (const [remote, pc] of Object.entries(peerConnections.current)) {
@@ -270,75 +278,180 @@ export default function CallPage() {
       return
     }
     setCurrentUser(username)
-  }, [roomId, router])
-  // --- Robust: Always accept answers, but if InvalidStateError occurs, always rollback and retry ONCE, and if still fails, log and continue ---
-  async function safeSetRemoteDescription(pc: RTCPeerConnection, desc: RTCSessionDescriptionInit) {
-    // Perfect negotiation: Handle offer collision by using username comparison
-    if (desc.type === "offer") {
-      // If we're in have-local-offer state and receive an offer, we have a collision
-      if (pc.signalingState === "have-local-offer") {
-        // The peer with the higher username should win the collision
-        // If we're the higher username, ignore this offer (we should send ours)
-        // If we're the lower username, rollback and accept their offer
-        const from = Object.keys(peerConnections.current).find(peer => peerConnections.current[peer] === pc)
-        if (from && currentUser > from) {
-          console.log("Ignoring offer collision - we have priority")
-          return
-        } else {
-          // We should rollback and accept their offer
-          try {
-            await pc.setLocalDescription({ type: "rollback" })
-          } catch (e) {
-            console.warn("Rollback failed:", e)
+  }, [roomId, router])  // Perfect negotiation implementation to handle SSL transport role conflicts
+  async function safeSetRemoteDescription(pc: RTCPeerConnection, desc: RTCSessionDescriptionInit, isPolite: boolean = false) {
+    console.log(`Setting remote description: ${desc.type}, signaling state: ${pc.signalingState}, isPolite: ${isPolite}`)
+    
+    try {
+      await pc.setRemoteDescription(new RTCSessionDescription(desc));
+      console.log(`Successfully set remote ${desc.type}`)
+      return 'success'
+    } catch (e: unknown) {
+      const error = e as Error;
+      console.error("setRemoteDescription error", error, desc, pc.signalingState);
+      
+      // Handle specific WebRTC errors
+      if (error.name === 'InvalidStateError') {
+        if (desc.type === 'offer') {
+          if (pc.signalingState === 'have-local-offer' && !isPolite) {
+            // Impolite peer ignores colliding offer
+            console.log("Ignoring colliding offer (impolite peer)")
+            return 'ignored'
+          } else {
+            // Polite peer handles collision with rollback
+            console.log("Handling offer collision with rollback (polite peer)")
+            try {
+              await pc.setLocalDescription({ type: "rollback" })
+              await pc.setRemoteDescription(new RTCSessionDescription(desc));
+              console.log("Successfully recovered from offer collision")
+              return 'success'
+            } catch (rollbackError) {
+              console.error("Rollback recovery failed:", rollbackError)
+              return 'recreate'
+            }
+          }
+        } else if (desc.type === 'answer') {
+          if (pc.signalingState === 'stable') {
+            // Answer in stable state - ignore it as it's likely stale
+            console.log("Answer received in stable state, ignoring (likely stale)")
+            return 'ignored'
+          } else {
+            console.log("Answer in wrong state, may need to recreate connection")
+            return 'recreate'
           }
         }
+      } else if (error.name === 'OperationError' || error.message.includes('SSL role')) {
+        console.log("SSL transport error - recreating peer connection")
+        return 'recreate'
+      }
+      
+      // Re-throw other errors
+      throw error
+    }
+  }
+
+  const recreatePeerConnection = async (peerId: string) => {
+    console.log(`Recreating peer connection for ${peerId}`)
+    
+    // Close existing connection
+    if (peerConnections.current[peerId]) {
+      peerConnections.current[peerId].close()
+      delete peerConnections.current[peerId]
+    }
+    
+    // Create new connection
+    const newPc = createPeerConnection(peerId)
+    
+    // Trigger new negotiation
+    try {
+      const offer = await newPc.createOffer()
+      await newPc.setLocalDescription(offer)
+      if (wsRef.current) {
+        wsRef.current.send(JSON.stringify({ 
+          type: "call-offer", 
+          roomId, 
+          from: currentUser, 
+          to: peerId, 
+          payload: newPc.localDescription 
+        }))
+      }
+    } catch (error) {
+      console.error('Error in recreated peer connection offer:', error)
+    }
+  }
+
+  function createPeerConnection(remote: string) {
+    const pc = new RTCPeerConnection(ICE_CONFIG)
+    peerConnections.current[remote] = pc
+    
+    pc.onicecandidate = (e) => {
+      if (e.candidate && wsRef.current) {
+        wsRef.current.send(JSON.stringify({ type: "call-ice", roomId, from: currentUser, to: remote, payload: e.candidate }))
       }
     }
     
-    // --- PATCH: Only set remote answer if in have-local-offer state ---
-    if (desc.type === "answer" && pc.signalingState !== "have-local-offer") {
-      // Already stable or not expecting answer, skip
-      console.warn("Skipping setRemoteDescription for answer: not in have-local-offer state", pc.signalingState);
-      return;
-    }
-    
-    let triedRollback = false;
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        await pc.setRemoteDescription(new RTCSessionDescription(desc));
-        return;
-      } catch (e) {
-        // Always try rollback and retry ONCE for InvalidStateError, regardless of type
-        if (
-          e instanceof DOMException &&
-          e.name === "InvalidStateError" &&
-          !triedRollback &&
-          pc.signalingState === "stable"
-        ) {
-          triedRollback = true;
-          try {
-            await pc.setLocalDescription({ type: "rollback" });
-          } catch {}
-          continue;
+    pc.ontrack = (e) => {
+      const track = e.track
+      const stream = e.streams[0]
+      
+      console.log('Received track:', track.kind, track.label, 'from', remote)
+      
+      if (track.kind === 'audio') {
+        setRemoteStreams(prev => ({ ...prev, [remote]: stream }))
+      } else if (track.kind === 'video') {
+        // Check track label or use track settings to determine if it's screen share
+        // Screen share tracks typically have labels containing 'screen' or have specific constraints
+        const isScreenShare = track.label.toLowerCase().includes('screen') || 
+                             track.label.toLowerCase().includes('monitor') ||
+                             track.label.toLowerCase().includes('display') ||
+                             track.getSettings().displaySurface === 'monitor'
+        
+        if (isScreenShare) {
+          console.log('Setting as screen share for', remote)
+          setRemoteScreenStreams(prev => ({ ...prev, [remote]: stream }))
+        } else {
+          console.log('Setting as video for', remote)
+          setRemoteVideoStreams(prev => ({ ...prev, [remote]: stream }))
         }
-        // Log and give up
-        console.error("setRemoteDescription error", e, desc, pc.signalingState);
-        return;
       }
     }
-  }  // Join call room
+    
+    // --- ADD: Always add local tracks to new peer connection if available ---
+    console.log(`Creating peer connection for ${remote}. Adding tracks:`)
+    
+    // Add audio tracks if available (not just when not a listener)
+    if (localStreamRef.current) {
+      console.log(`- Adding ${localStreamRef.current.getTracks().length} audio tracks`)
+      localStreamRef.current.getTracks().forEach(track => {
+        if (!pc.getSenders().some(sender => sender.track === track)) {
+          pc.addTrack(track, localStreamRef.current!)
+          console.log(`  - Added audio track: ${track.label}, enabled: ${track.enabled}`)
+        }
+      })
+    }
+    
+    // Add video tracks if enabled
+    if (localVideoStreamRef.current) {
+      console.log(`- Adding ${localVideoStreamRef.current.getTracks().length} video tracks`)
+      localVideoStreamRef.current.getTracks().forEach(track => {
+        if (!pc.getSenders().some(sender => sender.track === track)) {
+          pc.addTrack(track, localVideoStreamRef.current!)
+        }
+      })
+    }
+    
+    // Add screen tracks if enabled
+    if (localScreenStreamRef.current) {
+      console.log(`- Adding ${localScreenStreamRef.current.getTracks().length} screen share tracks`)
+      localScreenStreamRef.current.getTracks().forEach(track => {
+        if (!pc.getSenders().some(sender => sender.track === track)) {
+          pc.addTrack(track, localScreenStreamRef.current!)
+        }
+      })
+    }
+    
+    console.log(`Peer connection for ${remote} created with ${pc.getSenders().length} senders`)
+    
+    return pc
+  }
+
+// Join call room
   const joinCall = async () => {
     setConnecting(true)
     setError("")
     let localStream: MediaStream | null = null
-    
-    // Always try to get microphone permission
+      // Always try to get microphone permission
     try {
       localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false })
       localStreamRef.current = localStream
       if (localAudioRef.current) {
         localAudioRef.current.srcObject = localStream
       }
+      // Ensure audio tracks are enabled
+      localStream.getAudioTracks().forEach(track => {
+        track.enabled = true
+        console.log('Audio track enabled:', track.label, track.enabled)
+      })
       // Start unmuted if permission granted
       setMuted(false)
     } catch (err) {
@@ -373,42 +486,87 @@ export default function CallPage() {
             pc = createPeerConnection(newPeer)
           }
           
-          // Perfect negotiation: Only create offers if we're not a listener AND our username is "higher"
-          // This prevents the race condition where both peers try to create offers
-          const shouldCreateOffer = !actualIsListener && currentUser > newPeer
+          // Check if we have any media to share (audio, video, or screen) - check actual streams not state
+          const hasAudio = localStreamRef.current && localStreamRef.current.getTracks().length > 0
+          const hasVideo = localVideoStreamRef.current && localVideoStreamRef.current.getTracks().length > 0
+          const hasScreenShare = localScreenStreamRef.current && localScreenStreamRef.current.getTracks().length > 0
+          const hasAnyMedia = hasAudio || hasVideo || hasScreenShare
+          
+          // Perfect negotiation: Only create offer if we're the impolite peer (larger username)
+          // OR if we have media and the other peer doesn't initiate quickly
+          const isImpolite = currentUser > newPeer
+          const shouldCreateOffer = !actualIsListener && isImpolite && hasAnyMedia
+          
           if (shouldCreateOffer) {
-            // Remove all existing senders before adding tracks (avoid duplicate tracks)
-            pc.getSenders().forEach(sender => {
-              if (sender.track && localStreamRef.current && !localStreamRef.current.getTracks().includes(sender.track)) {
-                pc.removeTrack(sender)
+            // Add a small delay to let the polite peer potentially start negotiation first
+            setTimeout(async () => {
+              // Check if negotiation hasn't started yet
+              if (pc && pc.signalingState === 'stable') {
+                try {
+                  console.log(`Creating offer for new peer ${newPeer}. Media: audio=${hasAudio}, video=${hasVideo}, screen=${hasScreenShare}`)
+                  const offer = await pc.createOffer()
+                  await pc.setLocalDescription(offer)
+                  ws.send(JSON.stringify({ type: "call-offer", roomId, from: currentUser, to: newPeer, payload: pc.localDescription }))
+                } catch (error) {
+                  console.error('Error creating offer for new peer:', error)
+                }
               }
-            })
-            const offer = await pc.createOffer()
-            await pc.setLocalDescription(offer)
-            ws.send(JSON.stringify({ type: "call-offer", roomId, from: currentUser, to: newPeer, payload: pc.localDescription }))
+            }, 100) // Small delay to prevent race conditions
           }
           break
-        }
-        case "call-offer": {
+        }case "call-offer": {
           const from = msg.from
           let pc = peerConnections.current[from]
           if (!pc) {
             pc = createPeerConnection(from)
           }
-          // Use safeSetRemoteDescription to avoid InvalidStateError
-          await safeSetRemoteDescription(pc, msg.payload)
-          // --- REMOVE: Do not add tracks here, handled by useEffect above ---
-          const answer = await pc.createAnswer()
-          await pc.setLocalDescription(answer)
-          ws.send(JSON.stringify({ type: "call-answer", roomId, from: currentUser, to: from, payload: pc.localDescription }))
+          
+          // Perfect negotiation: determine politeness based on username comparison
+          const isPolite = currentUser < from // Lexicographically smaller username is polite
+          
+          // Use safeSetRemoteDescription with politeness info
+          const result = await safeSetRemoteDescription(pc, msg.payload, isPolite)
+          if (result === 'recreate') {
+            // Recreate the peer connection and try again
+            await recreatePeerConnection(from)
+            pc = peerConnections.current[from]
+            if (pc) {
+              await safeSetRemoteDescription(pc, msg.payload, isPolite)
+            }
+          } else if (result === 'ignored') {
+            // Offer was ignored due to collision, don't create answer
+            console.log(`Offer from ${from} was ignored due to collision`)
+            break
+          }
+          
+          // Only proceed if we have a valid peer connection and didn't ignore
+          if (pc && pc.signalingState !== 'closed' && result === 'success') {
+            try {
+              const answer = await pc.createAnswer()
+              await pc.setLocalDescription(answer)
+              ws.send(JSON.stringify({ type: "call-answer", roomId, from: currentUser, to: from, payload: pc.localDescription }))
+            } catch (error) {
+              console.error('Error creating answer:', error)
+            }
+          }
           break
-        }
-        case "call-answer": {
+        }        case "call-answer": {
           const from = msg.from
           const pc = peerConnections.current[from]
           if (pc) {
-            // Use safeSetRemoteDescription to avoid InvalidStateError
-            await safeSetRemoteDescription(pc, msg.payload)
+            // Check if we're in the right state to accept an answer
+            if (pc.signalingState === 'have-local-offer') {
+              // Use safeSetRemoteDescription to avoid InvalidStateError
+              const result = await safeSetRemoteDescription(pc, msg.payload, false)
+              if (result === 'recreate') {
+                // For answers, we usually don't recreate but log the issue
+                console.log(`Answer processing failed for ${from}, may need full renegotiation`)
+              } else if (result === 'ignored') {
+                console.log(`Answer from ${from} was ignored (stale or wrong state)`)
+              }
+            } else {
+              console.log(`Received answer from ${from} in wrong state: ${pc.signalingState}`)
+            }
           }
           break
         }
@@ -503,70 +661,8 @@ export default function CallPage() {
     setError("")
     
     // Navigate back to chat
-    router.push(`/${encodeURIComponent(roomId)}/chat`)
-  }
-
-  function createPeerConnection(remote: string) {
-    const pc = new RTCPeerConnection(ICE_CONFIG)
-    peerConnections.current[remote] = pc
-    pc.onicecandidate = (e) => {
-      if (e.candidate && wsRef.current) {
-        wsRef.current.send(JSON.stringify({ type: "call-ice", roomId, from: currentUser, to: remote, payload: e.candidate }))
-      }
-    }
-      pc.ontrack = (e) => {
-      const track = e.track
-      const stream = e.streams[0]
-      
-      console.log('Received track:', track.kind, track.label, 'from', remote)
-      
-      if (track.kind === 'audio') {
-        setRemoteStreams(prev => ({ ...prev, [remote]: stream }))
-      } else if (track.kind === 'video') {
-        // Check track label or use track settings to determine if it's screen share
-        // Screen share tracks typically have labels containing 'screen' or have specific constraints
-        const isScreenShare = track.label.toLowerCase().includes('screen') || 
-                             track.label.toLowerCase().includes('monitor') ||
-                             track.label.toLowerCase().includes('display') ||
-                             track.getSettings().displaySurface === 'monitor'
-        
-        if (isScreenShare) {
-          console.log('Setting as screen share for', remote)
-          setRemoteScreenStreams(prev => ({ ...prev, [remote]: stream }))
-        } else {
-          console.log('Setting as video for', remote)
-          setRemoteVideoStreams(prev => ({ ...prev, [remote]: stream }))
-        }
-      }
-    }
-      // --- ADD: Always add local tracks to new peer connection if available ---
-    // Add audio tracks if available (not just when not a listener)
-    if (localStreamRef.current) {
-      localStreamRef.current.getTracks().forEach(track => {
-        if (!pc.getSenders().some(sender => sender.track === track)) {
-          pc.addTrack(track, localStreamRef.current!)
-        }
-      })
-    }
-    
-    // Add video tracks if enabled
-    if (localVideoStreamRef.current) {
-      localVideoStreamRef.current.getTracks().forEach(track => {
-        if (!pc.getSenders().some(sender => sender.track === track)) {
-          pc.addTrack(track, localVideoStreamRef.current!)
-        }
-      })
-    }
-    
-    // Add screen tracks if enabled
-    if (localScreenStreamRef.current) {
-      localScreenStreamRef.current.getTracks().forEach(track => {
-        if (!pc.getSenders().some(sender => sender.track === track)) {
-          pc.addTrack(track, localScreenStreamRef.current!)
-        }
-      })
-    }return pc
-  }  // Add local tracks to all peer connections when available
+    router.push(`/${encodeURIComponent(roomId)}/chat`)  }
+// Add local tracks to all peer connections when available
   useEffect(() => {
     if (actualIsListener) return
     
@@ -576,6 +672,7 @@ export default function CallPage() {
         localStreamRef.current.getTracks().forEach(track => {
           if (!pc.getSenders().some(sender => sender.track === track)) {
             pc.addTrack(track, localStreamRef.current!)
+            console.log(`Added audio track to existing PC: ${track.label}, enabled: ${track.enabled}`)
           }
         })
       }
@@ -598,7 +695,7 @@ export default function CallPage() {
         })
       }
     })
-  }, [joined, actualIsListener, videoEnabled, screenSharing]) // Updated dependencies
+  }, [joined, actualIsListener, videoEnabled, screenSharing, muted]) // Added muted as dependency
 
   // Clean up on leave
   useEffect(() => {
