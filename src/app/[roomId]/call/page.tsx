@@ -419,7 +419,7 @@ export default function CallPage() {  const params = useParams()
                     {muted ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
                   </Button>
                 </div>
-                <audio ref={localAudioRef} autoPlay controls muted={false} className="w-full" />
+                <audio ref={localAudioRef} autoPlay controls muted={true} className="w-full" />
               </div>
             )}
             <div className="font-semibold mb-1">Remote Participants</div>

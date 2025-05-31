@@ -956,8 +956,8 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
   });
 
   // Track which room and username this socket is in
-  let joinedRoom: string | null = null;
-  let joinedUser: string | null = null;
+  const joinedRoom: string | null = null;
+  const joinedUser: string | null = null;
   ws.joinedRoom = undefined;
   ws.joinedUser = undefined;
 
@@ -1023,10 +1023,8 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
         }
         return
       }
-      // --- END: WebRTC Group Audio Call Signaling ---
-
-      // ...existing code...
-    } catch (e) {
+      // --- END: WebRTC Group Audio Call Signaling ---      // ...existing code...
+    } catch {
       ws.send(JSON.stringify({ type: 'error', error: 'Invalid message' }));
     }
   });
