@@ -539,9 +539,9 @@ export default function CallPage() {
         }
       }
     }
-    
-    // --- ADD: Always add local tracks to new peer connection if available ---
-    if (!actualIsListener && localStreamRef.current) {
+      // --- ADD: Always add local tracks to new peer connection if available ---
+    // Add audio tracks if available (not just when not a listener)
+    if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach(track => {
         if (!pc.getSenders().some(sender => sender.track === track)) {
           pc.addTrack(track, localStreamRef.current!)
@@ -566,16 +566,19 @@ export default function CallPage() {
         }
       })
     }return pc
-  }
-  // Add local tracks to all peer connections when localStreamRef.current becomes available
+  }  // Add local tracks to all peer connections when available
   useEffect(() => {
-    if (!localStreamRef.current || actualIsListener) return
+    if (actualIsListener) return
+    
     Object.values(peerConnections.current).forEach(pc => {
-      localStreamRef.current!.getTracks().forEach(track => {
-        if (!pc.getSenders().some(sender => sender.track === track)) {
-          pc.addTrack(track, localStreamRef.current!)
-        }
-      })
+      // Add audio tracks if available
+      if (localStreamRef.current) {
+        localStreamRef.current.getTracks().forEach(track => {
+          if (!pc.getSenders().some(sender => sender.track === track)) {
+            pc.addTrack(track, localStreamRef.current!)
+          }
+        })
+      }
       
       // Also add video tracks if enabled
       if (localVideoStreamRef.current) {
