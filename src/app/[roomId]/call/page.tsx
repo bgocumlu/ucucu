@@ -321,6 +321,38 @@ export default function CallPage() {  const params = useParams()
     ws.onclose = () => setJoined(false)
     ws.onerror = () => setError("WebSocket error")
   }
+  // Leave call room
+  const leaveCall = () => {
+    // Send leave message to server
+    if (wsRef.current && currentUser) {
+      wsRef.current.send(JSON.stringify({ type: "call-peer-left", roomId, username: currentUser }))
+    }
+    
+    // Close all peer connections
+    Object.values(peerConnections.current).forEach(pc => pc.close())
+    peerConnections.current = {}
+    
+    // Stop local stream tracks
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach(track => track.stop())
+      localStreamRef.current = null
+    }
+    
+    // Close WebSocket connection
+    if (wsRef.current) {
+      wsRef.current.close()
+      wsRef.current = null
+    }
+    
+    // Reset state
+    setJoined(false)
+    setRemoteStreams({})
+    setError("")
+    
+    // Navigate back to chat
+    router.push(`/${encodeURIComponent(roomId)}/chat`)
+  }
+
   function createPeerConnection(remote: string) {
     const pc = new RTCPeerConnection(ICE_CONFIG)
     peerConnections.current[remote] = pc
@@ -408,8 +440,7 @@ export default function CallPage() {  const params = useParams()
                   <span className={`inline-flex items-center ml-2 ${localSpeaking ? "text-green-600" : "text-gray-400"}`}>
                     <Volume2 className="h-4 w-4" />
                     {localSpeaking && <span className="ml-1 text-xs">Speaking</span>}
-                  </span>
-                  <Button
+                  </span>                  <Button
                     size="icon"
                     variant={muted ? "destructive" : "outline"}
                     className="ml-2"
@@ -417,6 +448,15 @@ export default function CallPage() {  const params = useParams()
                     aria-label={muted ? "Unmute" : "Mute"}
                   >
                     {muted ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
+                  </Button>
+                  <Button
+                    size="icon"
+                    variant="destructive"
+                    className="ml-2"
+                    onClick={leaveCall}
+                    aria-label="Leave call"
+                  >
+                    <Phone className="h-4 w-4" />
                   </Button>
                 </div>
                 <audio ref={localAudioRef} autoPlay controls muted={true} className="w-full" />
@@ -450,8 +490,8 @@ export default function CallPage() {  const params = useParams()
                     {peerMuted[peer] ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
                   </Button>
                 </div>
-              ))}
-            </div>
+              ))}            
+              </div>
           </div>
         )}
       </main>
