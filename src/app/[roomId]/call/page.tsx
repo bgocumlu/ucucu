@@ -735,6 +735,11 @@ export default function CallPage() {
       })
       localVideoStreamRef.current = stream
 
+      // Update local video preview immediately
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = stream
+      }
+
       // Update all peer connections with the new video track
       for (const [remote, pc] of Object.entries(peerConnections.current)) {
         // Remove old video tracks
@@ -1248,8 +1253,7 @@ export default function CallPage() {
   }
 
   return (
-    <div className="h-screen bg-white flex flex-col">
-      <header className="bg-white border-b border-gray-200 px-4 py-3 flex-shrink-0">
+    <div className="h-screen bg-white flex flex-col">      <header className="bg-white border-b border-gray-200 px-4 py-3 flex-shrink-0">
         <div className="flex items-center justify-between gap-2 w-full flex-nowrap">
           <div className="flex items-center gap-2 min-w-0 flex-shrink">
             <Button variant="ghost" size="sm" onClick={() => router.push(`/${encodeURIComponent(roomId)}/chat`)}>
@@ -1259,6 +1263,20 @@ export default function CallPage() {
             <p className="text-xs text-gray-500 truncate max-w-[80px]">/{roomId}</p>
           </div>
           <div className="flex items-center gap-2 flex-shrink-0 min-w-0">
+            {/* Reconnect Button - only show when joined */}
+            {joined && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={reconnectCall}
+                disabled={reconnecting || connecting}
+                className="flex items-center gap-1"
+                title="Reconnect to resolve connection issues"
+              >
+                <RotateCcw className={`h-4 w-4 ${reconnecting ? 'animate-spin' : ''}`} />
+                <span className="hidden sm:inline">{reconnecting ? 'Reconnecting...' : 'Reconnect'}</span>
+              </Button>
+            )}
             <NotificationBell roomId={roomId} username={currentUser} />
           </div>
         </div>
@@ -1323,8 +1341,7 @@ export default function CallPage() {
                       <span className="hidden sm:inline">Flip</span>
                     </Button>
                   )}
-                  
-                  {/* Screen Share Controls */}
+                    {/* Screen Share Controls */}
                   {!actualIsListener && (
                     <Button
                       size="sm"
@@ -1334,19 +1351,8 @@ export default function CallPage() {
                     >
                       {screenSharing ? <Monitor className="h-4 w-4" /> : <MonitorOff className="h-4 w-4" />}
                       <span className="hidden sm:inline">Screen</span>
-                    </Button>                  )}
-                  
-                  {/* Reconnect Button */}
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={reconnectCall}
-                    disabled={reconnecting || connecting}
-                    className="flex items-center gap-1"
-                  >
-                    <RotateCcw className={`h-4 w-4 ${reconnecting ? 'animate-spin' : ''}`} />
-                    <span className="hidden sm:inline">{reconnecting ? 'Reconnecting...' : 'Reconnect'}</span>
-                  </Button>
+                    </Button>
+                  )}
                   
                   {/* Leave Call */}
                   <Button
