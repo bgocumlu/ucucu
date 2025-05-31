@@ -928,7 +928,7 @@ type CallPeerInfo = {
 const callRooms: Record<string, Record<string, CallPeerInfo>> = {}
 
 // Helper: broadcast to all peers in a call room except sender
-function broadcastCall(roomId: string, type: string, data: any, exceptUsername?: string) {
+function broadcastCall(roomId: string, type: string, data: Record<string, unknown>, exceptUsername?: string) {
   const peers = callRooms[roomId]
   if (!peers) return
   Object.entries(peers).forEach(([username, info]) => {
