@@ -3,7 +3,7 @@
 import React, { useEffect, useRef, useState } from "react"
 import { useParams, useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
-import { ArrowLeft, Phone, Mic, MicOff, Volume2, Video, VideoOff, Monitor, MonitorOff, RotateCcw, RotateCw } from "lucide-react"
+import { ArrowLeft, Phone, Mic, MicOff, Volume2, Video, VideoOff, Monitor, MonitorOff, RotateCcw, RotateCw, FlipHorizontal } from "lucide-react"
 import { NotificationBell } from "@/components/notification-bell"
 
 // Extend Window interface for webkit AudioContext
@@ -49,6 +49,9 @@ export default function CallPage() {
   
   // Add state for camera switching
   const [currentCamera, setCurrentCamera] = useState<'user' | 'environment'>('user') // 'user' = front, 'environment' = back
+  
+  // Add state for camera mirror functionality
+  const [isMirrored, setIsMirrored] = useState(true) // Default to mirrored for front camera
 
   const analyserRef = useRef<AnalyserNode | null>(null)
   const localAudioContextRef = useRef<AudioContext | null>(null)  // For each participant, create refs for audio, video, and screen
@@ -781,6 +784,10 @@ export default function CallPage() {
     }
   }
 
+  // --- Toggle mirror for local video preview ---
+  const toggleMirror = () => {
+    setIsMirrored(!isMirrored)
+  }
   // --- Toggle video with proper renegotiation ---
   const toggleVideo = async () => {
     if (videoEnabled) {
@@ -1352,6 +1359,20 @@ export default function CallPage() {
                       <span className="hidden sm:inline">Flip</span>
                     </Button>
                   )}
+                  
+                  {/* Mirror Toggle Controls - only show when video is enabled */}
+                  {!actualIsListener && videoEnabled && (
+                    <Button
+                      size="sm"
+                      variant={isMirrored ? "default" : "outline"}
+                      onClick={toggleMirror}
+                      className="flex items-center gap-1"
+                      title={`${isMirrored ? 'Disable' : 'Enable'} mirror effect for your video`}
+                    >
+                      <FlipHorizontal className="h-4 w-4" />
+                      <span className="hidden sm:inline">Mirror</span>
+                    </Button>
+                  )}
                     {/* Screen Share Controls */}
                   {!actualIsListener && (
                     <Button
@@ -1397,6 +1418,7 @@ export default function CallPage() {
                   playsInline
                   muted
                   className="w-full h-full object-cover rounded-lg"
+                  style={{ transform: isMirrored ? 'scaleX(-1)' : 'none' }} // Mirror effect for front camera
                 />
               </div>
             )}            {/* Local Screen Share Preview - same size as video preview */}
