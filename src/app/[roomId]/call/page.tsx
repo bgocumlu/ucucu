@@ -462,10 +462,21 @@ export default function CallPage() {
       // Start unmuted if permission granted
       setMuted(false)
     } catch (err) {
-      console.warn("Mic access denied, joining muted:", err)
-      // Join as normal participant but start muted
+      console.warn("Mic access denied, creating arbitrary audio track:", err)
+      // Create arbitrary audio track to establish WebRTC connection
+      localStream = createArbitraryAudioTrack()
+      localStreamRef.current = localStream
+      if (localAudioRef.current) {
+        localAudioRef.current.srcObject = localStream
+      }
+      // Keep audio track disabled since user is muted
+      setMuted(false)
+      localStream.getAudioTracks().forEach(track => {
+        track.enabled = false
+        console.log('Join: Arbitrary audio track created but disabled (muted):', track.label)
+      })
       setMuted(true)
-      setError("Microphone access denied. You're muted - click unmute to grant permission.")
+      setError("Microphone access denied. Joined with silent audio track. Click unmute to try again.")
     }
     
     // Always join as a normal participant (never as listener)
@@ -979,6 +990,64 @@ export default function CallPage() {
         setError('Screen sharing access denied or not supported')
       }
     }
+  }  // Create arbitrary audio track when no microphone access
+  const createArbitraryAudioTrack = (): MediaStream => {
+    console.log('Creating arbitrary audio track for WebRTC connection')
+    
+    try {
+      // Create audio context and generate silent audio
+      const audioContext = new (window.AudioContext || window.webkitAudioContext)()
+      const oscillator = audioContext.createOscillator()
+      const gainNode = audioContext.createGain()
+      
+      // Create silent audio (very low volume but not completely silent)
+      oscillator.frequency.setValueAtTime(440, audioContext.currentTime) // 440 Hz tone
+      gainNode.gain.setValueAtTime(0.001, audioContext.currentTime) // Very low volume, almost silent
+      
+      oscillator.connect(gainNode)
+      
+      // Create MediaStreamDestination to get a MediaStream
+      const destination = audioContext.createMediaStreamDestination()
+      gainNode.connect(destination)
+      
+      // Start the oscillator
+      oscillator.start()
+      
+      const stream = destination.stream
+      const audioTrack = stream.getAudioTracks()[0]
+      
+      if (audioTrack) {
+        // Set track properties to make it identifiable
+        Object.defineProperty(audioTrack, 'label', {
+          value: 'Arbitrary Audio Track',
+          writable: false
+        })
+        
+        console.log('Arbitrary audio track created successfully:', {
+          label: audioTrack.label,
+          kind: audioTrack.kind,
+          enabled: audioTrack.enabled,
+          readyState: audioTrack.readyState,
+          id: audioTrack.id
+        })
+      } else {
+        console.warn('Failed to create audio track from arbitrary stream')
+      }
+      
+      return stream
+    } catch (error) {
+      console.error('Error creating arbitrary audio track:', error)
+      
+      // Fallback: create a minimal media stream with silent track
+      // This should work even if Web Audio API fails
+      const canvas = document.createElement('canvas')
+      canvas.width = 1
+      canvas.height = 1
+      const canvasStream = canvas.captureStream(1) // 1 FPS
+      
+      console.log('Created fallback canvas stream as audio substitute')
+      return canvasStream
+    }
   }
 
   // Reconnect to call - manually reset and reconnect all WebRTC connections
@@ -1022,7 +1091,7 @@ export default function CallPage() {
       // Recreate media streams if they were active
       let newLocalStream: MediaStream | null = null
       
-      // Recreate audio stream if not muted
+      // Always create an audio stream - either real microphone or arbitrary track
       if (!wasMuted) {
         try {
           newLocalStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false })
@@ -1032,13 +1101,35 @@ export default function CallPage() {
           }
           newLocalStream.getAudioTracks().forEach(track => {
             track.enabled = true
-            console.log('Reconnect: Audio track enabled:', track.label)
+            console.log('Reconnect: Real audio track enabled:', track.label)
           })
           setMuted(false)
         } catch (err) {
-          console.warn("Reconnect: Mic access denied:", err)
+          console.warn("Reconnect: Mic access denied, creating arbitrary audio track:", err)
+          // Create arbitrary audio track to establish WebRTC connection
+          newLocalStream = createArbitraryAudioTrack()
+          localStreamRef.current = newLocalStream
+          if (localAudioRef.current) {
+            localAudioRef.current.srcObject = newLocalStream
+          }
           setMuted(true)
+          setError("Microphone access denied. Reconnected with silent audio track. Click unmute to try again.")
         }
+      } else {
+        // Even if muted, create an arbitrary audio track for WebRTC connection establishment
+        setMuted(false);
+        console.log("Reconnect: Creating arbitrary audio track for muted user")
+        newLocalStream = createArbitraryAudioTrack()
+        localStreamRef.current = newLocalStream
+        if (localAudioRef.current) {
+          localAudioRef.current.srcObject = newLocalStream
+        }
+        // Keep audio track disabled since user was muted
+        newLocalStream.getAudioTracks().forEach(track => {
+          track.enabled = false
+          console.log('Reconnect: Arbitrary audio track created but disabled (muted):', track.label)
+        })
+        setMuted(true)
       }
         // Recreate video stream if it was enabled
       if (wasVideoEnabled) {
