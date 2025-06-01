@@ -741,6 +741,8 @@ export default function CallPage() {
 
     if (newCamera === 'environment')
       setIsMirrored(false) // Back camera should not be mirrored
+    else
+      setIsMirrored(true) // Front camera should be mirrored
     
     try {
       // Stop current video stream
