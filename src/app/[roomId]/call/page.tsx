@@ -224,6 +224,9 @@ export default function CallPage() {
         localStreamRef.current.getAudioTracks().forEach(track => {
           track.enabled = true
           console.log('Audio track unmuted:', track.label, track.enabled)
+          if (track.label === "Arbitrary Audio Track") {
+            alert("Microphone Error - Please press reconnect unmuted\nyou can not use the microphone until you reconnect.")
+          }
         })
         setMuted(false)
         setError("")
@@ -475,7 +478,7 @@ export default function CallPage() {
         track.enabled = false
         console.log('Join: Arbitrary audio track created but disabled (muted):', track.label)
       })
-      setMuted(true)
+      handleMute() // Ensure muted state is set
       setError("Microphone access denied. Joined with silent audio track. Click unmute to try again.")
     }
     
@@ -1002,7 +1005,7 @@ export default function CallPage() {
       
       // Create silent audio (very low volume but not completely silent)
       oscillator.frequency.setValueAtTime(440, audioContext.currentTime) // 440 Hz tone
-      gainNode.gain.setValueAtTime(0.001, audioContext.currentTime) // Very low volume, almost silent
+      gainNode.gain.setValueAtTime(0.00001, audioContext.currentTime) // Very low volume, almost silent
       
       oscillator.connect(gainNode)
       
@@ -1105,6 +1108,7 @@ export default function CallPage() {
           })
           setMuted(false)
         } catch (err) {
+          setMuted(false);
           console.warn("Reconnect: Mic access denied, creating arbitrary audio track:", err)
           // Create arbitrary audio track to establish WebRTC connection
           newLocalStream = createArbitraryAudioTrack()
@@ -1112,7 +1116,7 @@ export default function CallPage() {
           if (localAudioRef.current) {
             localAudioRef.current.srcObject = newLocalStream
           }
-          setMuted(true)
+          handleMute();
           setError("Microphone access denied. Reconnected with silent audio track. Click unmute to try again.")
         }
       } else {
