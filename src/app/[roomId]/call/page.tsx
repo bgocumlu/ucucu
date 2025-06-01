@@ -738,6 +738,9 @@ export default function CallPage() {
     if (!videoEnabled) return
 
     const newCamera = currentCamera === 'user' ? 'environment' : 'user'
+
+    if (newCamera === 'environment')
+      setIsMirrored(false) // Back camera should not be mirrored
     
     try {
       // Stop current video stream
