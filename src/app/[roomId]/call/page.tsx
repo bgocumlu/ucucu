@@ -147,15 +147,16 @@ export default function CallPage() {
     analyser.fftSize = 512
     analyserRef.current = analyser
     const source = ctx.createMediaStreamSource(localStreamRef.current)
-    source.connect(analyser)
+    source.connect(analyser)    
     const data = new Uint8Array(analyser.fftSize)
     function checkSpeaking() {
       if (!analyser) return
       analyser.getByteTimeDomainData(data)
-      // Simple volume threshold
+      // Simple volume threshold - decreased threshold for more sensitive detection
       const rms = Math.sqrt(data.reduce((sum, v) => sum + Math.pow(v - 128, 2), 0) / data.length)
-      setLocalSpeaking(rms > 15)
-      raf = requestAnimationFrame(checkSpeaking)    }
+      setLocalSpeaking(rms > 4)
+      raf = requestAnimationFrame(checkSpeaking)
+    }
     checkSpeaking()
     return () => {
       if (raf !== undefined) cancelAnimationFrame(raf)
@@ -189,10 +190,9 @@ export default function CallPage() {
           datas[peer] = new Uint8Array(analysers[peer].fftSize)
           const src = audioContexts[peer].createMediaStreamSource(stream)
           src.connect(analysers[peer])
-        }
-        analysers[peer].getByteTimeDomainData(datas[peer])
+        }        analysers[peer].getByteTimeDomainData(datas[peer])
         const rms = Math.sqrt(datas[peer].reduce((sum, v) => sum + Math.pow(v - 128, 2), 0) / datas[peer].length)
-        newSpeaking[peer] = rms > 15
+        newSpeaking[peer] = rms > 4
       })
       setSpeakingPeers(newSpeaking)
       raf = requestAnimationFrame(checkRemoteSpeaking)
@@ -1398,10 +1398,11 @@ export default function CallPage() {
                   </Button>
                 </div>
               </div>
-              
-              {/* Local Speaking Indicator */}
-              {!actualIsListener && localSpeaking && (
-                <div className="mt-2 text-xs text-green-600 flex items-center gap-1">
+                {/* Local Speaking Indicator */}
+              {!actualIsListener && (
+                <div className={`mt-2 text-xs text-green-600 flex items-center gap-1 transition-opacity ${
+                  localSpeaking ? 'opacity-100' : 'opacity-0'
+                }`}>
                   <Volume2 className="h-3 w-3" />
                   <span>You are speaking</span>
                 </div>
@@ -1520,13 +1521,12 @@ export default function CallPage() {
                             <Mic className="h-2.5 w-2.5 sm:h-3 sm:w-3" style={{ display: peerMuted[peer] ? 'none' : 'block' }} />
                           </Button>
                         </div>
-                        
-                        {/* Speaking Indicator */}
-                        <div className={`flex items-center text-xs ${
-                          speakingPeers[peer] ? 'text-green-600' : 'text-gray-400'
+                          {/* Speaking Indicator */}
+                        <div className={`flex items-center text-xs text-green-600 transition-opacity ${
+                          speakingPeers[peer] ? 'opacity-100' : 'opacity-10'
                         }`}>
                           <Volume2 className="h-2.5 w-2.5 sm:h-3 sm:w-3 mr-1" />
-                          <span className="text-xs">{speakingPeers[peer] ? 'Speaking' : 'Silent'}</span>
+                          <span className="text-xs">Speaking</span>
                         </div>
                         
                         {/* Hidden audio element */}
