@@ -1392,7 +1392,7 @@ export default function CallPage() {
                 title="Reconnect to resolve connection issues"
               >
                 <RotateCcw className={`h-4 w-4 ${reconnecting ? 'animate-spin' : ''}`} />
-                <span className="hidden sm:inline">{reconnecting ? 'Reconnecting...' : 'Reconnect'}</span>
+                <span className="sm:inline">{reconnecting ? 'Reconnecting...' : 'Reconnect'}</span>
               </Button>
             )}
             <NotificationBell roomId={roomId} username={currentUser} />
