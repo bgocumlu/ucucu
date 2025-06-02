@@ -326,13 +326,22 @@ setInterval(() => {
   let cleanedRooms = 0;
   
   for (const [roomId, room] of Object.entries(rooms)) {
-    // Never delete the global room
-    if (roomId === 'global') continue;
-    
     const hasUsers = room.users.size > 0;
     const hasActiveSubscriptions = getActiveSubscriptions(roomId).length > 0;
+
+    if (roomId === 'global') {
+      // Special handling for global room: clear participants if no connected clients
+      const connectedClientsInGlobal = getClientsInRoom('global');
+      if (connectedClientsInGlobal.length === 0 && hasUsers) {
+        console.log(`[ROOM_CLEANUP][SERVER:${PORT}] No connected clients in global room, clearing ${room.users.size} ghost participants`);
+        room.users.clear();
+        // Broadcast updated room info after clearing participants
+        broadcastRooms();
+      }
+      continue; // Never delete the global room itself
+    }
     
-    // Only delete room if no users AND no active subscriptions
+    // Only delete non-global rooms if no users AND no active subscriptions
     if (!hasUsers && !hasActiveSubscriptions) {
       delete rooms[roomId];
       notificationSubscriptions.delete(roomId);
