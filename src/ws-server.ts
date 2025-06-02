@@ -502,6 +502,19 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
     const room = ws.joinedRoom || 'none';
     const user = ws.joinedUser || 'unknown';
     console.log(`[HEARTBEAT][SERVER:${PORT}] Received pong from ${user} in room: ${room}`);
+
+    // Enhanced desynchronization detection: Check if WebSocket thinks it's in room but room doesn't have user
+    if (ws.joinedRoom && ws.joinedUser) {
+      const roomData = rooms[ws.joinedRoom];
+      if (!roomData || !roomData.users.has(ws.joinedUser)) {
+        console.log(`[HEARTBEAT][SERVER:${PORT}] Desynchronized connection detected: ${ws.joinedUser} thinks they're in room ${ws.joinedRoom} but room data disagrees`);
+        console.log(`[HEARTBEAT][SERVER:${PORT}] Room exists: ${!!roomData}, User in room: ${roomData ? roomData.users.has(ws.joinedUser) : false}`);
+        
+        // This is a ghost connection - terminate it
+        ws.terminate();
+        return;
+      }
+    }
   });
 
   // Track which room and username this socket is in
