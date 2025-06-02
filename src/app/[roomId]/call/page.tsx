@@ -386,17 +386,33 @@ export default function CallPage() {
       console.log('Received track:', track.kind, track.label, 'from', remote)
       
       if (track.kind === 'audio') {
-        setRemoteStreams(prev => ({ ...prev, [remote]: stream }))
-      } else if (track.kind === 'video') {
+        setRemoteStreams(prev => ({ ...prev, [remote]: stream }))      
+      }    
+      else if (track.kind === 'video') {
+        // Enhanced screen track detection with better debugging
+        const trackLabel = track.label.toLowerCase()
+        const trackSettings = track.getSettings()
+        
+        console.log('Video track details:', {
+          label: track.label,
+          settings: trackSettings,
+          id: track.id
+        })
+        
         // Check track label or use track settings to determine if it's screen share
-        // Screen share tracks typically have labels containing 'screen' or have specific constraints
-        const isScreenShare = track.label.toLowerCase().includes('screen') || 
-                             track.label.toLowerCase().includes('monitor') ||
-                             track.label.toLowerCase().includes('display') ||
-                             track.getSettings().displaySurface === 'monitor'
+        const isScreenShare = trackLabel.includes('screen') || 
+                             trackLabel.includes('monitor') ||
+                             trackLabel.includes('display') ||
+                             trackLabel.includes('desktop') ||
+                             trackLabel.includes('window') ||
+                             trackLabel.includes('tab') ||
+                             trackLabel.includes('application') ||
+                             trackSettings.displaySurface === 'monitor' ||
+                             trackSettings.displaySurface === 'window' ||
+                             trackSettings.displaySurface === 'application'
         
         if (isScreenShare) {
-          console.log('Setting as screen share for', remote)
+          console.log('Setting as screen share for', remote, 'based on label/settings:', trackLabel, trackSettings)
           setRemoteScreenStreams(prev => ({ ...prev, [remote]: stream }))
         } else {
           console.log('Setting as video for', remote)
