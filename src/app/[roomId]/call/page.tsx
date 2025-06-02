@@ -503,7 +503,7 @@ export default function CallPage() {
       }
       setVideoEnabled(false)
       console.log('Temporary arbitrary video track stopped after connection establishment')
-    }, 333)
+    }, 1000)
     
     // Always join as a normal participant (never as listener)
     setActualIsListener(false)
@@ -1248,7 +1248,7 @@ export default function CallPage() {
           }
           setVideoEnabled(false)
           console.log('Reconnect: Temporary arbitrary video track stopped after connection establishment')
-        }, 333)
+        }, 1000)
       }
       
       // Recreate video stream if it was enabled and we haven't already set it up
