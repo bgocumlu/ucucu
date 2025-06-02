@@ -982,10 +982,15 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
   const joinedUser: string | null = null;
   ws.joinedRoom = undefined;
   ws.joinedUser = undefined;
-
   ws.on('message', async (data: WebSocket.RawData) => {
     try {
       const msg = JSON.parse(data.toString());
+
+      // Handle heartbeat ping messages
+      if (msg.type === 'ping') {
+        ws.send(JSON.stringify({ type: 'pong', timestamp: Date.now() }));
+        return;
+      }
 
       // --- BEGIN: WebRTC Group Audio Call Signaling ---
       if (msg.type === "call-join") {
