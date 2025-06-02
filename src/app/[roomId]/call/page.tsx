@@ -450,7 +450,9 @@ export default function CallPage() {
     setConnecting(true)
     setError("")
     let localStream: MediaStream | null = null
-      // Always try to get microphone permission
+    let localVideoStream: MediaStream | null = null
+    
+    // Always try to get microphone permission
     try {
       localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false })
       localStreamRef.current = localStream
@@ -478,9 +480,30 @@ export default function CallPage() {
         track.enabled = false
         console.log('Join: Arbitrary audio track created but disabled (muted):', track.label)
       })
-      handleMute() // Ensure muted state is set
-      setError("Microphone access denied. Joined with silent audio track. Click unmute to try again.")
+      handleMute() // Ensure muted state is set      setError("Microphone access denied. Joined with silent audio track. Click unmute to try again.")
     }
+    
+    // Always use arbitrary video track at startup for WebRTC connection establishment
+    console.log('Creating arbitrary video track for WebRTC establishment (no camera access requested)')
+    localVideoStream = createArbitraryVideoTrack()
+    localVideoStreamRef.current = localVideoStream
+    console.log('Join: Arbitrary video track created for WebRTC establishment')
+    // Set video enabled temporarily for connection establishment
+    setVideoEnabled(true)
+    
+    // Disable the arbitrary video track after brief moment
+    setTimeout(() => {
+      if (localVideoStreamRef.current) {
+        localVideoStreamRef.current.getTracks().forEach(track => {
+          if (track.label === 'Arbitrary Video Track') {
+            track.stop()
+          }
+        })
+        localVideoStreamRef.current = null
+      }
+      setVideoEnabled(false)
+      console.log('Temporary arbitrary video track stopped after connection establishment')
+    }, 333)
     
     // Always join as a normal participant (never as listener)
     setActualIsListener(false)
@@ -1058,6 +1081,70 @@ export default function CallPage() {
     }
   }
 
+  // Create arbitrary video track when no camera access
+  const createArbitraryVideoTrack = (): MediaStream => {
+    console.log('Creating arbitrary video track for WebRTC connection')
+    
+    try {
+      // Create a canvas with minimal dimensions
+      const canvas = document.createElement('canvas')
+      canvas.width = 640
+      canvas.height = 480
+      
+      const ctx = canvas.getContext('2d')
+      if (ctx) {
+        // Create a simple black frame with minimal content
+        ctx.fillStyle = 'black'
+        ctx.fillRect(0, 0, canvas.width, canvas.height)
+        
+        // Add a small visual indicator to distinguish from real video
+        ctx.fillStyle = '#333'
+        ctx.fillRect(10, 10, 20, 20)
+      }
+      
+      // Capture stream from canvas (1 FPS for minimal bandwidth)
+      const stream = canvas.captureStream(1)
+      const videoTrack = stream.getVideoTracks()[0]
+      
+      if (videoTrack) {
+        // Set track properties to make it identifiable
+        Object.defineProperty(videoTrack, 'label', {
+          value: 'Arbitrary Video Track',
+          writable: false
+        })
+        
+        console.log('Arbitrary video track created successfully:', {
+          label: videoTrack.label,
+          kind: videoTrack.kind,
+          enabled: videoTrack.enabled,
+          readyState: videoTrack.readyState,
+          id: videoTrack.id
+        })
+      } else {
+        console.warn('Failed to create video track from arbitrary stream')
+      }
+      
+      return stream
+    } catch (error) {
+      console.error('Error creating arbitrary video track:', error)
+      
+      // Fallback: try to create a minimal canvas stream
+      try {
+        const canvas = document.createElement('canvas')
+        canvas.width = 1
+        canvas.height = 1
+        const fallbackStream = canvas.captureStream(1)
+        
+        console.log('Created minimal fallback canvas stream for video')
+        return fallbackStream
+      } catch (fallbackError) {
+        console.error('Error creating fallback video track:', fallbackError)
+        // Return empty MediaStream as last resort
+        return new MediaStream()
+      }
+    }
+  }
+
   // Reconnect to call - manually reset and reconnect all WebRTC connections
   const reconnectCall = async () => {
     if (!joined || reconnecting) return
@@ -1132,16 +1219,40 @@ export default function CallPage() {
         localStreamRef.current = newLocalStream
         if (localAudioRef.current) {
           localAudioRef.current.srcObject = newLocalStream
-        }
-        // Keep audio track disabled since user was muted
+        }        // Keep audio track disabled since user was muted
         newLocalStream.getAudioTracks().forEach(track => {
           track.enabled = false
           console.log('Reconnect: Arbitrary audio track created but disabled (muted):', track.label)
         })
         setMuted(true)
+      }      // Always create arbitrary video track for WebRTC connection establishment (no camera access requested)
+      // regardless of whether video was previously enabled
+      let reconnectVideoStream: MediaStream | null = null
+      console.log('Reconnect: Creating arbitrary video track for WebRTC establishment (no camera access requested)')
+      reconnectVideoStream = createArbitraryVideoTrack()
+      localVideoStreamRef.current = reconnectVideoStream
+      console.log('Reconnect: Arbitrary video track created for WebRTC establishment')
+      // Set video enabled temporarily for connection establishment
+      setVideoEnabled(true)
+      
+      // Disable the arbitrary video track after brief moment unless video was previously enabled
+      if (!wasVideoEnabled) {
+        setTimeout(() => {
+          if (localVideoStreamRef.current) {
+            localVideoStreamRef.current.getTracks().forEach(track => {
+              if (track.label === 'Arbitrary Video Track') {
+                track.stop()
+              }
+            })
+            localVideoStreamRef.current = null
+          }
+          setVideoEnabled(false)
+          console.log('Reconnect: Temporary arbitrary video track stopped after connection establishment')
+        }, 333)
       }
-        // Recreate video stream if it was enabled
-      if (wasVideoEnabled) {
+      
+      // Recreate video stream if it was enabled and we haven't already set it up
+      if (wasVideoEnabled && !localVideoStreamRef.current) {
         try {
           const videoStream = await navigator.mediaDevices.getUserMedia({ 
             video: { facingMode: currentCamera }, 
