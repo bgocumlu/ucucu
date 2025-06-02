@@ -959,14 +959,24 @@ export default function ChatPage() {
               disabled={isRecording || !isConnected}
             />
           </div>  
-          
-          {/* Phone/Call Button */}
+            {/* Phone/Call Button */}
           <Button
             variant="ghost"
             size="sm"
             className="flex-shrink-0"
             aria-label="Join group call"
-            onClick={() => router.push(`/${encodeURIComponent(roomId)}/call`)}
+            onClick={() => {
+              // Send a message to chat before going to call page
+              send({ 
+                type: "sendMessage", 
+                roomId, 
+                username: currentUser, 
+                text: "📞 Joining the call..." 
+              });
+              
+              // Navigate to call page
+              router.push(`/${encodeURIComponent(roomId)}/call`);
+            }}
           >
             <Phone className="h-4 w-4" />
           </Button>
