@@ -100,20 +100,97 @@ export default function CallPage() {
       }
     })
   }, [remoteStreams, peerMuted])
-
   // Attach video streams to video elements
   useEffect(() => {
     Object.entries(remoteVideoStreams).forEach(([peer, stream]) => {
       const ref = remoteVideoRefs.current[peer]
       if (ref && ref.current && stream) {
+        console.log(`🎥 Attaching video stream for ${peer}:`, {
+          streamId: stream.id,
+          tracks: stream.getTracks().map(t => ({ 
+            kind: t.kind, 
+            label: t.label, 
+            enabled: t.enabled,
+            readyState: t.readyState,
+            settings: t.getSettings ? t.getSettings() : 'N/A'
+          })),
+          videoTracks: stream.getVideoTracks().length,
+          currentSrcObject: ref.current.srcObject ? 'assigned' : 'null'
+        })
+        
         if (ref.current.srcObject !== stream) {
           ref.current.srcObject = stream
+          console.log(`✅ Video stream assigned to element for ${peer}`)
         }
         ref.current.controls = false
+        
+        // Add detailed error handling and metadata events
+        const videoElement = ref.current
+          videoElement.onloadedmetadata = () => {
+          const videoDimensions = {
+            videoWidth: videoElement.videoWidth,
+            videoHeight: videoElement.videoHeight,
+            duration: videoElement.duration,
+            readyState: videoElement.readyState
+          }
+          console.log(`📹 Video metadata loaded for ${peer}:`, videoDimensions)
+          
+          // If dimensions are still 0, wait for them to be available
+          if (videoElement.videoWidth === 0 || videoElement.videoHeight === 0) {
+            console.log(`⏳ Waiting for video dimensions for ${peer}...`)
+            
+            const checkDimensions = () => {
+              if (videoElement.videoWidth > 0 && videoElement.videoHeight > 0) {
+                console.log(`✅ Video dimensions now available for ${peer}:`, {
+                  videoWidth: videoElement.videoWidth,
+                  videoHeight: videoElement.videoHeight
+                })
+              } else {
+                setTimeout(checkDimensions, 100) // Check again in 100ms
+              }
+            }
+            setTimeout(checkDimensions, 100)
+          }
+        }
+        
+        videoElement.onerror = (e) => {
+          console.error(`❌ Video error for ${peer}:`, e, {
+            error: videoElement.error,
+            networkState: videoElement.networkState,
+            readyState: videoElement.readyState
+          })
+        }
+          videoElement.oncanplay = () => {
+          const canPlayInfo = {
+            videoWidth: videoElement.videoWidth,
+            videoHeight: videoElement.videoHeight,
+            paused: videoElement.paused,
+            currentTime: videoElement.currentTime,
+            readyState: videoElement.readyState
+          }
+          console.log(`▶️ Video can play for ${peer}:`, canPlayInfo)
+          
+          // Force a repaint if dimensions are available
+          if (videoElement.videoWidth > 0 && videoElement.videoHeight > 0) {
+            console.log(`🎯 Video ready with dimensions ${videoElement.videoWidth}x${videoElement.videoHeight} for ${peer}`)
+          }
+        }
+        
+        // Add additional event listener for when video size changes
+        videoElement.onresize = () => {
+          console.log(`📐 Video resized for ${peer}:`, {
+            videoWidth: videoElement.videoWidth,
+            videoHeight: videoElement.videoHeight
+          })
+        }
+        
         ref.current
           .play()
-          .catch(() => {
-            // Ignore play errors (autoplay policy)
+          .then(() => {
+            console.log(`✅ Video playing for ${peer}`)
+          })
+          .catch((error) => {
+            console.warn(`⚠️ Video autoplay failed for ${peer}:`, error)
           })
       }
     })
@@ -398,8 +475,7 @@ export default function CallPage() {
       
       if (track.kind === 'audio') {
         setRemoteStreams(prev => ({ ...prev, [remote]: stream }))      
-      }    
-      else if (track.kind === 'video') {        // Enhanced screen track detection with better debugging
+      }      else if (track.kind === 'video') {        // Enhanced screen track detection with better debugging
         const trackLabel = track.label.toLowerCase()
         const trackSettings = track.getSettings()
         
@@ -427,13 +503,19 @@ export default function CallPage() {
                              trackLabel.includes('capture') ||
                              // Check if it's a display media track based on constraints
                              track.getConstraints?.()?.displaySurface !== undefined
+          // Helper function to format dimensions safely
+        const formatDimensions = (settings: MediaTrackSettings) => {
+          const width = settings.width || 'unknown'
+          const height = settings.height || 'unknown'
+          return `${width}x${height}`
+        }
         
         if (isScreenShare) {
           console.log('✅ DETECTED SCREEN SHARE for', remote, 'based on:', {
             label: trackLabel,
             settings: trackSettings,
             displaySurface: trackSettings.displaySurface,
-            dimensions: `${trackSettings.width}x${trackSettings.height}`
+            dimensions: formatDimensions(trackSettings)
           })
           setRemoteScreenStreams(prev => ({ ...prev, [remote]: stream }))
         } else {
@@ -441,7 +523,7 @@ export default function CallPage() {
             label: trackLabel,
             settings: trackSettings,
             displaySurface: trackSettings.displaySurface,
-            dimensions: `${trackSettings.width}x${trackSettings.height}`
+            dimensions: formatDimensions(trackSettings)
           })
           setRemoteVideoStreams(prev => ({ ...prev, [remote]: stream }))
         }
