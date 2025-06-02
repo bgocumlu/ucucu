@@ -1467,6 +1467,10 @@ export default function CallPage() {
       console.error('Reconnection failed:', error)
       setError("Reconnection failed. Please try again.")
       setReconnecting(false)
+    } finally {
+      // Reset video state after attempting to reconnect
+      setVideoEnabled(false)
+      setScreenSharing(false)
     }
   }
 
