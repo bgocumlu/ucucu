@@ -14,7 +14,16 @@ declare global {
 }
 
 const SIGNALING_SERVER_URL = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:3001"
-const ICE_CONFIG = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] }
+const ICE_CONFIG = { 
+  iceServers: [
+    { urls: "stun:stun.l.google.com:19302" },
+    { urls: "stun:stun1.l.google.com:19302" },
+    { urls: "stun:stun2.l.google.com:19302" }
+  ],
+  iceCandidatePoolSize: 10,
+  bundlePolicy: 'max-bundle' as RTCBundlePolicy,
+  rtcpMuxPolicy: 'require' as RTCRtcpMuxPolicy
+}
 
 export default function CallPage() {
   const params = useParams()
@@ -123,56 +132,82 @@ export default function CallPage() {
           console.log(`✅ Video stream assigned to element for ${peer}`)
         }
         ref.current.controls = false
-        
-        // Add detailed error handling and metadata events
+          // Enhanced video element setup with better dimension handling
         const videoElement = ref.current
-          videoElement.onloadedmetadata = () => {
+        
+        // Enhanced metadata event handler
+        videoElement.onloadedmetadata = () => {
           const videoDimensions = {
             videoWidth: videoElement.videoWidth,
             videoHeight: videoElement.videoHeight,
             duration: videoElement.duration,
-            readyState: videoElement.readyState
+            readyState: videoElement.readyState,
+            networkState: videoElement.networkState
           }
           console.log(`📹 Video metadata loaded for ${peer}:`, videoDimensions)
           
-          // If dimensions are still 0, wait for them to be available
+          // Enhanced dimension waiting with timeout protection
           if (videoElement.videoWidth === 0 || videoElement.videoHeight === 0) {
-            console.log(`⏳ Waiting for video dimensions for ${peer}...`)
+            console.log(`⏳ Waiting for video dimensions for ${peer} (this is normal for camera video)...`)
+            
+            let attempts = 0
+            const maxAttempts = 50 // 5 seconds max wait
             
             const checkDimensions = () => {
+              attempts++
+              
               if (videoElement.videoWidth > 0 && videoElement.videoHeight > 0) {
-                console.log(`✅ Video dimensions now available for ${peer}:`, {
+                console.log(`✅ Video dimensions now available for ${peer} after ${attempts * 100}ms:`, {
                   videoWidth: videoElement.videoWidth,
-                  videoHeight: videoElement.videoHeight
+                  videoHeight: videoElement.videoHeight,
+                  attempts: attempts
                 })
-              } else {
-                setTimeout(checkDimensions, 100) // Check again in 100ms
+                return
               }
+              
+              if (attempts >= maxAttempts) {
+                console.warn(`⚠️ Video dimensions still not available for ${peer} after ${attempts * 100}ms, but video may still work`)
+                return
+              }
+              
+              setTimeout(checkDimensions, 100)
             }
+            
             setTimeout(checkDimensions, 100)
+          } else {
+            console.log(`✅ Video dimensions immediately available for ${peer}:`, {
+              videoWidth: videoElement.videoWidth,
+              videoHeight: videoElement.videoHeight
+            })
           }
         }
-        
+          // Enhanced error handling
         videoElement.onerror = (e) => {
           console.error(`❌ Video error for ${peer}:`, e, {
             error: videoElement.error,
             networkState: videoElement.networkState,
-            readyState: videoElement.readyState
+            readyState: videoElement.readyState,
+            currentSrc: videoElement.currentSrc
           })
         }
-          videoElement.oncanplay = () => {
+        
+        // Enhanced can play event handler
+        videoElement.oncanplay = () => {
           const canPlayInfo = {
             videoWidth: videoElement.videoWidth,
             videoHeight: videoElement.videoHeight,
             paused: videoElement.paused,
             currentTime: videoElement.currentTime,
-            readyState: videoElement.readyState
+            readyState: videoElement.readyState,
+            networkState: videoElement.networkState
           }
           console.log(`▶️ Video can play for ${peer}:`, canPlayInfo)
           
-          // Force a repaint if dimensions are available
+          // Check if we now have dimensions
           if (videoElement.videoWidth > 0 && videoElement.videoHeight > 0) {
             console.log(`🎯 Video ready with dimensions ${videoElement.videoWidth}x${videoElement.videoHeight} for ${peer}`)
+          } else {
+            console.log(`⏳ Video can play but dimensions still pending for ${peer}`)
           }
         }
         
@@ -485,45 +520,65 @@ export default function CallPage() {
           id: track.id,
           kind: track.kind
         })
-        
-        // Enhanced screen share detection with multiple criteria
-        const isScreenShare = trackLabel.includes('screen') || 
-                             trackLabel.includes('monitor') ||
-                             trackLabel.includes('display') ||
-                             trackLabel.includes('desktop') ||
-                             trackLabel.includes('window') ||
-                             trackLabel.includes('tab') ||
-                             trackLabel.includes('application') ||
-                             trackSettings.displaySurface === 'monitor' ||
-                             trackSettings.displaySurface === 'window' ||
-                             trackSettings.displaySurface === 'application' ||
-                             // Additional criteria for better detection
-                             (trackSettings.width && trackSettings.height && 
-                              trackSettings.width >= 1024 && trackSettings.height >= 768) ||
-                             trackLabel.includes('capture') ||
-                             // Check if it's a display media track based on constraints
-                             track.getConstraints?.()?.displaySurface !== undefined
-          // Helper function to format dimensions safely
-        const formatDimensions = (settings: MediaTrackSettings) => {
-          const width = settings.width || 'unknown'
-          const height = settings.height || 'unknown'
-          return `${width}x${height}`
+          // Helper function to get track info with proper dimension handling
+        const getTrackInfo = (track: MediaStreamTrack) => {
+          const settings = track.getSettings()
+          const width = settings.width ?? 'unknown'
+          const height = settings.height ?? 'unknown'
+          const dimensions = width !== 'unknown' && height !== 'unknown' ? `${width}x${height}` : 'pending'
+          
+          return {
+            label: track.label,
+            settings: settings,
+            dimensions: dimensions,
+            hasImmediateDimensions: width !== 'unknown' && height !== 'unknown',
+            displaySurface: settings.displaySurface,
+            deviceId: settings.deviceId
+          }
         }
         
-        if (isScreenShare) {
-          console.log('✅ DETECTED SCREEN SHARE for', remote, 'based on:', {
-            label: trackLabel,
-            settings: trackSettings,
-            displaySurface: trackSettings.displaySurface,
-            dimensions: formatDimensions(trackSettings)
+        const trackInfo = getTrackInfo(track)
+        console.log('📊 Video track analysis for', remote, ':', trackInfo)
+        
+        // Enhanced screen share detection with multiple reliable criteria
+        const isScreenShare = 
+          // Check display surface properties (most reliable)
+          trackSettings.displaySurface === 'monitor' ||
+          trackSettings.displaySurface === 'window' ||
+          trackSettings.displaySurface === 'application' ||
+          trackSettings.displaySurface === 'browser' ||
+          // Check label patterns
+          trackLabel.includes('screen') || 
+          trackLabel.includes('monitor') ||
+          trackLabel.includes('display') ||
+          trackLabel.includes('desktop') ||
+          trackLabel.includes('window') ||
+          trackLabel.includes('tab') ||
+          trackLabel.includes('application') ||
+          trackLabel.includes('capture') ||
+          trackLabel.includes('chrome') ||
+          // Check for typical screen share dimensions (when available)
+          (trackSettings.width && trackSettings.height && 
+           trackSettings.width >= 1024 && trackSettings.height >= 768 &&
+           (trackSettings.width >= 1920 || trackSettings.height >= 1080)) ||
+          // Check constraints if available
+          (track.getConstraints && track.getConstraints()?.displaySurface !== undefined)
+          if (isScreenShare) {
+          console.log('🖥️ SCREEN SHARE DETECTED for', remote, ':', {
+            reason: 'Display surface or screen-like properties detected',
+            trackInfo: trackInfo,
+            criteria: {
+              displaySurface: trackSettings.displaySurface,
+              labelMatches: trackLabel.includes('screen') || trackLabel.includes('monitor') || trackLabel.includes('display'),
+              dimensionBased: trackSettings.width && trackSettings.height && trackSettings.width >= 1024
+            }
           })
           setRemoteScreenStreams(prev => ({ ...prev, [remote]: stream }))
         } else {
-          console.log('✅ DETECTED CAMERA VIDEO for', remote, 'based on:', {
-            label: trackLabel,
-            settings: trackSettings,
-            displaySurface: trackSettings.displaySurface,
-            dimensions: formatDimensions(trackSettings)
+          console.log('📹 CAMERA VIDEO DETECTED for', remote, ':', {
+            reason: 'No screen share indicators found',
+            trackInfo: trackInfo,
+            willWaitForDimensions: !trackInfo.hasImmediateDimensions
           })
           setRemoteVideoStreams(prev => ({ ...prev, [remote]: stream }))
         }
@@ -588,21 +643,27 @@ export default function CallPage() {
       return null
     }
   }
-
   // Helper: Create a placeholder video track for SDP consistency
   const createPlaceholderVideoTrack = (): MediaStreamTrack | null => {
     try {
       const canvas = document.createElement('canvas')
-      canvas.width = 1
-      canvas.height = 1
+      canvas.width = 320  // Standard dimensions for placeholder
+      canvas.height = 240
       const ctx = canvas.getContext('2d')
       if (ctx) {
         ctx.fillStyle = 'black'
-        ctx.fillRect(0, 0, 1, 1)
+        ctx.fillRect(0, 0, 320, 240)
+        
+        // Add some text to indicate it's a placeholder
+        ctx.fillStyle = 'gray'
+        ctx.font = '16px Arial'
+        ctx.textAlign = 'center'
+        ctx.fillText('No video', 160, 120)
       }
       const stream = canvas.captureStream(1)
       const track = stream.getVideoTracks()[0]
       track.enabled = false // Start disabled
+      console.log('Created placeholder video track with dimensions:', canvas.width, 'x', canvas.height)
       return track
     } catch (error) {
       console.error('Error creating placeholder video track:', error)
