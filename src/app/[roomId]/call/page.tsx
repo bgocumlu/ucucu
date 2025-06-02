@@ -1144,7 +1144,6 @@ export default function CallPage() {
       }
     }
   }
-
   // Reconnect to call - manually reset and reconnect all WebRTC connections
   const reconnectCall = async () => {
     if (!joined || reconnecting) return
@@ -1153,10 +1152,24 @@ export default function CallPage() {
     setError("")
     console.log("Manual reconnection initiated...")
     
+    // FIRST: Immediately stop video and screen sharing before anything else
+    if (localVideoStreamRef.current) {
+      localVideoStreamRef.current.getTracks().forEach(track => track.stop())
+      localVideoStreamRef.current = null
+    }
+    setVideoEnabled(false)
+    
+    if (localScreenStreamRef.current) {
+      localScreenStreamRef.current.getTracks().forEach(track => track.stop())
+      localScreenStreamRef.current = null
+    }
+    setScreenSharing(false)
+    
+    console.log("Reconnect: Video and screen sharing stopped immediately")
+    
     try {
-      // Store current media state to restore after reconnection
-      const wasVideoEnabled = videoEnabled
-      const wasScreenSharing = screenSharing
+      // Store only muted state to restore after reconnection
+      // Video and screen sharing are already disabled above
       const wasMuted = muted
       
       // Close all existing peer connections
@@ -1183,7 +1196,7 @@ export default function CallPage() {
       // Wait a moment for cleanup
       await new Promise(resolve => setTimeout(resolve, 500))
       
-      // Recreate media streams if they were active
+      // Recreate media streams
       let newLocalStream: MediaStream | null = null
       
       // Always create an audio stream - either real microphone or arbitrary track
@@ -1226,7 +1239,7 @@ export default function CallPage() {
         })
         setMuted(true)
       }      // Always create arbitrary video track for WebRTC connection establishment (no camera access requested)
-      // regardless of whether video was previously enabled
+      // Video and screen sharing will be disabled after connection establishment
       let reconnectVideoStream: MediaStream | null = null
       console.log('Reconnect: Creating arbitrary video track for WebRTC establishment (no camera access requested)')
       reconnectVideoStream = createArbitraryVideoTrack()
@@ -1235,56 +1248,29 @@ export default function CallPage() {
       // Set video enabled temporarily for connection establishment
       setVideoEnabled(true)
       
-      // Disable the arbitrary video track after brief moment unless video was previously enabled
-      if (!wasVideoEnabled) {
-        setTimeout(() => {
-          if (localVideoStreamRef.current) {
-            localVideoStreamRef.current.getTracks().forEach(track => {
-              if (track.label === 'Arbitrary Video Track') {
-                track.stop()
-              }
-            })
-            localVideoStreamRef.current = null
-          }
-          setVideoEnabled(false)
-          console.log('Reconnect: Temporary arbitrary video track stopped after connection establishment')
-        }, 2000)
-      }
-      
-      // Recreate video stream if it was enabled and we haven't already set it up
-      if (wasVideoEnabled && !localVideoStreamRef.current) {
-        try {
-          const videoStream = await navigator.mediaDevices.getUserMedia({ 
-            video: { facingMode: currentCamera }, 
-            audio: false 
+      // Always disable video and screen sharing after connection establishment
+      // regardless of previous state (only restore muted state)
+      setTimeout(() => {
+        // Stop arbitrary video track
+        if (localVideoStreamRef.current) {
+          localVideoStreamRef.current.getTracks().forEach(track => {
+            if (track.label === 'Arbitrary Video Track') {
+              track.stop()
+            }
           })
-          localVideoStreamRef.current = videoStream
-          setVideoEnabled(true)
-          console.log('Reconnect: Video stream recreated')
-        } catch (err) {
-          console.warn("Reconnect: Video access denied:", err)
-          setVideoEnabled(false)
+          localVideoStreamRef.current = null
         }
-      }
-      
-      // Recreate screen share if it was active
-      if (wasScreenSharing) {
-        try {
-          const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false })
-          localScreenStreamRef.current = screenStream
-          setScreenSharing(true)
-          console.log('Reconnect: Screen share recreated')
-          
-          // Handle screen share end
-          screenStream.getVideoTracks()[0].addEventListener('ended', () => {
-            setScreenSharing(false)
-            localScreenStreamRef.current = null
-          })
-        } catch (err) {
-          console.warn("Reconnect: Screen share access denied:", err)
-          setScreenSharing(false)
+        setVideoEnabled(false)
+        
+        // Ensure screen sharing is also disabled
+        if (localScreenStreamRef.current) {
+          localScreenStreamRef.current.getTracks().forEach(track => track.stop())
+          localScreenStreamRef.current = null
         }
-      }
+        setScreenSharing(false)
+        
+        console.log('Reconnect: Video and screen sharing disabled after connection establishment')
+      }, 2000)
       
       // Reconnect WebSocket
       const ws = new WebSocket(SIGNALING_SERVER_URL)
@@ -1467,10 +1453,6 @@ export default function CallPage() {
       console.error('Reconnection failed:', error)
       setError("Reconnection failed. Please try again.")
       setReconnecting(false)
-    } finally {
-      // Reset video state after attempting to reconnect
-      setVideoEnabled(false)
-      setScreenSharing(false)
     }
   }
 
