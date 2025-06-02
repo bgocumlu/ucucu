@@ -572,11 +572,16 @@ export default function CallPage() {
           const hasVideo = localVideoStreamRef.current && localVideoStreamRef.current.getTracks().length > 0
           const hasScreenShare = localScreenStreamRef.current && localScreenStreamRef.current.getTracks().length > 0
           const hasAnyMedia = hasAudio || hasVideo || hasScreenShare
-          
-          // Perfect negotiation: Only create offer if we're the impolite peer (larger username)
-          // OR if we have media and the other peer doesn't initiate quickly
+            // Perfect negotiation rules with late-join fix
           const isImpolite = currentUser > newPeer
-          const shouldCreateOffer = !actualIsListener && isImpolite && hasAnyMedia
+          const hasVisualMedia = hasVideo || hasScreenShare
+          
+          // CRITICAL FIX: Always create offer if we have video/screen to ensure late joiners see existing streams
+          // For audio-only, follow normal politeness rules to avoid offer collision
+          const shouldCreateOffer = !actualIsListener && (
+            (isImpolite && hasAnyMedia) || // Normal impolite peer with any media
+            hasVisualMedia // Always share video/screen regardless of politeness to fix late-join issue
+          )
           
           if (shouldCreateOffer) {
             // Add a small delay to let the polite peer potentially start negotiation first
@@ -584,7 +589,7 @@ export default function CallPage() {
               // Check if negotiation hasn't started yet
               if (pc && pc.signalingState === 'stable') {
                 try {
-                  console.log(`Creating offer for new peer ${newPeer}. Media: audio=${hasAudio}, video=${hasVideo}, screen=${hasScreenShare}`)
+                  console.log(`Creating offer for new peer ${newPeer}. Media: audio=${hasAudio}, video=${hasVideo}, screen=${hasScreenShare}, hasVisualMedia=${hasVisualMedia}`)
                   const offer = await pc.createOffer()
                   await pc.setLocalDescription(offer)
                   ws.send(JSON.stringify({ type: "call-offer", roomId, from: currentUser, to: newPeer, payload: pc.localDescription }))
@@ -1405,16 +1410,22 @@ export default function CallPage() {
             const hasVideo = localVideoStreamRef.current && localVideoStreamRef.current.getTracks().length > 0
             const hasScreenShare = localScreenStreamRef.current && localScreenStreamRef.current.getTracks().length > 0
             const hasAnyMedia = hasAudio || hasVideo || hasScreenShare
-            
-            // Perfect negotiation: Only create offer if we're the impolite peer
+              // Perfect negotiation rules with late-join fix
             const isImpolite = currentUser > newPeer
-            const shouldCreateOffer = !actualIsListener && isImpolite && hasAnyMedia
+            const hasVisualMedia = hasVideo || hasScreenShare
+            
+            // CRITICAL FIX: Always create offer if we have video/screen to ensure late joiners see existing streams
+            // For audio-only, follow normal politeness rules to avoid offer collision
+            const shouldCreateOffer = !actualIsListener && (
+              (isImpolite && hasAnyMedia) || // Normal impolite peer with any media
+              hasVisualMedia // Always share video/screen regardless of politeness to fix late-join issue
+            )
             
             if (shouldCreateOffer) {
               setTimeout(async () => {
                 if (pc && pc.signalingState === 'stable') {
                   try {
-                    console.log(`Reconnect: Creating offer for peer ${newPeer}`)
+                    console.log(`Reconnect: Creating offer for peer ${newPeer}. Media: audio=${hasAudio}, video=${hasVideo}, screen=${hasScreenShare}, hasVisualMedia=${hasVisualMedia}`)
                     const offer = await pc.createOffer()
                     await pc.setLocalDescription(offer)
                     ws.send(JSON.stringify({ 
