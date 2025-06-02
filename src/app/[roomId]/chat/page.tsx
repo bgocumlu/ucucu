@@ -47,6 +47,7 @@ export default function ChatPage() {
   const [showSettings, setShowSettings] = useState(false)
   const [isAtBottom, setIsAtBottom] = useState(true)
   const [isRecording, setIsRecording] = useState(false)
+  const [isSendingFiles, setIsSendingFiles] = useState(false)
   const [showLeaveDialog, setShowLeaveDialog] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const chatContainerRef = useRef<HTMLDivElement>(null)
@@ -299,39 +300,44 @@ export default function ChatPage() {
 
     // Send each file individually, reliably
     const sendFiles = async () => {
-      for (let idx = 0; idx < validFiles.length; idx++) {
-        const file = validFiles[idx];
-        await new Promise<void>((resolve) => {
-          const reader = new FileReader();
-          reader.onload = () => {
-            const base64 = reader.result as string;
-            // If audio file, send as audio message
-            if (file.type.startsWith('audio/')) {
-              send({
-                type: "sendFile",
-                roomId,
-                username: currentUser,
-                fileName: file.name,
-                fileType: file.type,
-                fileData: base64,
-                timestamp: Date.now(),
-                asAudio: true,
-              });
-            } else {
-              send({
-                type: "sendFile",
-                roomId,
-                username: currentUser,
-                fileName: file.name,
-                fileType: file.type,
-                fileData: base64,
-                timestamp: Date.now(),
-              });
-            }
-            resolve();
-          };
-          reader.readAsDataURL(file);
-        });
+      setIsSendingFiles(true);
+      try {
+        for (let idx = 0; idx < validFiles.length; idx++) {
+          const file = validFiles[idx];
+          await new Promise<void>((resolve) => {
+            const reader = new FileReader();
+            reader.onload = () => {
+              const base64 = reader.result as string;
+              // If audio file, send as audio message
+              if (file.type.startsWith('audio/')) {
+                send({
+                  type: "sendFile",
+                  roomId,
+                  username: currentUser,
+                  fileName: file.name,
+                  fileType: file.type,
+                  fileData: base64,
+                  timestamp: Date.now(),
+                  asAudio: true,
+                });
+              } else {
+                send({
+                  type: "sendFile",
+                  roomId,
+                  username: currentUser,
+                  fileName: file.name,
+                  fileType: file.type,
+                  fileData: base64,
+                  timestamp: Date.now(),
+                });
+              }
+              resolve();
+            };
+            reader.readAsDataURL(file);
+          });
+        }
+      } finally {
+        setIsSendingFiles(false);
       }
     };
     sendFiles();
@@ -361,28 +367,33 @@ export default function ChatPage() {
         // If no valid files, exit
         if (validFiles.length === 0) {
           return;
-        }
+        }     
 
         const sendFiles = async () => {
-          for (let idx = 0; idx < validFiles.length; idx++) {
-            const file = validFiles[idx];
-            await new Promise<void>((resolve) => {
-              const reader = new FileReader();
-              reader.onload = () => {
-                const base64 = reader.result as string;
-                send({
-                  type: "sendFile",
-                  roomId,
-                  username: currentUser,
-                  fileName: file.name,
-                  fileType: file.type,
-                  fileData: base64,
-                  timestamp: Date.now(), // Use only Date.now() for valid date
-                });
-                resolve();
-              };
-              reader.readAsDataURL(file);
-            });
+          setIsSendingFiles(true);
+          try {
+            for (let idx = 0; idx < validFiles.length; idx++) {
+              const file = validFiles[idx];
+              await new Promise<void>((resolve) => {
+                const reader = new FileReader();
+                reader.onload = () => {
+                  const base64 = reader.result as string;
+                  send({
+                    type: "sendFile",
+                    roomId,
+                    username: currentUser,
+                    fileName: file.name,
+                    fileType: file.type,
+                    fileData: base64,
+                    timestamp: Date.now(), // Use only Date.now() for valid date
+                  });
+                  resolve();
+                };
+                reader.readAsDataURL(file);
+              });
+            }
+          } finally {
+            setIsSendingFiles(false);
           }
         };
         sendFiles();
@@ -844,6 +855,7 @@ export default function ChatPage() {
           const username = sessionStorage.getItem(`username:${roomId}`) || currentUser;
           if (username) {
             setCurrentUser(username);
+            setIsSendingFiles(false);
             // Send leave message first to ensure we're not in room participants
             send({ type: "leaveRoom", roomId, username });
             // Then send join message after a small delay
@@ -931,7 +943,7 @@ export default function ChatPage() {
 
       {/* Input Area */}
       <div className="border-t border-gray-200 p-4 flex-shrink-0">        <div className="flex items-end space-x-2">
-          {/* File Upload */}
+          {/* File Upload */}          
           <Button variant="ghost" size="sm" onClick={() => fileInputRef.current?.click()} className="flex-shrink-0" disabled={!isConnected} aria-label="Upload file">
             <Paperclip className="h-4 w-4" />
           </Button>
@@ -982,12 +994,22 @@ export default function ChatPage() {
           <div className="mt-2 flex items-center space-x-2 text-red-600 text-sm font-semibold">
             <span>Connection lost. Please refresh the page.</span>
           </div>
-        )}
-
+        )}        
         {isRecording && isConnected && (
           <div className="mt-2 flex items-center space-x-2 text-red-600 text-sm">
             <div className="w-2 h-2 bg-red-600 rounded-full animate-pulse"></div>
             <span>Recording... Tap to stop</span>
+          </div>
+        )}
+
+        {isSendingFiles && isConnected && (
+          <div className="mt-2 flex items-center space-x-2 text-blue-600 text-sm">
+            <div className="flex space-x-1">
+              <div className="w-2 h-2 bg-blue-600 rounded-full animate-bounce"></div>
+              <div className="w-2 h-2 bg-blue-600 rounded-full animate-bounce" style={{ animationDelay: "0.1s" }}></div>
+              <div className="w-2 h-2 bg-blue-600 rounded-full animate-bounce" style={{ animationDelay: "0.2s" }}></div>
+            </div>
+            <span>Sending files...</span>
           </div>
         )}
       </div>
