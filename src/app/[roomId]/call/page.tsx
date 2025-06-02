@@ -14,16 +14,7 @@ declare global {
 }
 
 const SIGNALING_SERVER_URL = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:3001"
-const ICE_CONFIG = { 
-  iceServers: [
-    { urls: "stun:stun.l.google.com:19302" },
-    { urls: "stun:stun1.l.google.com:19302" },
-    { urls: "stun:stun2.l.google.com:19302" }
-  ],
-  iceCandidatePoolSize: 10,
-  bundlePolicy: 'max-bundle' as RTCBundlePolicy,
-  rtcpMuxPolicy: 'require' as RTCRtcpMuxPolicy
-}
+const ICE_CONFIG = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] }
 
 export default function CallPage() {
   const params = useParams()
@@ -109,123 +100,20 @@ export default function CallPage() {
       }
     })
   }, [remoteStreams, peerMuted])
+
   // Attach video streams to video elements
   useEffect(() => {
     Object.entries(remoteVideoStreams).forEach(([peer, stream]) => {
       const ref = remoteVideoRefs.current[peer]
       if (ref && ref.current && stream) {
-        console.log(`🎥 Attaching video stream for ${peer}:`, {
-          streamId: stream.id,
-          tracks: stream.getTracks().map(t => ({ 
-            kind: t.kind, 
-            label: t.label, 
-            enabled: t.enabled,
-            readyState: t.readyState,
-            settings: t.getSettings ? t.getSettings() : 'N/A'
-          })),
-          videoTracks: stream.getVideoTracks().length,
-          currentSrcObject: ref.current.srcObject ? 'assigned' : 'null'
-        })
-        
         if (ref.current.srcObject !== stream) {
           ref.current.srcObject = stream
-          console.log(`✅ Video stream assigned to element for ${peer}`)
         }
         ref.current.controls = false
-          // Enhanced video element setup with better dimension handling
-        const videoElement = ref.current
-        
-        // Enhanced metadata event handler
-        videoElement.onloadedmetadata = () => {
-          const videoDimensions = {
-            videoWidth: videoElement.videoWidth,
-            videoHeight: videoElement.videoHeight,
-            duration: videoElement.duration,
-            readyState: videoElement.readyState,
-            networkState: videoElement.networkState
-          }
-          console.log(`📹 Video metadata loaded for ${peer}:`, videoDimensions)
-          
-          // Enhanced dimension waiting with timeout protection
-          if (videoElement.videoWidth === 0 || videoElement.videoHeight === 0) {
-            console.log(`⏳ Waiting for video dimensions for ${peer} (this is normal for camera video)...`)
-            
-            let attempts = 0
-            const maxAttempts = 50 // 5 seconds max wait
-            
-            const checkDimensions = () => {
-              attempts++
-              
-              if (videoElement.videoWidth > 0 && videoElement.videoHeight > 0) {
-                console.log(`✅ Video dimensions now available for ${peer} after ${attempts * 100}ms:`, {
-                  videoWidth: videoElement.videoWidth,
-                  videoHeight: videoElement.videoHeight,
-                  attempts: attempts
-                })
-                return
-              }
-              
-              if (attempts >= maxAttempts) {
-                console.warn(`⚠️ Video dimensions still not available for ${peer} after ${attempts * 100}ms, but video may still work`)
-                return
-              }
-              
-              setTimeout(checkDimensions, 100)
-            }
-            
-            setTimeout(checkDimensions, 100)
-          } else {
-            console.log(`✅ Video dimensions immediately available for ${peer}:`, {
-              videoWidth: videoElement.videoWidth,
-              videoHeight: videoElement.videoHeight
-            })
-          }
-        }
-          // Enhanced error handling
-        videoElement.onerror = (e) => {
-          console.error(`❌ Video error for ${peer}:`, e, {
-            error: videoElement.error,
-            networkState: videoElement.networkState,
-            readyState: videoElement.readyState,
-            currentSrc: videoElement.currentSrc
-          })
-        }
-        
-        // Enhanced can play event handler
-        videoElement.oncanplay = () => {
-          const canPlayInfo = {
-            videoWidth: videoElement.videoWidth,
-            videoHeight: videoElement.videoHeight,
-            paused: videoElement.paused,
-            currentTime: videoElement.currentTime,
-            readyState: videoElement.readyState,
-            networkState: videoElement.networkState
-          }
-          console.log(`▶️ Video can play for ${peer}:`, canPlayInfo)
-          
-          // Check if we now have dimensions
-          if (videoElement.videoWidth > 0 && videoElement.videoHeight > 0) {
-            console.log(`🎯 Video ready with dimensions ${videoElement.videoWidth}x${videoElement.videoHeight} for ${peer}`)
-          } else {
-            console.log(`⏳ Video can play but dimensions still pending for ${peer}`)
-          }
-        }
-        
-        // Add additional event listener for when video size changes
-        videoElement.onresize = () => {
-          console.log(`📐 Video resized for ${peer}:`, {
-            videoWidth: videoElement.videoWidth,
-            videoHeight: videoElement.videoHeight
-          })
-        }
-        
         ref.current
           .play()
-          .then(() => {
-            console.log(`✅ Video playing for ${peer}`)
-          })
-          .catch((error) => {
-            console.warn(`⚠️ Video autoplay failed for ${peer}:`, error)
+          .catch(() => {
+            // Ignore play errors (autoplay policy)
           })
       }
     })
@@ -480,18 +368,8 @@ export default function CallPage() {
     } catch (error) {
       console.error('Error in recreated peer connection offer:', error)
     }
-  }  // Helper functions for consistent track management
-  const getVideoSender = (pc: RTCPeerConnection) => {
-    const senders = pc.getSenders()
-    return senders[1] // Video is always at index 1
-  }
-  
-  const getScreenSender = (pc: RTCPeerConnection) => {
-    const senders = pc.getSenders()
-    return senders[2] // Screen is always at index 2
   }
 
-  // Fixed track order mapping for consistent SDP m-line ordering
   function createPeerConnection(remote: string) {
     const pc = new RTCPeerConnection(ICE_CONFIG)
     peerConnections.current[remote] = pc
@@ -509,166 +387,62 @@ export default function CallPage() {
       console.log('Received track:', track.kind, track.label, 'from', remote)
       
       if (track.kind === 'audio') {
-        setRemoteStreams(prev => ({ ...prev, [remote]: stream }))      
-      }      else if (track.kind === 'video') {        // Enhanced screen track detection with better debugging
-        const trackLabel = track.label.toLowerCase()
-        const trackSettings = track.getSettings()
+        setRemoteStreams(prev => ({ ...prev, [remote]: stream }))
+      } else if (track.kind === 'video') {
+        // Check track label or use track settings to determine if it's screen share
+        // Screen share tracks typically have labels containing 'screen' or have specific constraints
+        const isScreenShare = track.label.toLowerCase().includes('screen') || 
+                             track.label.toLowerCase().includes('monitor') ||
+                             track.label.toLowerCase().includes('display') ||
+                             track.getSettings().displaySurface === 'monitor'
         
-        console.log('Video track details:', {
-          label: track.label,
-          settings: trackSettings,
-          id: track.id,
-          kind: track.kind
-        })
-          // Helper function to get track info with proper dimension handling
-        const getTrackInfo = (track: MediaStreamTrack) => {
-          const settings = track.getSettings()
-          const width = settings.width ?? 'unknown'
-          const height = settings.height ?? 'unknown'
-          const dimensions = width !== 'unknown' && height !== 'unknown' ? `${width}x${height}` : 'pending'
-          
-          return {
-            label: track.label,
-            settings: settings,
-            dimensions: dimensions,
-            hasImmediateDimensions: width !== 'unknown' && height !== 'unknown',
-            displaySurface: settings.displaySurface,
-            deviceId: settings.deviceId
-          }
-        }
-        
-        const trackInfo = getTrackInfo(track)
-        console.log('📊 Video track analysis for', remote, ':', trackInfo)
-        
-        // Enhanced screen share detection with multiple reliable criteria
-        const isScreenShare = 
-          // Check display surface properties (most reliable)
-          trackSettings.displaySurface === 'monitor' ||
-          trackSettings.displaySurface === 'window' ||
-          trackSettings.displaySurface === 'application' ||
-          trackSettings.displaySurface === 'browser' ||
-          // Check label patterns
-          trackLabel.includes('screen') || 
-          trackLabel.includes('monitor') ||
-          trackLabel.includes('display') ||
-          trackLabel.includes('desktop') ||
-          trackLabel.includes('window') ||
-          trackLabel.includes('tab') ||
-          trackLabel.includes('application') ||
-          trackLabel.includes('capture') ||
-          trackLabel.includes('chrome') ||
-          // Check for typical screen share dimensions (when available)
-          (trackSettings.width && trackSettings.height && 
-           trackSettings.width >= 1024 && trackSettings.height >= 768 &&
-           (trackSettings.width >= 1920 || trackSettings.height >= 1080)) ||
-          // Check constraints if available
-          (track.getConstraints && track.getConstraints()?.displaySurface !== undefined)
-          if (isScreenShare) {
-          console.log('🖥️ SCREEN SHARE DETECTED for', remote, ':', {
-            reason: 'Display surface or screen-like properties detected',
-            trackInfo: trackInfo,
-            criteria: {
-              displaySurface: trackSettings.displaySurface,
-              labelMatches: trackLabel.includes('screen') || trackLabel.includes('monitor') || trackLabel.includes('display'),
-              dimensionBased: trackSettings.width && trackSettings.height && trackSettings.width >= 1024
-            }
-          })
+        if (isScreenShare) {
+          console.log('Setting as screen share for', remote)
           setRemoteScreenStreams(prev => ({ ...prev, [remote]: stream }))
         } else {
-          console.log('📹 CAMERA VIDEO DETECTED for', remote, ':', {
-            reason: 'No screen share indicators found',
-            trackInfo: trackInfo,
-            willWaitForDimensions: !trackInfo.hasImmediateDimensions
-          })
+          console.log('Setting as video for', remote)
           setRemoteVideoStreams(prev => ({ ...prev, [remote]: stream }))
         }
       }
     }
     
-    // --- FIXED: Initialize with placeholder tracks to ensure consistent SDP m-line ordering ---
-    console.log(`Creating peer connection for ${remote}. Initializing with fixed track order:`)
+    // --- ADD: Always add local tracks to new peer connection if available ---
+    console.log(`Creating peer connection for ${remote}. Adding tracks:`)
     
-    // ALWAYS add tracks in this exact order: Audio -> Video -> Screen
-    // Use placeholders to maintain consistent m-line structure across all peers
-    
-    // 1. Audio track (index 0) - ALWAYS present
-    const audioTrack = localStreamRef.current?.getAudioTracks()[0] || createSilentAudioTrack()
-    if (audioTrack) {
-      pc.addTrack(audioTrack, localStreamRef.current || new MediaStream([audioTrack]))
-      console.log(`  - [0] Audio: ${audioTrack.label || 'silent'} (enabled: ${audioTrack.enabled})`)
+    // Add audio tracks if available (not just when not a listener)
+    if (localStreamRef.current) {
+      console.log(`- Adding ${localStreamRef.current.getTracks().length} audio tracks`)
+      localStreamRef.current.getTracks().forEach(track => {
+        if (!pc.getSenders().some(sender => sender.track === track)) {
+          pc.addTrack(track, localStreamRef.current!)
+          console.log(`  - Added audio track: ${track.label}, enabled: ${track.enabled}`)
+        }
+      })
     }
     
-    // 2. Video track (index 1) - ALWAYS present (real or placeholder)
-    const videoTrack = localVideoStreamRef.current?.getVideoTracks()[0] || createPlaceholderVideoTrack()
-    if (videoTrack) {
-      pc.addTrack(videoTrack, localVideoStreamRef.current || new MediaStream([videoTrack]))
-      console.log(`  - [1] Video: ${videoTrack.label || 'placeholder'} (enabled: ${videoTrack.enabled})`)
+    // Add video tracks if enabled
+    if (localVideoStreamRef.current) {
+      console.log(`- Adding ${localVideoStreamRef.current.getTracks().length} video tracks`)
+      localVideoStreamRef.current.getTracks().forEach(track => {
+        if (!pc.getSenders().some(sender => sender.track === track)) {
+          pc.addTrack(track, localVideoStreamRef.current!)
+        }
+      })
     }
     
-    // 3. Screen track (index 2) - ALWAYS present (real or placeholder) 
-    const screenTrack = localScreenStreamRef.current?.getVideoTracks()[0] || createPlaceholderVideoTrack()
-    if (screenTrack && screenTrack !== videoTrack) { // Don't add same track twice
-      pc.addTrack(screenTrack, localScreenStreamRef.current || new MediaStream([screenTrack]))
-      console.log(`  - [2] Screen: ${screenTrack.label || 'placeholder'} (enabled: ${screenTrack.enabled})`)
+    // Add screen tracks if enabled
+    if (localScreenStreamRef.current) {
+      console.log(`- Adding ${localScreenStreamRef.current.getTracks().length} screen share tracks`)
+      localScreenStreamRef.current.getTracks().forEach(track => {
+        if (!pc.getSenders().some(sender => sender.track === track)) {
+          pc.addTrack(track, localScreenStreamRef.current!)
+        }
+      })
     }
     
-    console.log(`Peer connection for ${remote} created with FIXED track order (${pc.getSenders().length} senders)`)
+    console.log(`Peer connection for ${remote} created with ${pc.getSenders().length} senders`)
     
     return pc
-  }
-
-  // Helper: Create a silent audio track for SDP consistency
-  const createSilentAudioTrack = (): MediaStreamTrack | null => {
-    try {
-      const AudioContextClass = window.AudioContext || window.webkitAudioContext
-      if (!AudioContextClass) return null
-      
-      const audioContext = new AudioContextClass()
-      const oscillator = audioContext.createOscillator()
-      const gainNode = audioContext.createGain()
-      
-      gainNode.gain.value = 0.001 // Very quiet
-      oscillator.connect(gainNode)
-      
-      const destination = audioContext.createMediaStreamDestination()
-      gainNode.connect(destination)
-      
-      oscillator.start()
-      
-      const track = destination.stream.getAudioTracks()[0]
-      track.enabled = false // Start disabled
-      return track
-    } catch (error) {
-      console.error('Error creating silent audio track:', error)
-      return null
-    }
-  }
-  // Helper: Create a placeholder video track for SDP consistency
-  const createPlaceholderVideoTrack = (): MediaStreamTrack | null => {
-    try {
-      const canvas = document.createElement('canvas')
-      canvas.width = 320  // Standard dimensions for placeholder
-      canvas.height = 240
-      const ctx = canvas.getContext('2d')
-      if (ctx) {
-        ctx.fillStyle = 'black'
-        ctx.fillRect(0, 0, 320, 240)
-        
-        // Add some text to indicate it's a placeholder
-        ctx.fillStyle = 'gray'
-        ctx.font = '16px Arial'
-        ctx.textAlign = 'center'
-        ctx.fillText('No video', 160, 120)
-      }
-      const stream = canvas.captureStream(1)
-      const track = stream.getVideoTracks()[0]
-      track.enabled = false // Start disabled
-      console.log('Created placeholder video track with dimensions:', canvas.width, 'x', canvas.height)
-      return track
-    } catch (error) {
-      console.error('Error creating placeholder video track:', error)
-      return null
-    }
   }
 
 // Join call room
@@ -709,70 +483,19 @@ export default function CallPage() {
     }
     
     // Always join as a normal participant (never as listener)
-    setActualIsListener(false)    // Connect to signaling with enhanced reconnection handling
+    setActualIsListener(false)
+      // Connect to signaling
     const ws = new WebSocket(SIGNALING_SERVER_URL)
     wsRef.current = ws
     
-    // Add heartbeat to detect connection issues early
-    let heartbeatInterval: NodeJS.Timeout | null = null
-    let heartbeatTimeoutId: NodeJS.Timeout | null = null
-    let missedHeartbeats = 0
-    const MAX_MISSED_HEARTBEATS = 3
-    
-    const startHeartbeat = () => {
-      if (heartbeatInterval) clearInterval(heartbeatInterval)
-      missedHeartbeats = 0
-      
-      heartbeatInterval = setInterval(() => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: "ping", timestamp: Date.now() }))
-          
-          // Set timeout to wait for pong response
-          if (heartbeatTimeoutId) clearTimeout(heartbeatTimeoutId)
-          heartbeatTimeoutId = setTimeout(() => {
-            missedHeartbeats++
-            console.log(`Call: Missed heartbeat ${missedHeartbeats}/${MAX_MISSED_HEARTBEATS}`)
-            
-            if (missedHeartbeats >= MAX_MISSED_HEARTBEATS) {
-              console.log('Call: Too many missed heartbeats, triggering reconnection')
-              setError("Connection unstable - attempting to reconnect...")
-              ws.close() // This will trigger onclose and reconnection
-            }
-          }, 5000) // 5 second timeout for pong response
-        }
-      }, 15000) // Send ping every 15 seconds
-    }
-    
-    const stopHeartbeat = () => {
-      if (heartbeatInterval) {
-        clearInterval(heartbeatInterval)
-        heartbeatInterval = null
-      }
-      if (heartbeatTimeoutId) {
-        clearTimeout(heartbeatTimeoutId)
-        heartbeatTimeoutId = null
-      }
-    }
-      ws.onopen = () => {
-      console.log('Call: WebSocket connected');
+    ws.onopen = () => {
       ws.send(JSON.stringify({ type: "call-join", roomId, username: currentUser, isListener: false }))
       setJoined(true)
       setConnecting(false)
-      setError("") // Clear any previous errors
-      startHeartbeat() // Start heartbeat monitoring
     }
     ws.onmessage = async (event) => {
       const msg = JSON.parse(event.data)
-      
-      // Handle heartbeat responses
-      if (msg.type === "pong") {
-        missedHeartbeats = 0
-        if (heartbeatTimeoutId) clearTimeout(heartbeatTimeoutId)
-        console.log('Call: Received heartbeat pong')
-        return
-      }
-      
-      switch (msg.type) {case "call-new-peer": {
+      switch (msg.type) {        case "call-new-peer": {
           const newPeer = msg.username
           if (newPeer === currentUser) return
           
@@ -789,54 +512,27 @@ export default function CallPage() {
           const hasVideo = localVideoStreamRef.current && localVideoStreamRef.current.getTracks().length > 0
           const hasScreenShare = localScreenStreamRef.current && localScreenStreamRef.current.getTracks().length > 0
           const hasAnyMedia = hasAudio || hasVideo || hasScreenShare
-            // Perfect negotiation rules with late-join fix
-          const isImpolite = currentUser > newPeer
-          const hasVisualMedia = hasVideo || hasScreenShare
           
-          // CRITICAL FIX: Always create offer if we have video/screen to ensure late joiners see existing streams
-          // For audio-only, follow normal politeness rules to avoid offer collision
-          const shouldCreateOffer = !actualIsListener && (
-            (isImpolite && hasAnyMedia) || // Normal impolite peer with any media
-            hasVisualMedia // Always share video/screen regardless of politeness to fix late-join issue
-          )
+          // Perfect negotiation: Only create offer if we're the impolite peer (larger username)
+          // OR if we have media and the other peer doesn't initiate quickly
+          const isImpolite = currentUser > newPeer
+          const shouldCreateOffer = !actualIsListener && isImpolite && hasAnyMedia
           
           if (shouldCreateOffer) {
-            // ENHANCED FIX: Add screen tracks immediately if we're currently screen sharing
-            if (hasScreenShare && localScreenStreamRef.current) {
-              const screenTrack = localScreenStreamRef.current.getVideoTracks()[0]
-              if (screenTrack && !pc.getSenders().some(sender => sender.track === screenTrack)) {
-                pc.addTrack(screenTrack, localScreenStreamRef.current)
-                console.log(`Added screen track to new peer ${newPeer} immediately`)
-              }
-            }
-            
             // Add a small delay to let the polite peer potentially start negotiation first
             setTimeout(async () => {
               // Check if negotiation hasn't started yet
               if (pc && pc.signalingState === 'stable') {
                 try {
-                  console.log(`Creating offer for new peer ${newPeer}. Media: audio=${hasAudio}, video=${hasVideo}, screen=${hasScreenShare}, hasVisualMedia=${hasVisualMedia}`)
-                  
-                  // Force creation of offer to ensure all tracks are included
+                  console.log(`Creating offer for new peer ${newPeer}. Media: audio=${hasAudio}, video=${hasVideo}, screen=${hasScreenShare}`)
                   const offer = await pc.createOffer()
                   await pc.setLocalDescription(offer)
-                  
-                  // Log SDP for debugging
-                  console.log(`Offer SDP for ${newPeer} includes:`, {
-                    hasAudioLine: offer.sdp?.includes('m=audio'),
-                    hasVideoLine: offer.sdp?.includes('m=video'),
-                    videoLines: offer.sdp?.split('\n').filter(line => line.includes('video')).length || 0,
-                    screenTrackIncluded: hasScreenShare
-                  })
-                  
                   ws.send(JSON.stringify({ type: "call-offer", roomId, from: currentUser, to: newPeer, payload: pc.localDescription }))
                 } catch (error) {
                   console.error('Error creating offer for new peer:', error)
                 }
               }
             }, 100) // Small delay to prevent race conditions
-          } else {
-            console.log(`Not creating offer for new peer ${newPeer}. shouldCreateOffer=${shouldCreateOffer}, isImpolite=${isImpolite}, hasAnyMedia=${hasAnyMedia}, hasVisualMedia=${hasVisualMedia}`)
           }
           break
         }case "call-offer": {
@@ -879,15 +575,18 @@ export default function CallPage() {
           const from = msg.from
           const pc = peerConnections.current[from]
           if (pc) {
-            // Always use safeSetRemoteDescription to handle all states properly
-            const result = await safeSetRemoteDescription(pc, msg.payload, currentUser < from)
-            if (result === 'recreate') {
-              // For answers, we usually don't recreate but log the issue
-              console.log(`Answer processing failed for ${from}, may need full renegotiation`)
-            } else if (result === 'ignored') {
-              console.log(`Answer from ${from} was ignored (stale or wrong state)`)
-            } else if (result === 'success') {
-              console.log(`Successfully processed answer from ${from}`)
+            // Check if we're in the right state to accept an answer
+            if (pc.signalingState === 'have-local-offer') {
+              // Use safeSetRemoteDescription to avoid InvalidStateError
+              const result = await safeSetRemoteDescription(pc, msg.payload, false)
+              if (result === 'recreate') {
+                // For answers, we usually don't recreate but log the issue
+                console.log(`Answer processing failed for ${from}, may need full renegotiation`)
+              } else if (result === 'ignored') {
+                console.log(`Answer from ${from} was ignored (stale or wrong state)`)
+              }
+            } else {
+              console.log(`Received answer from ${from} in wrong state: ${pc.signalingState}`)
             }
           }
           break
@@ -931,32 +630,12 @@ export default function CallPage() {
           // Reset selected participant if they left
           setSelectedParticipant(prev => prev === left ? null : prev)
           
-          break        }
+          break
+        }
       }
     }
-    
-    ws.onclose = () => {
-      console.log('Call: WebSocket closed')
-      stopHeartbeat() // Stop heartbeat monitoring
-      setJoined(false)
-      
-      // Attempt automatic reconnection if we're still in the call
-      if (currentUser && !reconnecting) {
-        console.log('Call: Attempting automatic reconnection...')
-        setError("Connection lost - attempting to reconnect...")
-        setTimeout(() => {
-          if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-            reconnectCall()
-          }
-        }, 3000) // Wait 3 seconds before reconnecting
-      }
-    }
-    
-    ws.onerror = (error) => {
-      console.error('Call: WebSocket error:', error)
-      stopHeartbeat() // Stop heartbeat monitoring
-      setError("WebSocket connection error")
-    }
+    ws.onclose = () => setJoined(false)
+    ws.onerror = () => setError("WebSocket error")
   }  // Leave call room
   const leaveCall = () => {
     // Send leave message to server
@@ -986,10 +665,8 @@ export default function CallPage() {
       localScreenStreamRef.current = null
     }
     
-    // Close WebSocket connection and stop heartbeat
+    // Close WebSocket connection
     if (wsRef.current) {
-      // Note: stopHeartbeat function is defined inside joinCall scope
-      // We'll clean up by closing the connection which triggers onclose
       wsRef.current.close()
       wsRef.current = null
     }
@@ -1006,86 +683,37 @@ export default function CallPage() {
     
     // Navigate back to chat
     router.push(`/${encodeURIComponent(roomId)}/chat`)  }
-// Add local tracks to all peer connections when available using track replacement for consistency
+// Add local tracks to all peer connections when available
   useEffect(() => {
     if (actualIsListener) return
     
     Object.values(peerConnections.current).forEach(pc => {
-      const senders = pc.getSenders()
-      
-      // Handle audio tracks - replace or add as needed
-      if (localStreamRef.current && localStreamRef.current.getTracks().length > 0) {
-        const audioTrack = localStreamRef.current.getAudioTracks()[0]
-        const audioSender = senders.find(sender => 
-          !sender.track || sender.track.kind === 'audio'
-        )
-        
-        if (audioSender && audioSender.track !== audioTrack) {
-          audioSender.replaceTrack(audioTrack).catch(error => {
-            console.error('Error replacing audio track:', error)
-            // Fallback to add if replace fails
-            if (!pc.getSenders().some(sender => sender.track === audioTrack)) {
-              pc.addTrack(audioTrack, localStreamRef.current!)
-            }
-          })
-        } else if (!audioSender) {
-          // No audio sender exists, add the track
-          if (!pc.getSenders().some(sender => sender.track === audioTrack)) {
-            pc.addTrack(audioTrack, localStreamRef.current!)
-            console.log(`Added audio track to existing PC: ${audioTrack.label}, enabled: ${audioTrack.enabled}`)
+      // Add audio tracks if available
+      if (localStreamRef.current) {
+        localStreamRef.current.getTracks().forEach(track => {
+          if (!pc.getSenders().some(sender => sender.track === track)) {
+            pc.addTrack(track, localStreamRef.current!)
+            console.log(`Added audio track to existing PC: ${track.label}, enabled: ${track.enabled}`)
           }
-        }
-      }
-      
-      // Handle video tracks - replace or add as needed
-      if (localVideoStreamRef.current && localVideoStreamRef.current.getTracks().length > 0) {
-        const videoTrack = localVideoStreamRef.current.getVideoTracks()[0]
-        const videoSender = senders.find(sender => 
-          (!sender.track || sender.track.kind === 'video') && 
-          !senders.some(s => s.track && s.track.label.includes('screen') && s === sender)
-        )
-        
-        if (videoSender && videoSender.track !== videoTrack) {
-          videoSender.replaceTrack(videoTrack).catch(error => {
-            console.error('Error replacing video track:', error)
-            // Fallback to add if replace fails
-            if (!pc.getSenders().some(sender => sender.track === videoTrack)) {
-              pc.addTrack(videoTrack, localVideoStreamRef.current!)
-            }
-          })
-        } else if (!videoSender) {
-          // No video sender exists, add the track
-          if (!pc.getSenders().some(sender => sender.track === videoTrack)) {
-            pc.addTrack(videoTrack, localVideoStreamRef.current!)
-          }
-        }
-      }
-      
-      // Handle screen tracks - replace or add as needed
-      if (localScreenStreamRef.current && localScreenStreamRef.current.getTracks().length > 0) {
-        const screenTrack = localScreenStreamRef.current.getVideoTracks()[0]
-        const screenSender = senders.find(sender => {
-          if (!sender.track) return false
-          return sender.track.kind === 'video' && 
-                 (sender.track.label.toLowerCase().includes('screen') ||
-                  sender.track.label.toLowerCase().includes('monitor') ||
-                  sender.track.label.toLowerCase().includes('display'))
         })
-        
-        if (screenSender && screenSender.track !== screenTrack) {
-          screenSender.replaceTrack(screenTrack).catch(error => {
-            console.error('Error replacing screen track:', error)
-            // Fallback to add if replace fails
-            if (!pc.getSenders().some(sender => sender.track === screenTrack)) {
-              pc.addTrack(screenTrack, localScreenStreamRef.current!)
-            }
-          })
-        } else if (!screenSender) {
-          // No screen sender exists, add the track
-          if (!pc.getSenders().some(sender => sender.track === screenTrack)) {
-            pc.addTrack(screenTrack, localScreenStreamRef.current!)
+      }
+      
+      // Also add video tracks if enabled
+      if (localVideoStreamRef.current) {
+        localVideoStreamRef.current.getTracks().forEach(track => {
+          if (!pc.getSenders().some(sender => sender.track === track)) {
+            pc.addTrack(track, localVideoStreamRef.current!)
           }
-        }
+        })
+      }
+      
+      // Also add screen tracks if enabled  
+      if (localScreenStreamRef.current) {
+        localScreenStreamRef.current.getTracks().forEach(track => {
+          if (!pc.getSenders().some(sender => sender.track === track)) {
+            pc.addTrack(track, localScreenStreamRef.current!)
+          }
+        })
       }
     })
   }, [joined, actualIsListener, videoEnabled, screenSharing, muted]) // Added muted as dependency
@@ -1132,24 +760,23 @@ export default function CallPage() {
       // Update local video preview immediately
       if (localVideoRef.current) {
         localVideoRef.current.srcObject = stream
-      }      // Update all peer connections with the new video track using fixed track ordering
+      }
+
+      // Update all peer connections with the new video track
       for (const [remote, pc] of Object.entries(peerConnections.current)) {
-        const newVideoTrack = stream.getVideoTracks()[0]
-        if (!newVideoTrack) continue
-        
-        // Use fixed track ordering - video is always at index 1
-        const videoSender = getVideoSender(pc) // Always at index 1
-        if (videoSender) {
-          try {
-            // Replace existing video track to maintain SDP m-line order
-            await videoSender.replaceTrack(newVideoTrack)
-            console.log(`Replaced video track with new camera for peer ${remote}`)
-          } catch (error) {
-            console.error('Error replacing video track during camera switch:', error)
+        // Remove old video tracks
+        pc.getSenders().forEach(sender => {
+          if (sender.track && sender.track.kind === 'video' && !sender.track.label.includes('screen')) {
+            pc.removeTrack(sender)
           }
-        } else {
-          console.warn(`No video sender found at index 1 for peer ${remote} during camera switch`)
-        }
+        })
+
+        // Add new video tracks
+        stream.getTracks().forEach(track => {
+          if (!pc.getSenders().some(sender => sender.track === track)) {
+            pc.addTrack(track, stream)
+          }
+        })
         
         // Trigger renegotiation
         try {
@@ -1179,7 +806,8 @@ export default function CallPage() {
   // --- Toggle mirror for local video preview ---
   const toggleMirror = () => {
     setIsMirrored(!isMirrored)
-  }  // --- Toggle video with consistent track ordering (using fixed sender positions) ---
+  }
+  // --- Toggle video with proper renegotiation ---
   const toggleVideo = async () => {
     if (videoEnabled) {
       // Turn off video
@@ -1188,20 +816,15 @@ export default function CallPage() {
         localVideoStreamRef.current = null
       }
       
-      // Replace video track with placeholder to maintain m-line order
+      // Remove video tracks from all peer connections and trigger renegotiation
       for (const [remote, pc] of Object.entries(peerConnections.current)) {
-        const videoSender = getVideoSender(pc) // Always at index 1
-        if (videoSender) {
-          try {
-            const placeholderTrack = createPlaceholderVideoTrack()
-            await videoSender.replaceTrack(placeholderTrack)
-            console.log(`Replaced video track with placeholder for peer ${remote}`)
-          } catch (error) {
-            console.error('Error replacing video track with placeholder:', error)
+        pc.getSenders().forEach(sender => {
+          if (sender.track && sender.track.kind === 'video' && !sender.track.label.includes('screen')) {
+            pc.removeTrack(sender)
           }
-        }
+        })
         
-        // Trigger renegotiation
+        // Always trigger renegotiation for both sides
         try {
           const offer = await pc.createOffer()
           await pc.setLocalDescription(offer)
@@ -1229,23 +852,15 @@ export default function CallPage() {
         })
         localVideoStreamRef.current = stream
         
-        // Replace placeholder video tracks with real video
+        // Add video tracks to all peer connections and trigger renegotiation
         for (const [remote, pc] of Object.entries(peerConnections.current)) {
-          const videoTrack = stream.getVideoTracks()[0]
-          if (!videoTrack) continue
-          
-          const videoSender = getVideoSender(pc) // Always at index 1
-          if (videoSender) {
-            try {
-              // Replace placeholder with real video track
-              await videoSender.replaceTrack(videoTrack)
-              console.log(`Replaced placeholder with video track for peer ${remote}`)
-            } catch (error) {
-              console.error('Error replacing placeholder with video track:', error)
+          stream.getTracks().forEach(track => {
+            if (!pc.getSenders().some(sender => sender.track === track)) {
+              pc.addTrack(track, stream)
             }
-          }
+          })
           
-          // Trigger renegotiation
+          // Always trigger renegotiation for both sides  
           try {
             const offer = await pc.createOffer()
             await pc.setLocalDescription(offer)
@@ -1269,7 +884,7 @@ export default function CallPage() {
         setError('Camera access denied')
       }
     }
-  }  // --- Toggle screen sharing with proper renegotiation and consistent track ordering ---
+  }// --- Toggle screen sharing with proper renegotiation ---
   const toggleScreenShare = async () => {
     if (screenSharing) {
       // Turn off screen sharing
@@ -1278,20 +893,18 @@ export default function CallPage() {
         localScreenStreamRef.current = null
       }
       
-      // Replace screen tracks with placeholder instead of null to maintain m-line order
+      // Remove screen tracks from all peer connections and trigger renegotiation
       for (const [remote, pc] of Object.entries(peerConnections.current)) {
-        const screenSender = getScreenSender(pc) // Always at index 2
-        if (screenSender) {
-          try {
-            const placeholderTrack = createPlaceholderVideoTrack()
-            await screenSender.replaceTrack(placeholderTrack)
-            console.log(`Replaced screen track with placeholder for peer ${remote}`)
-          } catch (error) {
-            console.error('Error replacing screen track with placeholder:', error)
+        pc.getSenders().forEach(sender => {
+          if (sender.track && sender.track.kind === 'video' && 
+              (sender.track.label.toLowerCase().includes('screen') || 
+               sender.track.label.toLowerCase().includes('monitor') ||
+               sender.track.label.toLowerCase().includes('display'))) {
+            pc.removeTrack(sender)
           }
-        }
+        })
         
-        // Trigger renegotiation
+        // Always trigger renegotiation for both sides
         try {
           const offer = await pc.createOffer()
           await pc.setLocalDescription(offer)
@@ -1313,38 +926,24 @@ export default function CallPage() {
     } else {
       // Turn on screen sharing
       try {        
-        // CRITICAL FIX: Request audio separately to avoid disrupting existing audio
-        // Only request video for screen sharing to prevent audio conflicts
         const stream = await navigator.mediaDevices.getDisplayMedia({ 
           video: true, 
-          audio: false // Always false to prevent audio conflicts with existing microphone stream
+          audio: false 
         })
         localScreenStreamRef.current = stream
         
         console.log('Screen share started, track label:', stream.getVideoTracks()[0]?.label)
-        console.log('Screen share track details:', {
-          label: stream.getVideoTracks()[0]?.label,
-          settings: stream.getVideoTracks()[0]?.getSettings(),
-          constraints: stream.getVideoTracks()[0]?.getConstraints()
-        })
         
-        // Replace placeholder screen tracks with real screen tracks
+        // Add screen tracks to all peer connections and trigger renegotiation
         for (const [remote, pc] of Object.entries(peerConnections.current)) {
-          const screenTrack = stream.getVideoTracks()[0]
-          if (!screenTrack) continue
-          
-          const screenSender = getScreenSender(pc) // Always at index 2
-          if (screenSender) {
-            try {
-              // Replace placeholder with real screen track
-              await screenSender.replaceTrack(screenTrack)
-              console.log(`Replaced placeholder with screen track for peer ${remote}`)
-            } catch (error) {
-              console.error('Error replacing placeholder with screen track:', error)
+          stream.getTracks().forEach(track => {
+            console.log('Adding screen track to peer connection:', track.label)
+            if (!pc.getSenders().some(sender => sender.track === track)) {
+              pc.addTrack(track, stream)
             }
-          }
+          })
           
-          // Always trigger renegotiation after adding screen share
+          // Always trigger renegotiation for both sides
           try {
             const offer = await pc.createOffer()
             await pc.setLocalDescription(offer)
@@ -1357,11 +956,9 @@ export default function CallPage() {
                 payload: pc.localDescription 
               }))
             }
-            console.log(`Screen share offer sent to ${remote}`)
           } catch (error) {
             console.error('Error creating screen offer:', error)
-          }
-        }
+          }        }
         
         // Auto-stop when user stops sharing via browser UI
         stream.getVideoTracks()[0].addEventListener('ended', () => {
@@ -1369,18 +966,13 @@ export default function CallPage() {
           setScreenSharing(false)
           localScreenStreamRef.current = null
           
-          // Clean up from peer connections using track replacement with placeholder
+          // Clean up from peer connections and trigger renegotiation
           Object.entries(peerConnections.current).forEach(async ([remote, pc]) => {
-            const screenSender = getScreenSender(pc) // Always at index 2
-            if (screenSender) {
-              try {
-                const placeholderTrack = createPlaceholderVideoTrack()
-                await screenSender.replaceTrack(placeholderTrack)
-                console.log(`Replaced ended screen track with placeholder for peer ${remote}`)
-              } catch (error) {
-                console.error('Error replacing ended screen track:', error)
+            pc.getSenders().forEach(sender => {
+              if (sender.track && sender.track.readyState === 'ended') {
+                pc.removeTrack(sender)
               }
-            }
+            })
             
             // Trigger renegotiation
             try {
@@ -1406,7 +998,7 @@ export default function CallPage() {
         setError('Screen sharing access denied or not supported')
       }
     }
-  }// Create arbitrary audio track when no microphone access
+  }  // Create arbitrary audio track when no microphone access
   const createArbitraryAudioTrack = (): MediaStream => {
     console.log('Creating arbitrary audio track for WebRTC connection')
     
@@ -1614,22 +1206,16 @@ export default function CallPage() {
             const hasVideo = localVideoStreamRef.current && localVideoStreamRef.current.getTracks().length > 0
             const hasScreenShare = localScreenStreamRef.current && localScreenStreamRef.current.getTracks().length > 0
             const hasAnyMedia = hasAudio || hasVideo || hasScreenShare
-              // Perfect negotiation rules with late-join fix
-            const isImpolite = currentUser > newPeer
-            const hasVisualMedia = hasVideo || hasScreenShare
             
-            // CRITICAL FIX: Always create offer if we have video/screen to ensure late joiners see existing streams
-            // For audio-only, follow normal politeness rules to avoid offer collision
-            const shouldCreateOffer = !actualIsListener && (
-              (isImpolite && hasAnyMedia) || // Normal impolite peer with any media
-              hasVisualMedia // Always share video/screen regardless of politeness to fix late-join issue
-            )
+            // Perfect negotiation: Only create offer if we're the impolite peer
+            const isImpolite = currentUser > newPeer
+            const shouldCreateOffer = !actualIsListener && isImpolite && hasAnyMedia
             
             if (shouldCreateOffer) {
               setTimeout(async () => {
                 if (pc && pc.signalingState === 'stable') {
                   try {
-                    console.log(`Reconnect: Creating offer for peer ${newPeer}. Media: audio=${hasAudio}, video=${hasVideo}, screen=${hasScreenShare}, hasVisualMedia=${hasVisualMedia}`)
+                    console.log(`Reconnect: Creating offer for peer ${newPeer}`)
                     const offer = await pc.createOffer()
                     await pc.setLocalDescription(offer)
                     ws.send(JSON.stringify({ 
@@ -1687,18 +1273,18 @@ export default function CallPage() {
             }
             break
           }
-            case "call-answer": {
+          
+          case "call-answer": {
             const from = msg.from
             const pc = peerConnections.current[from]
             if (pc) {
-              // Always use safeSetRemoteDescription to handle all states properly
-              const result = await safeSetRemoteDescription(pc, msg.payload, currentUser < from)
-              if (result === 'recreate') {
-                await recreatePeerConnection(from)
-              } else if (result === 'ignored') {
-                console.log(`Reconnect: Answer from ${from} was ignored (stale or wrong state)`)
-              } else if (result === 'success') {
-                console.log(`Reconnect: Successfully processed answer from ${from}`)
+              if (pc.signalingState === 'have-local-offer') {
+                const result = await safeSetRemoteDescription(pc, msg.payload, currentUser < from)
+                if (result === 'recreate') {
+                  await recreatePeerConnection(from)
+                }
+              } else {
+                console.log(`Reconnect: Unexpected answer from ${from} in state ${pc.signalingState}`)
               }
             }
             break
