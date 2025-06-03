@@ -19,38 +19,27 @@ export class WebPushService {
       WebPushService.instance = new WebPushService()
     }
     return WebPushService.instance
-  }  private async fetchVapidPublicKey(): Promise<void> {
-    try {
-      console.log('[WebPushService] Fetching VAPID public key from API...')
-      const response = await fetch('/api/vapid')
-      
-      if (!response.ok) {
-        throw new Error(`Failed to fetch VAPID key: ${response.status} ${response.statusText}`)
-      }
-      
-      const data = await response.json()
-      this.vapidPublicKey = data.publicKey
-      
-      if (!this.vapidPublicKey) {
-        throw new Error('No public key in API response')
-      }
-      
-      console.log('[WebPushService] VAPID public key fetched successfully')
-    } catch (error) {
-      console.error('[WebPushService] Failed to fetch VAPID public key:', error)
-      throw error
-    }
-  }
+  }  
   
-  async initialize(): Promise<boolean> {
+  private initializeVapidPublicKey(): void {
+    this.vapidPublicKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY || null
+    
+    if (!this.vapidPublicKey) {
+      console.error('[WebPushService] NEXT_PUBLIC_VAPID_PUBLIC_KEY environment variable not set')
+      throw new Error('VAPID public key not configured')
+    }
+    
+    console.log('[WebPushService] VAPID public key initialized from environment')
+  }
+    async initialize(): Promise<boolean> {
     if (typeof window === 'undefined' || !('serviceWorker' in navigator) || !('PushManager' in window)) {
       console.warn('[WebPushService] Push notifications not supported')
       return false
     }
     
     try {
-      // Fetch VAPID public key from backend
-      await this.fetchVapidPublicKey()
+      // Initialize VAPID public key from environment
+      this.initializeVapidPublicKey()
       
       if (!this.vapidPublicKey) {
         console.error('[WebPushService] No VAPID public key available')

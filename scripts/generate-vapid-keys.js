@@ -60,6 +60,7 @@ function generateVapidKeys() {
 function updateEnvContent(content, vapidKeys) {
   const lines = content.split('\n')
   let hasPublicKey = false
+  let hasNextPublicKey = false
   let hasPrivateKey = false
   let hasSubject = false
   
@@ -68,6 +69,9 @@ function updateEnvContent(content, vapidKeys) {
     if (lines[i].startsWith('VAPID_PUBLIC_KEY=')) {
       lines[i] = `VAPID_PUBLIC_KEY=${vapidKeys.publicKey}`
       hasPublicKey = true
+    } else if (lines[i].startsWith('NEXT_PUBLIC_VAPID_PUBLIC_KEY=')) {
+      lines[i] = `NEXT_PUBLIC_VAPID_PUBLIC_KEY=${vapidKeys.publicKey}`
+      hasNextPublicKey = true
     } else if (lines[i].startsWith('VAPID_PRIVATE_KEY=')) {
       lines[i] = `VAPID_PRIVATE_KEY=${vapidKeys.privateKey}`
       hasPrivateKey = true
@@ -80,6 +84,9 @@ function updateEnvContent(content, vapidKeys) {
   // Add missing keys
   if (!hasPublicKey) {
     lines.push(`VAPID_PUBLIC_KEY=${vapidKeys.publicKey}`)
+  }
+  if (!hasNextPublicKey) {
+    lines.push(`NEXT_PUBLIC_VAPID_PUBLIC_KEY=${vapidKeys.publicKey}`)
   }
   if (!hasPrivateKey) {
     lines.push(`VAPID_PRIVATE_KEY=${vapidKeys.privateKey}`)
