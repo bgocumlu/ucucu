@@ -41,8 +41,9 @@ export default function CallPage() {
   const peerConnections = useRef<Record<string, RTCPeerConnection>>({})
   const [muted, setMuted] = useState(false)
   const [videoEnabled, setVideoEnabled] = useState(false)
-  const [screenSharing, setScreenSharing] = useState(false)
-  const [selectedParticipant, setSelectedParticipant] = useState<string | null>(null)
+  const [screenSharing, setScreenSharing] = useState(false)  
+  const [expandedParticipants, setExpandedParticipants] = useState<Set<string>>(new Set())
+  const [localPreviewExpanded, setLocalPreviewExpanded] = useState(false)
   const [peerMuted, setPeerMuted] = useState<Record<string, boolean>>({}) // <--- NEW: track muted state for each remote peer
   const [speakingPeers, setSpeakingPeers] = useState<Record<string, boolean>>({})
   const [localSpeaking, setLocalSpeaking] = useState(false)
@@ -649,9 +650,12 @@ export default function CallPage() {
             delete copy[left]
             return copy
           })
-          
-          // Reset selected participant if they left
-          setSelectedParticipant(prev => prev === left ? null : prev)
+            // Reset expanded participant if they left
+          setExpandedParticipants(prev => {
+            const newSet = new Set(prev)
+            newSet.delete(left)
+            return newSet
+          })
           
           break
         }
@@ -699,9 +703,10 @@ export default function CallPage() {
     setRemoteVideoStreams({})
     setRemoteScreenStreams({})
     setParticipants(new Set()) // Clear participants list
-    setVideoEnabled(false)
+    setVideoEnabled(false)    
     setScreenSharing(false)
-    setSelectedParticipant(null)
+    setExpandedParticipants(new Set()) // Clear all expanded participants
+    setLocalPreviewExpanded(false) // Collapse local preview
     setError("")
     
     // Navigate back to chat
@@ -1183,9 +1188,9 @@ export default function CallPage() {
       setRemoteStreams({})
       setRemoteVideoStreams({})
       setRemoteScreenStreams({})
-      
-      // Reset selected participant
-      setSelectedParticipant(null)
+        // Reset expanded participants
+      setExpandedParticipants(new Set())
+      setLocalPreviewExpanded(false)
       
       // Close and recreate WebSocket connection
       if (wsRef.current) {
@@ -1423,13 +1428,17 @@ export default function CallPage() {
               delete copy[left]
               return copy
             })
-            setRemoteScreenStreams(prev => {
-              const copy = { ...prev }
+            setRemoteScreenStreams(prev => {            const copy = { ...prev }
               delete copy[left]
               return copy
             })
             
-            setSelectedParticipant(prev => prev === left ? null : prev)
+            // Remove from expanded participants if they left
+            setExpandedParticipants(prev => {
+              const newSet = new Set(prev)
+              newSet.delete(left)
+              return newSet
+            })
             break
           }
         }
@@ -1603,46 +1612,138 @@ export default function CallPage() {
                   <Volume2 className="h-3 w-3" />
                   <span>You are speaking</span>
                 </div>
-              )}
-            </div>{/* Remove the selected participant modal view - we'll handle it in the grid */}            {/* Local Video Preview - smaller and positioned at top */}
-            {videoEnabled && localVideoStreamRef.current && (
-              <div className="bg-black rounded-lg mb-4 relative flex-shrink-0 w-full sm:w-64 self-start" style={{ aspectRatio: '16/9', height: 'auto' }}>
-                <div className="absolute top-2 left-2 bg-black bg-opacity-50 text-white px-2 py-1 rounded text-xs">
-                  You (Video)
-                </div>
-                <video
-                  ref={localVideoRef}
-                  autoPlay
-                  playsInline
-                  muted
-                  className="w-full h-full object-cover rounded-lg"
-                  style={{ transform: isMirrored ? 'scaleX(-1)' : 'none' }} // Mirror effect for front camera
-                />
-              </div>
-            )}            {/* Local Screen Share Preview - same size as video preview */}
-            {screenSharing && localScreenStreamRef.current && (
-              <div className="bg-black rounded-lg mb-4 relative flex-shrink-0 w-full sm:w-80 self-start" style={{ aspectRatio: '16/9', height: 'auto' }}>
-                <div className="absolute top-2 left-2 bg-black bg-opacity-50 text-white px-2 py-1 rounded text-xs">
-                  Your Screen
-                </div>
-                <video
-                  ref={localScreenRef}
-                  autoPlay
-                  playsInline
-                  muted
-                  className="w-full h-full object-contain rounded-lg"
-                />
-              </div>
-            )}{/* Participants Grid */}
+              )}            </div>
+
+            {/* Participants Grid */}
             <div className="flex-1 overflow-y-auto">
               <div className="font-semibold mb-4 text-sm">Participants</div>
-              {participants.size === 0 ? (
-                <div className="text-gray-400 text-sm text-center py-8">
-                  No one else in the call yet.
-                </div>
-              ) : (                <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3 sm:gap-4">
-                  {Array.from(participants).map(peer => {
-                    const isSelected = selectedParticipant === peer;
+              
+              <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3 sm:gap-4">
+                {/* Local Video Preview Card */}
+                {videoEnabled && localVideoStreamRef.current && (
+                  <div
+                    className={`bg-gray-50 rounded-lg p-2 sm:p-3 border-2 transition-all cursor-pointer ${
+                      localPreviewExpanded ? 'border-blue-500 bg-blue-50 col-span-2 sm:col-span-2' : 'border-transparent hover:border-gray-300'
+                    }`}
+                    onClick={() => setLocalPreviewExpanded(!localPreviewExpanded)}
+                  >
+                    {/* Local Video Container */}
+                    <div className="relative bg-black rounded mb-2 sm:mb-3 aspect-video">
+                      <video
+                        ref={localVideoRef}
+                        autoPlay
+                        playsInline
+                        muted
+                        className="w-full h-full object-cover rounded"
+                        style={{ transform: isMirrored ? 'scaleX(-1)' : 'none' }}
+                      />
+                      
+                      {/* Local video indicator */}
+                      <div className="absolute top-2 right-2 bg-blue-500 text-white p-1 rounded">
+                        <Video className="h-3 w-3" />
+                      </div>
+                      
+                      {/* Expanded indicator */}
+                      {localPreviewExpanded && (
+                        <div className="absolute top-2 left-2 bg-blue-500 text-white px-2 py-1 rounded text-xs">
+                          Expanded
+                        </div>
+                      )}
+                    </div>
+                    
+                    {/* Local Video Name and Controls */}
+                    <div className="flex items-center justify-between mb-1 sm:mb-2">
+                      <div className={`font-medium text-gray-900 truncate ${
+                        localPreviewExpanded ? 'text-sm sm:text-base' : 'text-xs sm:text-sm'
+                      }`}>
+                        You (Video)
+                      </div>
+                      
+                      {/* Camera Switch Button */}
+                      {!actualIsListener && videoEnabled && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            switchCamera()
+                          }}
+                          className="p-1 h-6 w-6 sm:h-7 sm:w-7"
+                          title={`Switch to ${currentCamera === 'user' ? 'back' : 'front'} camera`}
+                        >
+                          <RotateCcw className="h-2.5 w-2.5 sm:h-3 sm:w-3" />
+                        </Button>
+                      )}
+                    </div>
+                    
+                    {/* Local Speaking Indicator */}
+                    <div className={`flex items-center text-xs text-green-600 transition-opacity ${
+                      localSpeaking ? 'opacity-100' : 'opacity-10'
+                    }`}>
+                      <Volume2 className="h-2.5 w-2.5 sm:h-3 sm:w-3 mr-1" />
+                      <span className="text-xs">Speaking</span>
+                    </div>
+                  </div>
+                )}
+
+                {/* Local Screen Share Preview Card */}
+                {screenSharing && localScreenStreamRef.current && (
+                  <div
+                    className={`bg-gray-50 rounded-lg p-2 sm:p-3 border-2 transition-all cursor-pointer ${
+                      localPreviewExpanded ? 'border-green-500 bg-green-50 col-span-2 sm:col-span-2' : 'border-transparent hover:border-gray-300'
+                    }`}
+                    onClick={() => setLocalPreviewExpanded(!localPreviewExpanded)}
+                  >
+                    {/* Local Screen Container */}
+                    <div className="relative bg-black rounded mb-2 sm:mb-3 aspect-video">
+                      <video
+                        ref={localScreenRef}
+                        autoPlay
+                        playsInline
+                        muted
+                        className="w-full h-full object-contain rounded bg-gray-900"
+                      />
+                      
+                      {/* Screen share indicator */}
+                      <div className="absolute top-2 right-2 bg-green-500 text-white p-1 rounded">
+                        <Monitor className="h-3 w-3" />
+                      </div>
+                      
+                      {/* Expanded indicator */}
+                      {localPreviewExpanded && (
+                        <div className="absolute top-2 left-2 bg-green-500 text-white px-2 py-1 rounded text-xs">
+                          Expanded
+                        </div>
+                      )}
+                    </div>
+                    
+                    {/* Local Screen Name and Controls */}
+                    <div className="flex items-center justify-between mb-1 sm:mb-2">
+                      <div className={`font-medium text-gray-900 truncate ${
+                        localPreviewExpanded ? 'text-sm sm:text-base' : 'text-xs sm:text-sm'
+                      }`}>
+                        Your Screen
+                      </div>
+                    </div>
+                    
+                    {/* Empty space for consistency */}
+                    <div className="flex items-center text-xs opacity-10">
+                      <Monitor className="h-2.5 w-2.5 sm:h-3 sm:w-3 mr-1" />
+                      <span className="text-xs">Sharing</span>
+                    </div>
+                  </div>
+                )}                {participants.size === 0 ? (
+                  // Show empty state only if no participants AND no local preview cards
+                  !(videoEnabled && localVideoStreamRef.current) && 
+                  !(screenSharing && localScreenStreamRef.current) && (
+                    <div className="col-span-2 sm:col-span-2 lg:col-span-3 xl:col-span-4 text-gray-400 text-sm text-center py-8">
+                      No one else in the call yet.
+                    </div>
+                  )
+                ) : (
+                  /* Remote Participants */
+                  Array.from(participants).map(peer => {
+                    const isExpanded = expandedParticipants.has(peer);
                     const hasVideo = remoteVideoStreams[peer];
                     const hasScreenShare = remoteScreenStreams[peer];
                     
@@ -1650,10 +1751,21 @@ export default function CallPage() {
                       <div
                         key={peer}
                         className={`bg-gray-50 rounded-lg p-2 sm:p-3 border-2 transition-all cursor-pointer ${
-                          isSelected ? 'border-blue-500 bg-blue-50 col-span-2 sm:col-span-2' : 'border-transparent hover:border-gray-300'
+                          isExpanded ? 'border-blue-500 bg-blue-50 col-span-2 sm:col-span-2' : 'border-transparent hover:border-gray-300'
                         }`}
-                        onClick={() => setSelectedParticipant(isSelected ? null : peer)}
-                      >                        {/* Participant Video Container */}
+                        onClick={() => {
+                          setExpandedParticipants(prev => {
+                            const newSet = new Set(prev)
+                            if (isExpanded) {
+                              newSet.delete(peer)
+                            } else {
+                              newSet.add(peer)
+                            }
+                            return newSet
+                          })
+                        }}
+                      >
+                        {/* Participant Video Container */}
                         <div 
                           className="relative bg-black rounded mb-2 sm:mb-3 aspect-video"
                         >
@@ -1671,11 +1783,12 @@ export default function CallPage() {
                               playsInline
                               className="w-full h-full object-contain rounded bg-gray-900"
                             />
-                          ) : (                            <div className="w-full h-full flex items-center justify-center text-white">
+                          ) : (
+                            <div className="w-full h-full flex items-center justify-center text-white">
                               <div className={`bg-gray-600 rounded-full flex items-center justify-center ${
-                                isSelected ? 'w-12 h-12 sm:w-16 sm:h-16' : 'w-8 h-8 sm:w-12 sm:h-12'
+                                isExpanded ? 'w-12 h-12 sm:w-16 sm:h-16' : 'w-8 h-8 sm:w-12 sm:h-12'
                               }`}>
-                                <span className={`font-semibold ${isSelected ? 'text-lg sm:text-xl' : 'text-sm sm:text-lg'}`}>
+                                <span className={`font-semibold ${isExpanded ? 'text-lg sm:text-xl' : 'text-sm sm:text-lg'}`}>
                                   {peer[0]?.toUpperCase()}
                                 </span>
                               </div>
@@ -1689,17 +1802,18 @@ export default function CallPage() {
                             </div>
                           )}
                           
-                          {/* Selected indicator */}
-                          {isSelected && (
+                          {/* Expanded indicator */}
+                          {isExpanded && (
                             <div className="absolute top-2 left-2 bg-blue-500 text-white px-2 py-1 rounded text-xs">
                               Expanded
                             </div>
                           )}
                         </div>
-                          {/* Participant Name and Controls */}
+                        
+                        {/* Participant Name and Controls */}
                         <div className="flex items-center justify-between mb-1 sm:mb-2">
                           <div className={`font-medium text-gray-900 truncate ${
-                            isSelected ? 'text-sm sm:text-base' : 'text-xs sm:text-sm'
+                            isExpanded ? 'text-sm sm:text-base' : 'text-xs sm:text-sm'
                           }`}>
                             {peer}
                           </div>
@@ -1718,7 +1832,8 @@ export default function CallPage() {
                             <Mic className="h-2.5 w-2.5 sm:h-3 sm:w-3" style={{ display: peerMuted[peer] ? 'none' : 'block' }} />
                           </Button>
                         </div>
-                          {/* Speaking Indicator */}
+                        
+                        {/* Speaking Indicator */}
                         <div className={`flex items-center text-xs text-green-600 transition-opacity ${
                           speakingPeers[peer] ? 'opacity-100' : 'opacity-10'
                         }`}>
@@ -1737,9 +1852,9 @@ export default function CallPage() {
                         />
                       </div>
                     );
-                  })}
-                </div>
-              )}
+                  })
+                )}
+              </div>
             </div>
             
             {/* Hidden local audio element */}
