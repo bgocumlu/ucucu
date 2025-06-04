@@ -1523,7 +1523,8 @@ export default function CallPage() {
               If denied, you&apos;ll join muted and can unmute to try again.
             </div>
           </div>) : (
-          <div className="h-full flex flex-col min-h-0 space-y-4">            {/* Control Panel */}
+          <div className="h-full flex flex-col min-h-0 space-y-4">            
+          {/* Control Panel */}
             <div className="bg-gray-50 rounded-lg p-3 flex-shrink-0">
               <div className="flex items-center justify-between flex-wrap gap-2">
                 <div className="text-sm font-medium text-gray-700">Controls</div>
@@ -1657,7 +1658,7 @@ export default function CallPage() {
                       </div>
                       
                       {/* Camera Switch Button */}
-                      {!actualIsListener && videoEnabled && (
+                      {/* {!actualIsListener && videoEnabled && (
                         <Button
                           size="sm"
                           variant="outline"
@@ -1670,7 +1671,7 @@ export default function CallPage() {
                         >
                           <RotateCcw className="h-2.5 w-2.5 sm:h-3 sm:w-3" />
                         </Button>
-                      )}
+                      )} */}
                     </div>
                     
                     {/* Local Speaking Indicator */}
