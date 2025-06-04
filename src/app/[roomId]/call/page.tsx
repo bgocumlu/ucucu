@@ -1643,9 +1643,9 @@ export default function CallPage() {
                         <Video className="h-3 w-3" />
                       </div>
                         {/* Expanded indicator */}
-                      {localPreviewExpanded && (
+                      {/* {localPreviewExpanded && (
                         <div className="absolute top-2 left-2 bg-blue-500 w-3 h-3 rounded-full"></div>
-                      )}
+                      )} */}
                     </div>
                       {/* Local Video Name and Controls */}
                     <div className="flex items-center justify-between mb-1 sm:mb-2">
@@ -1705,9 +1705,9 @@ export default function CallPage() {
                         <Monitor className="h-3 w-3" />
                       </div>
                         {/* Expanded indicator */}
-                      {localPreviewExpanded && (
+                   {/* {localPreviewExpanded && (
                         <div className="absolute top-2 left-2 bg-green-500 w-3 h-3 rounded-full"></div>
-                      )}
+                      )}    */}
                     </div>
                     
                     {/* Local Screen Name and Controls */}
@@ -1795,9 +1795,9 @@ export default function CallPage() {
                             </div>
                           )}
                             {/* Expanded indicator */}
-                          {isExpanded && (
+                          {/* {isExpanded && (
                             <div className="absolute top-2 left-2 bg-blue-500 w-3 h-3 rounded-full"></div>
-                          )}
+                          )} */}
                         </div>
                         
                         {/* Participant Name and Controls */}
