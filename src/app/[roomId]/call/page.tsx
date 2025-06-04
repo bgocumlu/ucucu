@@ -1642,12 +1642,9 @@ export default function CallPage() {
                       <div className="absolute top-2 right-2 bg-blue-500 text-white p-1 rounded">
                         <Video className="h-3 w-3" />
                       </div>
-                      
-                      {/* Expanded indicator */}
+                        {/* Expanded indicator */}
                       {localPreviewExpanded && (
-                        <div className="absolute top-2 left-2 bg-blue-500 text-white px-2 py-1 rounded text-xs">
-                          Expanded
-                        </div>
+                        <div className="absolute top-2 left-2 bg-blue-500 w-3 h-3 rounded-full"></div>
                       )}
                     </div>
                     
@@ -1708,12 +1705,9 @@ export default function CallPage() {
                       <div className="absolute top-2 right-2 bg-green-500 text-white p-1 rounded">
                         <Monitor className="h-3 w-3" />
                       </div>
-                      
-                      {/* Expanded indicator */}
+                        {/* Expanded indicator */}
                       {localPreviewExpanded && (
-                        <div className="absolute top-2 left-2 bg-green-500 text-white px-2 py-1 rounded text-xs">
-                          Expanded
-                        </div>
+                        <div className="absolute top-2 left-2 bg-green-500 w-3 h-3 rounded-full"></div>
                       )}
                     </div>
                     
@@ -1801,12 +1795,9 @@ export default function CallPage() {
                               <Monitor className="h-3 w-3" />
                             </div>
                           )}
-                          
-                          {/* Expanded indicator */}
+                            {/* Expanded indicator */}
                           {isExpanded && (
-                            <div className="absolute top-2 left-2 bg-blue-500 text-white px-2 py-1 rounded text-xs">
-                              Expanded
-                            </div>
+                            <div className="absolute top-2 left-2 bg-blue-500 w-3 h-3 rounded-full"></div>
                           )}
                         </div>
                         
