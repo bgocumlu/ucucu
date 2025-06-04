@@ -3,7 +3,7 @@
 import React, { useEffect, useRef, useState } from "react"
 import { useParams, useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
-import { ArrowLeft, Phone, Mic, MicOff, Volume2, Video, VideoOff, Monitor, MonitorOff, RotateCcw, RotateCw, FlipHorizontal } from "lucide-react"
+import { ArrowLeft, Phone, Mic, MicOff, Volume2, Video, VideoOff, Monitor, MonitorOff, RotateCcw, FlipHorizontal, RefreshCw } from "lucide-react"
 import { NotificationBell } from "@/components/notification-bell"
 
 // Extend Window interface for webkit AudioContext
@@ -1552,8 +1552,7 @@ export default function CallPage() {
                       <span className="hidden sm:inline">Video</span>
                     </Button>
                   )}
-                  
-                  {/* Camera Switch Controls - only show when video is enabled */}
+                    {/* Camera Switch Controls - only show when video is enabled */}
                   {!actualIsListener && videoEnabled && (
                     <Button
                       size="sm"
@@ -1562,7 +1561,7 @@ export default function CallPage() {
                       className="flex items-center gap-1"
                       title={`Switch to ${currentCamera === 'user' ? 'back' : 'front'} camera`}
                     >
-                      <RotateCw className="h-4 w-4" />
+                      <RefreshCw className="h-4 w-4" />
                       <span className="hidden sm:inline">Flip</span>
                     </Button>
                   )}
@@ -1648,13 +1647,12 @@ export default function CallPage() {
                         <div className="absolute top-2 left-2 bg-blue-500 w-3 h-3 rounded-full"></div>
                       )}
                     </div>
-                    
-                    {/* Local Video Name and Controls */}
+                      {/* Local Video Name and Controls */}
                     <div className="flex items-center justify-between mb-1 sm:mb-2">
                       <div className={`font-medium text-gray-900 truncate ${
                         localPreviewExpanded ? 'text-sm sm:text-base' : 'text-xs sm:text-sm'
                       }`}>
-                        You (Video)
+                        {currentUser} (Video)
                       </div>
                       
                       {/* Camera Switch Button */}
@@ -1717,7 +1715,7 @@ export default function CallPage() {
                       <div className={`font-medium text-gray-900 truncate ${
                         localPreviewExpanded ? 'text-sm sm:text-base' : 'text-xs sm:text-sm'
                       }`}>
-                        Your Screen
+                        {currentUser} (Screen)
                       </div>
                     </div>
                     
