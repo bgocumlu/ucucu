@@ -3,13 +3,28 @@
 import React, { useEffect, useRef, useState } from "react"
 import { useParams, useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
-import { ArrowLeft, Phone, Mic, MicOff, Volume2, Video, VideoOff, Monitor, MonitorOff, RotateCcw, FlipHorizontal, RefreshCw } from "lucide-react"
+import { ArrowLeft, Phone, Mic, MicOff, Volume2, Video, VideoOff, Monitor, MonitorOff, RotateCcw, FlipHorizontal, RefreshCw, Maximize } from "lucide-react"
 import { NotificationBell } from "@/components/notification-bell"
 
-// Extend Window interface for webkit AudioContext
+// Extend Window interface for webkit AudioContext and fullscreen APIs
 declare global {
   interface Window {
     webkitAudioContext?: typeof AudioContext
+  }
+  
+  interface HTMLElement {
+    webkitRequestFullscreen?: () => Promise<void>
+    mozRequestFullScreen?: () => Promise<void>
+    msRequestFullscreen?: () => Promise<void>
+  }
+  
+  interface Document {
+    webkitExitFullscreen?: () => Promise<void>
+    mozCancelFullScreen?: () => Promise<void>
+    msExitFullscreen?: () => Promise<void>
+    webkitFullscreenElement?: Element | null
+    mozFullScreenElement?: Element | null
+    msFullscreenElement?: Element | null
   }
 }
 
@@ -41,7 +56,7 @@ export default function CallPage() {
   const peerConnections = useRef<Record<string, RTCPeerConnection>>({})
   const [muted, setMuted] = useState(false)
   const [videoEnabled, setVideoEnabled] = useState(false)
-  const [screenSharing, setScreenSharing] = useState(false)  
+  const [screenSharing, setScreenSharing] = useState(false)
   const [expandedParticipants, setExpandedParticipants] = useState<Set<string>>(new Set())
   const [localPreviewExpanded, setLocalPreviewExpanded] = useState(false)
   const [peerMuted, setPeerMuted] = useState<Record<string, boolean>>({}) // <--- NEW: track muted state for each remote peer
@@ -766,14 +781,53 @@ export default function CallPage() {
       if (wsRef.current) wsRef.current.close()
       if (localStreamRef.current) localStreamRef.current.getTracks().forEach(t => t.stop())
     }
-  }, [roomId])
-  // --- Mute/unmute a remote participant ---
+  }, [roomId])  // --- Mute/unmute a remote participant ---
   const togglePeerMute = (peer: string) => {
     setPeerMuted(prev => ({
       ...prev,
       [peer]: !prev[peer]
     }))
-  }  // --- Switch camera between front and back with optimized renegotiation ---
+  }
+  // --- Fullscreen controls for participant videos ---
+  const enterFullscreen = (peer: string) => {
+    const element = remoteScreenRefs.current[peer]?.current || remoteVideoRefs.current[peer]?.current
+    if (element) {
+      if (element.requestFullscreen) {
+        element.requestFullscreen()
+      } else if (element.webkitRequestFullscreen) {
+        element.webkitRequestFullscreen()
+      } else if (element.mozRequestFullScreen) {
+        element.mozRequestFullScreen()
+      } else if (element.msRequestFullscreen) {
+        element.msRequestFullscreen()
+      }
+    }
+  }
+
+  // Listen for fullscreen changes (when user exits fullscreen with ESC)
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      if (!document.fullscreenElement && 
+          !document.webkitFullscreenElement && 
+          !document.mozFullScreenElement && 
+          !document.msFullscreenElement) {
+      }
+    }
+
+    document.addEventListener('fullscreenchange', handleFullscreenChange)
+    document.addEventListener('webkitfullscreenchange', handleFullscreenChange)
+    document.addEventListener('mozfullscreenchange', handleFullscreenChange)
+    document.addEventListener('MSFullscreenChange', handleFullscreenChange)
+
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFullscreenChange)
+      document.removeEventListener('webkitfullscreenchange', handleFullscreenChange)
+      document.removeEventListener('mozfullscreenchange', handleFullscreenChange)
+      document.removeEventListener('MSFullscreenChange', handleFullscreenChange)
+    }
+  }, [])
+
+  // --- Switch camera between front and back with optimized renegotiation ---
   const switchCamera = async () => {
     if (!videoEnabled) return
 
@@ -1941,8 +1995,7 @@ export default function CallPage() {
                             <div className="absolute top-2 left-2 bg-blue-500 w-3 h-3 rounded-full"></div>
                           )} */}
                         </div>
-                        
-                        {/* Participant Name and Controls */}
+                          {/* Participant Name and Controls */}
                         <div className="flex items-center justify-between mb-1 sm:mb-2">
                           <div className={`font-medium text-gray-900 truncate ${
                             isExpanded ? 'text-sm sm:text-base' : 'text-xs sm:text-sm'
@@ -1950,19 +2003,35 @@ export default function CallPage() {
                             {peer}
                           </div>
                           
-                          {/* Mute Button */}
-                          <Button
-                            size="sm"
-                            variant={peerMuted[peer] ? "destructive" : "ghost"}
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              togglePeerMute(peer)
-                            }}
-                            className="p-1 h-6 w-6 sm:h-7 sm:w-7"
-                          >
-                            <MicOff className="h-2.5 w-2.5 sm:h-3 sm:w-3" style={{ display: peerMuted[peer] ? 'block' : 'none' }} />
-                            <Mic className="h-2.5 w-2.5 sm:h-3 sm:w-3" style={{ display: peerMuted[peer] ? 'none' : 'block' }} />
-                          </Button>
+                          <div className="flex items-center gap-1">
+                            {/* Fullscreen Button */}
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                enterFullscreen(peer)
+                              }}
+                              className="p-1 h-6 w-6 sm:h-7 sm:w-7"
+                              title={`Enter fullscreen for ${peer}`}
+                            >
+                              <Maximize className="h-2.5 w-2.5 sm:h-3 sm:w-3" />
+                            </Button>
+                            
+                            {/* Mute Button */}
+                            <Button
+                              size="sm"
+                              variant={peerMuted[peer] ? "destructive" : "ghost"}
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                togglePeerMute(peer)
+                              }}
+                              className="p-1 h-6 w-6 sm:h-7 sm:w-7"
+                            >
+                              <MicOff className="h-2.5 w-2.5 sm:h-3 sm:w-3" style={{ display: peerMuted[peer] ? 'block' : 'none' }} />
+                              <Mic className="h-2.5 w-2.5 sm:h-3 sm:w-3" style={{ display: peerMuted[peer] ? 'none' : 'block' }} />
+                            </Button>
+                          </div>
                         </div>
                         
                         {/* Speaking Indicator */}
