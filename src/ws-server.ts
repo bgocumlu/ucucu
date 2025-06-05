@@ -631,13 +631,84 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
         const { roomId, username, text } = msg;
         const message = { username, text, timestamp: Date.now() };
         
-        if (rooms[roomId]) {
-          // Check if user is actually in the room's participant list
+        if (rooms[roomId]) {          // Check if user is actually in the room's participant list
           if (!rooms[roomId].users.has(username)) {
             console.log(`[SECURITY] User ${username} attempted to send message to room ${roomId} without being a participant`);
-            ws.send(JSON.stringify({ type: 'error', error: 'You must join the room before sending messages.' }));
-            return;
-          }// Check if this is an AI command
+            
+            // Attempt auto-rejoin for non-password rooms
+            if (!rooms[roomId].locked && rooms[roomId].users.size < rooms[roomId].maxParticipants) {
+              console.log(`[AUTO-REJOIN] Attempting to auto-rejoin user ${username} to non-password room ${roomId}`);
+              
+              try {
+                // Check if username is already taken
+                if (rooms[roomId].users.has(username)) {
+                  console.log(`[AUTO-REJOIN] Username ${username} already taken in room ${roomId}`);
+                  ws.send(JSON.stringify({ 
+                    type: 'error', 
+                    error: 'Username already taken in this room.',
+                    redirect: `/${roomId}`,
+                    action: 'rejoin'
+                  }));
+                  return;
+                }
+                
+                // Add user to room
+                rooms[roomId].users.add(username);
+                
+                // Update WebSocket tracking
+                ws.joinedRoom = roomId;
+                ws.joinedUser = username;
+                
+                console.log(`[AUTO-REJOIN] Successfully rejoined user ${username} to room ${roomId}`);
+                
+                // Send join notification message
+                const joinMsg = { username: '', text: `${username} rejoined the chat.`, timestamp: Date.now(), system: true };
+                const usersArr = Array.from(rooms[roomId].users);
+                
+                // Broadcast join message and room info
+                await broadcastToRoom(roomId, 'newMessage', { message: joinMsg });
+                
+                const roomInfo = { 
+                  id: roomId, 
+                  name: rooms[roomId].name, 
+                  count: rooms[roomId].users.size, 
+                  maxParticipants: rooms[roomId].maxParticipants, 
+                  locked: rooms[roomId].locked, 
+                  visibility: rooms[roomId].visibility, 
+                  exists: true, 
+                  owner: rooms[roomId].owner, 
+                  users: usersArr 
+                };
+                await broadcastToRoom(roomId, 'roomInfo', { room: roomInfo });
+                broadcastRooms(); // Broadcast participant count change
+                
+                // Continue with sending the message after successful rejoin
+                console.log(`[AUTO-REJOIN] Proceeding to send message after successful rejoin`);
+                
+              } catch (error) {
+                console.error(`[AUTO-REJOIN] Error during auto-rejoin for user ${username} to room ${roomId}:`, error);
+                ws.send(JSON.stringify({ 
+                  type: 'error', 
+                  error: 'Failed to rejoin room automatically. Please rejoin manually.',
+                  redirect: `/${roomId}`,
+                  action: 'rejoin'
+                }));
+                return;
+              }
+            } else {
+              // Room is password-protected or full, cannot auto-rejoin
+              const reason = rooms[roomId].locked ? 'password-protected' : 'full';
+              console.log(`[SECURITY] Cannot auto-rejoin user ${username} to ${reason} room ${roomId}`);
+              ws.send(JSON.stringify({ 
+                type: 'error', 
+                error: `You must join the room before sending messages. Room is ${reason}.`,
+                redirect: `/${roomId}`,
+                action: 'rejoin'
+              }));
+              return;
+            }
+          }
+          // Check if this is an AI command
           if (text.trim().startsWith('!')) {
             const aiPrompt = text.trim().substring(1).trim(); // Remove '!' prefix
             
@@ -682,13 +753,82 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
           }
         }      } else if (msg.type === 'sendFile') {
         const { roomId, username, fileName, fileType, fileData, timestamp, asAudio } = msg;        console.log('[ws-server] Received sendFile:', { roomId, username, fileName, fileType, timestamp, fileDataLength: fileData?.length });
-        const message = { username, fileName, fileType, fileData, timestamp, type: 'file', ...(asAudio ? { asAudio: true } : {}) };
-        if (rooms[roomId]) {
-          // Check if user is actually in the room's participant list
+        const message = { username, fileName, fileType, fileData, timestamp, type: 'file', ...(asAudio ? { asAudio: true } : {}) };        if (rooms[roomId]) {          // Check if user is actually in the room's participant list
           if (!rooms[roomId].users.has(username)) {
             console.log(`[SECURITY] User ${username} attempted to send file to room ${roomId} without being a participant`);
-            ws.send(JSON.stringify({ type: 'error', error: 'You must join the room before sending files.' }));
-            return;
+            
+            // Attempt auto-rejoin for non-password rooms
+            if (!rooms[roomId].locked && rooms[roomId].users.size < rooms[roomId].maxParticipants) {
+              console.log(`[AUTO-REJOIN] Attempting to auto-rejoin user ${username} to non-password room ${roomId} for file sending`);
+              
+              try {
+                // Check if username is already taken
+                if (rooms[roomId].users.has(username)) {
+                  console.log(`[AUTO-REJOIN] Username ${username} already taken in room ${roomId}`);
+                  ws.send(JSON.stringify({ 
+                    type: 'error', 
+                    error: 'Username already taken in this room.',
+                    redirect: `/${roomId}`,
+                    action: 'rejoin'
+                  }));
+                  return;
+                }
+                
+                // Add user to room
+                rooms[roomId].users.add(username);
+                
+                // Update WebSocket tracking
+                ws.joinedRoom = roomId;
+                ws.joinedUser = username;
+                
+                console.log(`[AUTO-REJOIN] Successfully rejoined user ${username} to room ${roomId} for file sending`);
+                
+                // Send join notification message
+                const joinMsg = { username: '', text: `${username} rejoined the chat.`, timestamp: Date.now(), system: true };
+                const usersArr = Array.from(rooms[roomId].users);
+                
+                // Broadcast join message and room info
+                await broadcastToRoom(roomId, 'newMessage', { message: joinMsg });
+                
+                const roomInfo = { 
+                  id: roomId, 
+                  name: rooms[roomId].name, 
+                  count: rooms[roomId].users.size, 
+                  maxParticipants: rooms[roomId].maxParticipants, 
+                  locked: rooms[roomId].locked, 
+                  visibility: rooms[roomId].visibility, 
+                  exists: true, 
+                  owner: rooms[roomId].owner, 
+                  users: usersArr 
+                };
+                await broadcastToRoom(roomId, 'roomInfo', { room: roomInfo });
+                broadcastRooms(); // Broadcast participant count change
+                
+                // Continue with sending the file after successful rejoin
+                console.log(`[AUTO-REJOIN] Proceeding to send file after successful rejoin`);
+                
+              } catch (error) {
+                console.error(`[AUTO-REJOIN] Error during auto-rejoin for user ${username} to room ${roomId} for file sending:`, error);
+                ws.send(JSON.stringify({ 
+                  type: 'error', 
+                  error: 'Failed to rejoin room automatically. Please rejoin manually.',
+                  redirect: `/${roomId}`,
+                  action: 'rejoin'
+                }));
+                return;
+              }
+            } else {
+              // Room is password-protected or full, cannot auto-rejoin
+              const reason = rooms[roomId].locked ? 'password-protected' : 'full';
+              console.log(`[SECURITY] Cannot auto-rejoin user ${username} to ${reason} room ${roomId} for file sending`);
+              ws.send(JSON.stringify({ 
+                type: 'error', 
+                error: `You must join the room before sending files. Room is ${reason}.`,
+                redirect: `/${roomId}`,
+                action: 'rejoin'
+              }));
+              return;
+            }
           }
           console.log('[ws-server] Broadcasting file message to room:', roomId);
           await broadcastToRoom(roomId, 'newMessage', { message });
@@ -979,6 +1119,7 @@ type CallPeerInfo = {
   ws: WebSocket
   username: string
   isListener: boolean
+  roomVerified?: boolean // Cache room membership verification
 }
 const callRooms: Record<string, Record<string, CallPeerInfo>> = {}
 
@@ -1018,18 +1159,26 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
 
   ws.on('message', async (data: WebSocket.RawData) => {
     try {
-      const msg = JSON.parse(data.toString());
-
-      // --- BEGIN: WebRTC Group Audio Call Signaling ---
+      const msg = JSON.parse(data.toString());      // --- BEGIN: WebRTC Group Audio Call Signaling ---
       if (msg.type === "call-join") {
         // msg: { type, roomId, username, isListener }
         const { roomId, username, isListener } = msg
         if (!roomId || !username) return
 
-        // Create call room if needed
+        // Check if user is actually in the room's participant list
+        if (!rooms[roomId] || !rooms[roomId].users.has(username)) {
+          console.log(`[SECURITY] User ${username} attempted to join call in room ${roomId} without being a participant`);
+          ws.send(JSON.stringify({ 
+            type: 'error', 
+            error: 'You must join the room before joining the call.',
+            redirect: `/${roomId}`,
+            action: 'rejoin'
+          }));
+          return;
+        }        // Create call room if needed
         if (!callRooms[roomId]) callRooms[roomId] = {}
-        // Add this peer
-        callRooms[roomId][username] = { ws, username, isListener: !!isListener }
+        // Add this peer with room membership verified
+        callRooms[roomId][username] = { ws, username, isListener: !!isListener, roomVerified: true }
 
         // Tell the new peer about all existing peers
         Object.keys(callRooms[roomId]).forEach(existing => {
@@ -1057,20 +1206,46 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
           }
         })
         return
-      }
+      }      
       if (msg.type === "call-offer" || msg.type === "call-answer" || msg.type === "call-ice") {
         // msg: { type, roomId, from, to, payload }
         const { roomId, from, to, payload } = msg
         if (!roomId || !from || !to) return
+
+        // Check if sender is actually in the room's participant list
+        if (!rooms[roomId] || !rooms[roomId].users.has(from)) {
+          console.log(`[SECURITY] User ${from} attempted to send call signal to room ${roomId} without being a participant`);
+          ws.send(JSON.stringify({ 
+            type: 'error', 
+            error: 'You must join the room before participating in calls.',
+            redirect: `/${roomId}`,
+            action: 'rejoin'
+          }));
+          return;
+        }
+
         const peers = callRooms[roomId]
         if (peers && peers[to] && peers[to].ws.readyState === WebSocket.OPEN) {
           peers[to].ws.send(JSON.stringify({ type: msg.type, from, payload }))
         }
         return
-      }
+      }      
       if (msg.type === "call-peer-left") {
         // msg: { type, roomId, username }
         const { roomId, username } = msg
+        
+        // Check if user is actually in the room's participant list
+        if (!rooms[roomId] || !rooms[roomId].users.has(username)) {
+          console.log(`[SECURITY] User ${username} attempted to leave call in room ${roomId} without being a participant`);
+          ws.send(JSON.stringify({ 
+            type: 'error', 
+            error: 'You must join the room before leaving the call.',
+            redirect: `/${roomId}`,
+            action: 'rejoin'
+          }));
+          return;
+        }
+
         if (callRooms[roomId] && callRooms[roomId][username]) {
           delete callRooms[roomId][username]
           broadcastCall(roomId, "call-peer-left", { username }, username)

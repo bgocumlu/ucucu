@@ -60,8 +60,7 @@ export const WebSocketProvider = ({ children }: { children: React.ReactNode }) =
             notificationService.handleBackendSubscriptionUpdate(msg);
             return;
           }
-          
-          // Handle push notifications
+            // Handle push notifications
           if (msg.type === 'pushNotification') {
             console.log('[WebSocketProvider] Received push notification:', msg);
             
@@ -75,6 +74,22 @@ export const WebSocketProvider = ({ children }: { children: React.ReactNode }) =
               // notificationService.showNotification(msg.roomId, msg.message);
             }
             // Don't set this as lastMessage as it's not for UI updates
+            return;
+          }
+          
+          // Handle security error messages with redirect information
+          if (msg.type === 'error' && msg.redirect && msg.action === 'rejoin') {
+            console.log('[WebSocketProvider] Received security error with redirect:', msg);
+            
+            // Show error message to user
+            if (typeof window !== 'undefined') {
+              alert(msg.error || 'Security error: You need to rejoin the room.');
+              
+              // Redirect user to the room page to rejoin
+              // window.location.href = msg.redirect;
+            }
+            
+            // Don't set this as lastMessage to avoid confusing the UI
             return;
           }
           
