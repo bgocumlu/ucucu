@@ -324,21 +324,38 @@ setInterval(() => {
   ensureGlobalRoomExists();
   
   let cleanedRooms = 0;
+  let totalGhostParticipants = 0;
   
   for (const [roomId, room] of Object.entries(rooms)) {
-    const hasUsers = room.users.size > 0;
     const hasActiveSubscriptions = getActiveSubscriptions(roomId).length > 0;
+    
+    // Cross-verify room participants against actual connected WebSocket clients
+    const connectedClientsInRoom = getClientsInRoom(roomId);
+    const connectedUsernames = new Set(
+      connectedClientsInRoom.map(client => (client as WebSocket & { joinedUser?: string }).joinedUser).filter(Boolean)
+    );
+    
+    // Find ghost participants (in room.users but no WebSocket connection)
+    const ghostParticipants = Array.from(room.users).filter(username => 
+      !connectedUsernames.has(username)
+    );
+    
+    if (ghostParticipants.length > 0) {
+      console.log(`[ROOM_CLEANUP][SERVER:${PORT}] Found ${ghostParticipants.length} ghost participants in room ${roomId}: ${ghostParticipants.join(', ')}`);
+      console.log(`[ROOM_CLEANUP][SERVER:${PORT}] Connected clients: ${Array.from(connectedUsernames).join(', ') || 'none'}`);
+        // Remove ghost participants from room
+      for (const ghostUser of ghostParticipants) {
+        room.users.delete(ghostUser);
+        totalGhostParticipants++;
+        console.log(`[ROOM_CLEANUP][SERVER:${PORT}] Removed ghost participant: ${ghostUser} from room ${roomId}`);
+      }
+    }
+    
+    const hasUsers = room.users.size > 0;
 
     if (roomId === 'global') {
-      // Special handling for global room: clear participants if no connected clients
-      const connectedClientsInGlobal = getClientsInRoom('global');
-      if (connectedClientsInGlobal.length === 0 && hasUsers) {
-        console.log(`[ROOM_CLEANUP][SERVER:${PORT}] No connected clients in global room, clearing ${room.users.size} ghost participants`);
-        room.users.clear();
-        // Broadcast updated room info after clearing participants
-        broadcastRooms();
-      }
-      continue; // Never delete the global room itself
+      // Global room is never deleted, just cleaned of ghost participants above
+      continue;
     }
     
     // Only delete non-global rooms if no users AND no active subscriptions
@@ -349,10 +366,14 @@ setInterval(() => {
       console.log(`[ROOM_CLEANUP][SERVER:${PORT}] Scheduled cleanup: Deleted empty room ${roomId}`);
     }
   }
-  
-  if (cleanedRooms > 0) {
+    if (cleanedRooms > 0 || totalGhostParticipants > 0) {
+    if (cleanedRooms > 0) {
+      console.log(`[ROOM_CLEANUP][SERVER:${PORT}] Scheduled cleanup: Removed ${cleanedRooms} empty rooms`);
+    }
+    if (totalGhostParticipants > 0) {
+      console.log(`[ROOM_CLEANUP][SERVER:${PORT}] Scheduled cleanup: Removed ${totalGhostParticipants} ghost participants across all rooms`);
+    }
     broadcastRooms();
-    console.log(`[ROOM_CLEANUP][SERVER:${PORT}] Scheduled cleanup: Removed ${cleanedRooms} empty rooms`);
   }
 }, 120000); // every 2 minutes
 
