@@ -659,6 +659,18 @@ export default function CallPage() {
           
           break
         }
+        case "error": {
+          console.error('Call WebSocket error:', msg.message)
+          setError(msg.message || "An error occurred")
+          
+          // If the error has redirect information, redirect to the room
+          if (msg.redirectTo) {
+            console.log('Redirecting to room due to error:', msg.redirectTo)
+            router.push(msg.redirectTo)
+          }
+          
+          break
+        }
       }
     }
     ws.onclose = () => setJoined(false)
@@ -761,7 +773,7 @@ export default function CallPage() {
       ...prev,
       [peer]: !prev[peer]
     }))
-  }  // --- Switch camera between front and back ---
+  }  // --- Switch camera between front and back with optimized renegotiation ---
   const switchCamera = async () => {
     if (!videoEnabled) return
 
@@ -776,11 +788,15 @@ export default function CallPage() {
       // Stop current video stream
       if (localVideoStreamRef.current) {
         localVideoStreamRef.current.getTracks().forEach(track => track.stop())
-      }
-
-      // Get new video stream with the opposite camera
+      }      // Get new video stream with the opposite camera - ULTRA HIGH QUALITY 60FPS
       const stream = await navigator.mediaDevices.getUserMedia({ 
-        video: { facingMode: newCamera }, 
+        video: { 
+          facingMode: newCamera,
+          width: { ideal: 1920, min: 1280 },
+          height: { ideal: 1080, min: 720 },
+          frameRate: { ideal: 60, min: 30 }, // 60fps for streaming quality
+          aspectRatio: { ideal: 16/9 },
+        }, 
         audio: false 
       })
       localVideoStreamRef.current = stream
@@ -790,9 +806,39 @@ export default function CallPage() {
         localVideoRef.current.srcObject = stream
       }
 
-      // Update all peer connections with the new video track
-      for (const [remote, pc] of Object.entries(peerConnections.current)) {
-        // Remove old video tracks
+      // Update all peer connections with parallel processing
+      const renegotiationPromises = Object.entries(peerConnections.current).map(async ([remote, pc]) => {
+        const newVideoTrack = stream.getVideoTracks()[0]
+        
+        // Find existing video sender (non-screen)
+        const existingVideoSender = pc.getSenders().find(sender =>
+          sender.track && sender.track.kind === 'video' && !sender.track.label.includes('screen')
+        )
+
+        if (existingVideoSender) {
+          // Use replaceTrack for seamless camera switch (no renegotiation needed)
+          try {
+            await existingVideoSender.replaceTrack(newVideoTrack)
+            console.log(`Replaced camera track for ${remote}`)            
+            // Set encoding parameters for ULTRA HIGH QUALITY streaming
+            const parameters = existingVideoSender.getParameters()
+            if (!parameters.encodings) {
+              parameters.encodings = [{}]
+            }
+            // STREAMING PLATFORM QUALITY: High bitrate for 60fps smooth video
+            parameters.encodings[0].maxBitrate = 4000000 // 4 Mbps for 60fps 1080p
+            parameters.encodings[0].maxFramerate = 60    // 60fps streaming quality
+            parameters.encodings[0].scaleResolutionDownBy = 1 // No downscaling
+            
+            await existingVideoSender.setParameters(parameters)
+            
+            return // No renegotiation needed with replaceTrack
+          } catch (error) {
+            console.warn(`Failed to replace camera track for ${remote}, falling back to full renegotiation:`, error)
+          }
+        }
+
+        // Fallback: Remove old tracks and add new ones (requires renegotiation)
         pc.getSenders().forEach(sender => {
           if (sender.track && sender.track.kind === 'video' && !sender.track.label.includes('screen')) {
             pc.removeTrack(sender)
@@ -800,9 +846,54 @@ export default function CallPage() {
         })
 
         // Add new video tracks
-        stream.getTracks().forEach(track => {
-          if (!pc.getSenders().some(sender => sender.track === track)) {
-            pc.addTrack(track, stream)
+        if (!pc.getSenders().some(sender => sender.track === newVideoTrack)) {
+          pc.addTrack(newVideoTrack, stream)
+        }
+        
+        // Trigger renegotiation only if needed
+        try {
+          const offer = await pc.createOffer()
+          await pc.setLocalDescription(offer)
+          if (wsRef.current) {
+            wsRef.current.send(JSON.stringify({ 
+              type: "call-offer", 
+              roomId, 
+              from: currentUser, 
+              to: remote, 
+              payload: pc.localDescription 
+            }))
+          }
+        } catch (error) {
+          console.error(`Error creating camera switch offer for ${remote}:`, error)
+        }
+      })
+
+      // Wait for all updates to complete
+      await Promise.allSettled(renegotiationPromises)
+      setCurrentCamera(newCamera)
+    } catch (error) {
+      console.error('Error switching camera:', error)
+      setError('Camera switch failed - the requested camera may not be available')
+    }
+  }
+
+  // --- Toggle mirror for local video preview ---
+  const toggleMirror = () => {
+    setIsMirrored(!isMirrored)
+  }  // --- Toggle video with optimized parallel renegotiation ---
+  const toggleVideo = async () => {
+    if (videoEnabled) {
+      // Turn off video
+      if (localVideoStreamRef.current) {
+        localVideoStreamRef.current.getTracks().forEach(track => track.stop())
+        localVideoStreamRef.current = null
+      }
+      
+      // Remove video tracks and trigger parallel renegotiation
+      const renegotiationPromises = Object.entries(peerConnections.current).map(async ([remote, pc]) => {
+        pc.getSenders().forEach(sender => {
+          if (sender.track && sender.track.kind === 'video' && !sender.track.label.includes('screen')) {
+            pc.removeTrack(sender)
           }
         })
         
@@ -820,75 +911,72 @@ export default function CallPage() {
             }))
           }
         } catch (error) {
-          console.error('Error creating camera switch offer:', error)
+          console.error(`Error creating video-off offer for ${remote}:`, error)
         }
-      }
-
-      setCurrentCamera(newCamera)
-    } catch (error) {
-      console.error('Error switching camera:', error)
-      setError('Camera switch failed - the requested camera may not be available')
-    }
-  }
-
-  // --- Toggle mirror for local video preview ---
-  const toggleMirror = () => {
-    setIsMirrored(!isMirrored)
-  }
-  // --- Toggle video with proper renegotiation ---
-  const toggleVideo = async () => {
-    if (videoEnabled) {
-      // Turn off video
-      if (localVideoStreamRef.current) {
-        localVideoStreamRef.current.getTracks().forEach(track => track.stop())
-        localVideoStreamRef.current = null
-      }
+      })
       
-      // Remove video tracks from all peer connections and trigger renegotiation
-      for (const [remote, pc] of Object.entries(peerConnections.current)) {
-        pc.getSenders().forEach(sender => {
-          if (sender.track && sender.track.kind === 'video' && !sender.track.label.includes('screen')) {
-            pc.removeTrack(sender)
-          }
-        })
-        
-        // Always trigger renegotiation for both sides
-        try {
-          const offer = await pc.createOffer()
-          await pc.setLocalDescription(offer)
-          if (wsRef.current) {
-            wsRef.current.send(JSON.stringify({ 
-              type: "call-offer", 
-              roomId, 
-              from: currentUser, 
-              to: remote, 
-              payload: pc.localDescription 
-            }))
-          }
-        } catch (error) {
-          console.error('Error creating video-off offer:', error)
-        }
-      }
-      
+      // Wait for all renegotiations to complete
+      await Promise.allSettled(renegotiationPromises)
       setVideoEnabled(false)
-    } else {
-      // Turn on video
+    } else {      // Turn on video
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ 
-          video: { facingMode: currentCamera }, 
+          video: { 
+            facingMode: currentCamera,
+            width: { ideal: 1920, min: 1280 },
+            height: { ideal: 1080, min: 720 },
+            frameRate: { ideal: 60, min: 30 }, // 60fps for streaming platform quality
+            aspectRatio: { ideal: 16/9 }
+          }, 
           audio: false 
         })
         localVideoStreamRef.current = stream
         
-        // Add video tracks to all peer connections and trigger renegotiation
-        for (const [remote, pc] of Object.entries(peerConnections.current)) {
-          stream.getTracks().forEach(track => {
-            if (!pc.getSenders().some(sender => sender.track === track)) {
-              pc.addTrack(track, stream)
-            }
-          })
+        // Add video tracks and trigger parallel renegotiation
+        const renegotiationPromises = Object.entries(peerConnections.current).map(async ([remote, pc]) => {
+          const videoTrack = stream.getVideoTracks()[0]
           
-          // Always trigger renegotiation for both sides  
+          // Check for existing video track sender to use replaceTrack if possible
+          const existingVideoSender = pc.getSenders().find(sender => 
+            sender.track && sender.track.kind === 'video' && !sender.track.label.includes('screen')
+          )
+          
+          if (existingVideoSender && existingVideoSender.track) {
+            // Replace existing video track (avoids renegotiation)
+            try {
+              await existingVideoSender.replaceTrack(videoTrack)
+              console.log(`Replaced video track for ${remote}`)
+              return // No renegotiation needed
+            } catch (error) {
+              console.warn(`Failed to replace video track for ${remote}, falling back to addTrack:`, error)
+            }
+          }
+          
+          // Add new track if no existing track or replace failed
+          if (!pc.getSenders().some(sender => sender.track === videoTrack)) {
+            pc.addTrack(videoTrack, stream)
+            console.log(`Added video track to peer connection: ${remote}`)
+          }
+          
+          // Set encoding parameters for video optimization
+          const sender = pc.getSenders().find(s => s.track === videoTrack)
+          if (sender) {
+            try {
+              const parameters = sender.getParameters()
+              if (!parameters.encodings) {
+                parameters.encodings = [{}]
+              }              // Optimize for streaming platform quality: high bitrate, 60fps
+              parameters.encodings[0].maxBitrate = 4000000 // 4 Mbps for 60fps 1080p streaming
+              parameters.encodings[0].maxFramerate = 60    // 60fps for streaming platform quality
+              parameters.encodings[0].scaleResolutionDownBy = 1 // No downscaling for best quality
+              await sender.setParameters(parameters)
+              console.log(`Set video encoding parameters for ${remote}`)
+            } catch (error) {
+              console.warn(`Failed to set video encoding parameters for ${remote}:`, error)
+            }
+          }
+          
+          // Trigger renegotiation
           try {
             const offer = await pc.createOffer()
             await pc.setLocalDescription(offer)
@@ -902,17 +990,19 @@ export default function CallPage() {
               }))
             }
           } catch (error) {
-            console.error('Error creating video offer:', error)
+            console.error(`Error creating video offer for ${remote}:`, error)
           }
-        }
+        })
         
+        // Wait for all renegotiations to complete in parallel
+        await Promise.allSettled(renegotiationPromises)
         setVideoEnabled(true)
       } catch (error) {
         console.error('Error accessing camera:', error)
         setError('Camera access denied')
       }
     }
-  }// --- Toggle screen sharing with proper renegotiation ---
+  }// --- Toggle screen sharing with optimized parallel renegotiation ---
   const toggleScreenShare = async () => {
     if (screenSharing) {
       // Turn off screen sharing
@@ -921,8 +1011,9 @@ export default function CallPage() {
         localScreenStreamRef.current = null
       }
       
-      // Remove screen tracks from all peer connections and trigger renegotiation
-      for (const [remote, pc] of Object.entries(peerConnections.current)) {
+      // Remove screen tracks and trigger parallel renegotiation
+      const renegotiationPromises = Object.entries(peerConnections.current).map(async ([remote, pc]) => {
+        // Remove screen tracks
         pc.getSenders().forEach(sender => {
           if (sender.track && sender.track.kind === 'video' && 
               (sender.track.label.toLowerCase().includes('screen') || 
@@ -932,7 +1023,7 @@ export default function CallPage() {
           }
         })
         
-        // Always trigger renegotiation for both sides
+        // Trigger renegotiation
         try {
           const offer = await pc.createOffer()
           await pc.setLocalDescription(offer)
@@ -946,32 +1037,77 @@ export default function CallPage() {
             }))
           }
         } catch (error) {
-          console.error('Error creating screen-off offer:', error)
+          console.error(`Error creating screen-off offer for ${remote}:`, error)
         }
-      }
+      })
       
+      // Wait for all renegotiations to complete
+      await Promise.allSettled(renegotiationPromises)
       setScreenSharing(false)
     } else {
       // Turn on screen sharing
       try {        
         const stream = await navigator.mediaDevices.getDisplayMedia({ 
-          video: true, 
-          audio: false 
+          video: { 
+            width: { ideal: 1920 },
+            height: { ideal: 1080 },
+            frameRate: { ideal: 60 }, // 60fps for smooth screen sharing
+            displaySurface: "monitor" // Optimize for screen sharing
+          }, 
+          audio: true // Include audio if available
         })
         localScreenStreamRef.current = stream
         
         console.log('Screen share started, track label:', stream.getVideoTracks()[0]?.label)
         
-        // Add screen tracks to all peer connections and trigger renegotiation
-        for (const [remote, pc] of Object.entries(peerConnections.current)) {
-          stream.getTracks().forEach(track => {
-            console.log('Adding screen track to peer connection:', track.label)
-            if (!pc.getSenders().some(sender => sender.track === track)) {
-              pc.addTrack(track, stream)
-            }
-          })
+        // Add screen tracks to all peer connections and trigger parallel renegotiation
+        const renegotiationPromises = Object.entries(peerConnections.current).map(async ([remote, pc]) => {
+          const screenTrack = stream.getVideoTracks()[0]
           
-          // Always trigger renegotiation for both sides
+          // Check for existing screen track sender to use replaceTrack if possible
+          const existingScreenSender = pc.getSenders().find(sender => 
+            sender.track && sender.track.kind === 'video' && 
+            (sender.track.label.toLowerCase().includes('screen') || 
+             sender.track.label.toLowerCase().includes('monitor') ||
+             sender.track.label.toLowerCase().includes('display'))
+          )
+          
+          if (existingScreenSender && existingScreenSender.track) {
+            // Replace existing screen track (avoids renegotiation)
+            try {
+              await existingScreenSender.replaceTrack(screenTrack)
+              console.log(`Replaced screen track for ${remote}`)
+              return // No renegotiation needed
+            } catch (error) {
+              console.warn(`Failed to replace screen track for ${remote}, falling back to addTrack:`, error)
+            }
+          }
+          
+          // Add new track if no existing track or replace failed
+          if (!pc.getSenders().some(sender => sender.track === screenTrack)) {
+            pc.addTrack(screenTrack, stream)
+            console.log(`Added screen track to peer connection: ${remote}`)
+          }
+          
+          // Set encoding parameters for screen sharing optimization
+          const sender = pc.getSenders().find(s => s.track === screenTrack)
+          if (sender) {
+            try {
+              const parameters = sender.getParameters()
+              if (!parameters.encodings) {
+                parameters.encodings = [{}]
+              }
+              // Optimize for screen sharing: higher bitrate, lower framerate
+              parameters.encodings[0].maxBitrate = 2000000 // 2 Mbps for screen content
+              parameters.encodings[0].maxFramerate = 60    // 15 fps sufficient for screen share
+              await sender.setParameters(parameters)
+              console.log(`Set screen share encoding parameters for ${remote}`)
+            } catch (error) {
+              console.warn(`Failed to set encoding parameters for ${remote}:`, error)
+            }
+          }
+          
+          // Trigger renegotiation
           try {
             const offer = await pc.createOffer()
             await pc.setLocalDescription(offer)
@@ -985,17 +1121,21 @@ export default function CallPage() {
               }))
             }
           } catch (error) {
-            console.error('Error creating screen offer:', error)
-          }        }
+            console.error(`Error creating screen offer for ${remote}:`, error)
+          }
+        })
+        
+        // Wait for all renegotiations to complete in parallel
+        await Promise.allSettled(renegotiationPromises)
         
         // Auto-stop when user stops sharing via browser UI
-        stream.getVideoTracks()[0].addEventListener('ended', () => {
+        stream.getVideoTracks()[0].addEventListener('ended', async () => {
           console.log('Screen share ended by user')
           setScreenSharing(false)
           localScreenStreamRef.current = null
           
-          // Clean up from peer connections and trigger renegotiation
-          Object.entries(peerConnections.current).forEach(async ([remote, pc]) => {
+          // Clean up from peer connections with parallel renegotiation
+          const cleanupPromises = Object.entries(peerConnections.current).map(async ([remote, pc]) => {
             pc.getSenders().forEach(sender => {
               if (sender.track && sender.track.readyState === 'ended') {
                 pc.removeTrack(sender)
@@ -1016,9 +1156,11 @@ export default function CallPage() {
                 }))
               }
             } catch (error) {
-              console.error('Error creating cleanup offer:', error)
+              console.error(`Error creating cleanup offer for ${remote}:`, error)
             }
           })
+          
+          await Promise.allSettled(cleanupPromises)
         })
           setScreenSharing(true)
       } catch (error) {
@@ -1026,7 +1168,7 @@ export default function CallPage() {
         setError('Screen sharing access denied or not supported')
       }
     }
-  }  // Create arbitrary audio track when no microphone access
+  }// Create arbitrary audio track when no microphone access
   const createArbitraryAudioTrack = (): MediaStream => {
     console.log('Creating arbitrary audio track for WebRTC connection')
     
