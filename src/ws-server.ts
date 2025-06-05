@@ -627,11 +627,17 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
           owner: rooms[roomId].owner, 
           users: usersArr 
         };
-        await broadcastToRoom(roomId, 'roomInfo', { room: roomInfo });} else if (msg.type === 'sendMessage') {
+        await broadcastToRoom(roomId, 'roomInfo', { room: roomInfo });      } else if (msg.type === 'sendMessage') {
         const { roomId, username, text } = msg;
         const message = { username, text, timestamp: Date.now() };
         
-        if (rooms[roomId]) {          // Check if this is an AI command
+        if (rooms[roomId]) {
+          // Check if user is actually in the room's participant list
+          if (!rooms[roomId].users.has(username)) {
+            console.log(`[SECURITY] User ${username} attempted to send message to room ${roomId} without being a participant`);
+            ws.send(JSON.stringify({ type: 'error', error: 'You must join the room before sending messages.' }));
+            return;
+          }// Check if this is an AI command
           if (text.trim().startsWith('!')) {
             const aiPrompt = text.trim().substring(1).trim(); // Remove '!' prefix
             
@@ -678,6 +684,12 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
         const { roomId, username, fileName, fileType, fileData, timestamp, asAudio } = msg;        console.log('[ws-server] Received sendFile:', { roomId, username, fileName, fileType, timestamp, fileDataLength: fileData?.length });
         const message = { username, fileName, fileType, fileData, timestamp, type: 'file', ...(asAudio ? { asAudio: true } : {}) };
         if (rooms[roomId]) {
+          // Check if user is actually in the room's participant list
+          if (!rooms[roomId].users.has(username)) {
+            console.log(`[SECURITY] User ${username} attempted to send file to room ${roomId} without being a participant`);
+            ws.send(JSON.stringify({ type: 'error', error: 'You must join the room before sending files.' }));
+            return;
+          }
           console.log('[ws-server] Broadcasting file message to room:', roomId);
           await broadcastToRoom(roomId, 'newMessage', { message });
           
