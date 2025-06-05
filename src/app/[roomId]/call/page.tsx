@@ -794,7 +794,7 @@ export default function CallPage() {
           facingMode: newCamera,
           width: { ideal: 1920, min: 1280 },
           height: { ideal: 1080, min: 720 },
-          frameRate: { ideal: 60, min: 30 }, // 60fps for streaming quality
+          frameRate: { ideal: 60 }, // 60fps for streaming quality
           aspectRatio: { ideal: 16/9 },
         }, 
         audio: false 
@@ -925,7 +925,7 @@ export default function CallPage() {
             facingMode: currentCamera,
             width: { ideal: 1920, min: 1280 },
             height: { ideal: 1080, min: 720 },
-            frameRate: { ideal: 60, min: 30 }, // 60fps for streaming platform quality
+            frameRate: { ideal: 60 }, // 60fps for streaming platform quality
             aspectRatio: { ideal: 16/9 }
           }, 
           audio: false 
