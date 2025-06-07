@@ -5,7 +5,6 @@ import { useParams, useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import { ArrowLeft, Phone, Mic, MicOff, Volume2, Video, VideoOff, Monitor, MonitorOff, RotateCcw, FlipHorizontal, RefreshCw, Maximize } from "lucide-react"
 import { NotificationBell } from "@/components/notification-bell"
-import { VideoFullscreenModal } from "@/components/video-fullscreen-modal"
 
 // Extend Window interface for webkit AudioContext and fullscreen APIs
 declare global {
@@ -15,16 +14,6 @@ declare global {
   
   interface HTMLElement {
     webkitRequestFullscreen?: () => Promise<void>
-    webkitRequestFullScreen?: () => Promise<void>
-    mozRequestFullScreen?: () => Promise<void>
-    msRequestFullscreen?: () => Promise<void>
-  }
-  
-  interface HTMLVideoElement {
-    webkitEnterFullscreen?: () => void
-    webkitExitFullscreen?: () => void
-    webkitRequestFullscreen?: () => Promise<void>
-    webkitRequestFullScreen?: () => Promise<void>
     mozRequestFullScreen?: () => Promise<void>
     msRequestFullscreen?: () => Promise<void>
   }
@@ -73,24 +62,12 @@ export default function CallPage() {
   const [peerMuted, setPeerMuted] = useState<Record<string, boolean>>({}) // <--- NEW: track muted state for each remote peer
   const [speakingPeers, setSpeakingPeers] = useState<Record<string, boolean>>({})
   const [localSpeaking, setLocalSpeaking] = useState(false)
-    // Add state for camera switching
+  
+  // Add state for camera switching
   const [currentCamera, setCurrentCamera] = useState<'user' | 'environment'>('user') // 'user' = front, 'environment' = back
   
   // Add state for camera mirror functionality
   const [isMirrored, setIsMirrored] = useState(true) // Default to mirrored for front camera
-
-  // Add state for fullscreen modal
-  const [fullscreenModal, setFullscreenModal] = useState<{
-    open: boolean
-    participant: string
-    isScreenShare: boolean
-    videoElement: HTMLVideoElement | null
-  }>({
-    open: false,
-    participant: '',
-    isScreenShare: false,
-    videoElement: null
-  })
 
   const analyserRef = useRef<AnalyserNode | null>(null)
   const localAudioContextRef = useRef<AudioContext | null>(null)  // For each participant, create refs for audio, video, and screen
@@ -810,54 +787,20 @@ export default function CallPage() {
       ...prev,
       [peer]: !prev[peer]
     }))
-  }  // --- Fullscreen controls for participant videos ---
+  }
+  // --- Fullscreen controls for participant videos ---
   const enterFullscreen = (peer: string) => {
     const element = remoteScreenRefs.current[peer]?.current || remoteVideoRefs.current[peer]?.current
-    if (!element) return
-
-    const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)
-    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent)
-    const isScreenShare = !!remoteScreenRefs.current[peer]?.current
-
-    // Try native fullscreen first (desktop and some mobile browsers)
-    if (!isMobile) {
-      const requestFullscreen = element.requestFullscreen ||
-                               element.webkitRequestFullscreen ||
-                               element.webkitRequestFullScreen ||
-                               element.mozRequestFullScreen ||
-                               element.msRequestFullscreen
-
-      if (requestFullscreen) {
-        try {
-          requestFullscreen.call(element)
-          return
-        } catch (error) {
-          console.error('Native fullscreen failed:', error)
-        }
+    if (element) {
+      if (element.requestFullscreen) {
+        element.requestFullscreen()
+      } else if (element.webkitRequestFullscreen) {
+        element.webkitRequestFullscreen()
+      } else if (element.mozRequestFullScreen) {
+        element.mozRequestFullScreen()
+      } else if (element.msRequestFullscreen) {
+        element.msRequestFullscreen()
       }
-    }
-
-    // For iOS, try native video fullscreen first
-    if (isIOS && 'webkitEnterFullscreen' in element && typeof element.webkitEnterFullscreen === 'function') {
-      try {
-        element.webkitEnterFullscreen()
-        return
-      } catch (error) {
-        console.log('iOS webkitEnterFullscreen failed:', error)
-      }
-    }
-
-    // Fallback to our custom modal (mobile devices or when native fullscreen fails)
-    setFullscreenModal({
-      open: true,
-      participant: peer,
-      isScreenShare,
-      videoElement: element
-    })
-
-    // Haptic feedback on mobile
-    if (isMobile && 'vibrate' in navigator) {
-      navigator.vibrate(50)
     }
   }
 
@@ -2060,21 +2003,16 @@ export default function CallPage() {
                             {peer}
                           </div>
                           
-                          <div className="flex items-center gap-1">                            {/* Fullscreen Button */}
+                          <div className="flex items-center gap-1">
+                            {/* Fullscreen Button */}
                             <Button
                               size="sm"
                               variant="ghost"
                               onClick={(e) => {
                                 e.stopPropagation()
-                                // Add visual feedback for mobile
-                                const button = e.currentTarget
-                                button.style.transform = 'scale(0.95)'
-                                setTimeout(() => {
-                                  button.style.transform = 'scale(1)'
-                                }, 100)
                                 enterFullscreen(peer)
                               }}
-                              className="p-1 h-6 w-6 sm:h-7 sm:w-7 transition-transform active:scale-95"
+                              className="p-1 h-6 w-6 sm:h-7 sm:w-7"
                               title={`Enter fullscreen for ${peer}`}
                             >
                               <Maximize className="h-2.5 w-2.5 sm:h-3 sm:w-3" />
@@ -2119,22 +2057,14 @@ export default function CallPage() {
                 )}
               </div>
             </div>
-              {/* Hidden local audio element */}
+            
+            {/* Hidden local audio element */}
             {!actualIsListener && (
               <audio ref={localAudioRef} autoPlay controls={false} muted={true} className="hidden" />
             )}
           </div>
         )}
       </main>
-
-      {/* Video Fullscreen Modal */}
-      <VideoFullscreenModal
-        open={fullscreenModal.open}
-        onOpenChange={(open) => setFullscreenModal(prev => ({ ...prev, open }))}
-        videoElement={fullscreenModal.videoElement}
-        participantName={fullscreenModal.participant}
-        isScreenShare={fullscreenModal.isScreenShare}
-      />
     </div>
   )
 }
