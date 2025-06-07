@@ -14,6 +14,16 @@ declare global {
   
   interface HTMLElement {
     webkitRequestFullscreen?: () => Promise<void>
+    webkitRequestFullScreen?: () => Promise<void>
+    mozRequestFullScreen?: () => Promise<void>
+    msRequestFullscreen?: () => Promise<void>
+  }
+  
+  interface HTMLVideoElement {
+    webkitEnterFullscreen?: () => void
+    webkitExitFullscreen?: () => void
+    webkitRequestFullscreen?: () => Promise<void>
+    webkitRequestFullScreen?: () => Promise<void>
     mozRequestFullScreen?: () => Promise<void>
     msRequestFullscreen?: () => Promise<void>
   }
@@ -787,20 +797,138 @@ export default function CallPage() {
       ...prev,
       [peer]: !prev[peer]
     }))
-  }
-  // --- Fullscreen controls for participant videos ---
+  }  // --- Fullscreen controls for participant videos ---
   const enterFullscreen = (peer: string) => {
     const element = remoteScreenRefs.current[peer]?.current || remoteVideoRefs.current[peer]?.current
     if (element) {
-      if (element.requestFullscreen) {
-        element.requestFullscreen()
-      } else if (element.webkitRequestFullscreen) {
-        element.webkitRequestFullscreen()
-      } else if (element.mozRequestFullScreen) {
-        element.mozRequestFullScreen()
-      } else if (element.msRequestFullscreen) {
-        element.msRequestFullscreen()
+      // For mobile devices, especially iOS, we need to handle fullscreen differently
+      const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)
+      const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent)
+      
+      if (isIOS) {
+        // iOS Safari: Use webkitEnterFullscreen if available (for video elements)
+        if ('webkitEnterFullscreen' in element && typeof element.webkitEnterFullscreen === 'function') {
+          try {
+            element.webkitEnterFullscreen()
+            return
+          } catch (error) {
+            console.log('iOS webkitEnterFullscreen failed:', error)
+          }
+        }
+        
+        // Fallback: Try to trigger native video controls fullscreen
+        if (element.tagName === 'VIDEO') {
+          element.setAttribute('controls', 'true')
+          element.setAttribute('playsinline', 'false')
+          element.play()
+          // Remove controls after a delay
+          setTimeout(() => {
+            element.removeAttribute('controls')
+            element.setAttribute('playsinline', 'true')
+          }, 100)
+          return
+        }
       }
+      
+      // Standard fullscreen API with all vendor prefixes
+      const requestFullscreen = element.requestFullscreen ||
+                               element.webkitRequestFullscreen ||
+                               element.webkitRequestFullScreen ||
+                               element.mozRequestFullScreen ||
+                               element.msRequestFullscreen
+      
+      if (requestFullscreen) {
+        try {
+          requestFullscreen.call(element)
+        } catch (error) {
+          console.error('Fullscreen request failed:', error)
+          
+          // Mobile fallback: Create a modal-like fullscreen experience
+          if (isMobile) {
+            createMobileFullscreenModal(element, peer)
+          }
+        }
+      } else if (isMobile) {
+        // No fullscreen API support - create custom fullscreen modal
+        createMobileFullscreenModal(element, peer)
+      }
+    }
+  }
+  // Create a custom fullscreen modal for mobile devices
+  const createMobileFullscreenModal = (videoElement: HTMLVideoElement, peer: string) => {
+    // Create fullscreen overlay
+    const overlay = document.createElement('div')
+    overlay.className = 'mobile-fullscreen-overlay'
+    
+    // Create video clone
+    const videoClone = document.createElement('video')
+    videoClone.srcObject = videoElement.srcObject
+    videoClone.autoplay = true
+    videoClone.playsInline = true
+    videoClone.muted = videoElement.muted
+    videoClone.className = 'mobile-fullscreen-video'
+    
+    // Create close button
+    const closeButton = document.createElement('button')
+    closeButton.innerHTML = '✕'
+    closeButton.className = 'mobile-fullscreen-close'
+    closeButton.setAttribute('aria-label', 'Exit fullscreen')
+    
+    // Create participant label
+    const label = document.createElement('div')
+    label.textContent = peer
+    label.className = 'mobile-fullscreen-label'
+    
+    // Close function
+    const closeFullscreen = () => {
+      if (overlay.parentNode) {
+        document.body.removeChild(overlay)
+      }
+      document.body.style.overflow = ''
+      document.removeEventListener('keydown', handleEscape)
+    }
+    
+    // Event listeners
+    closeButton.addEventListener('click', closeFullscreen)
+    closeButton.addEventListener('touchend', closeFullscreen)
+    
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) {
+        closeFullscreen()
+      }
+    })
+    
+    // Handle escape key and back button on mobile
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        closeFullscreen()
+      }
+    }
+    document.addEventListener('keydown', handleEscape)
+    
+    // Handle mobile back button (Android)
+    window.addEventListener('popstate', closeFullscreen, { once: true })
+    
+    // Prevent body scroll
+    document.body.style.overflow = 'hidden'
+    
+    // Assemble and show
+    overlay.appendChild(videoClone)
+    overlay.appendChild(closeButton)
+    overlay.appendChild(label)
+    document.body.appendChild(overlay)
+    
+    // Auto-remove if video stream ends
+    if (videoElement.srcObject) {
+      const stream = videoElement.srcObject as MediaStream
+      stream.getTracks().forEach(track => {
+        track.addEventListener('ended', closeFullscreen)
+      })
+    }
+    
+    // Trigger a small haptic feedback on supported devices
+    if ('vibrate' in navigator) {
+      navigator.vibrate(50)
     }
   }
 
@@ -2003,16 +2131,21 @@ export default function CallPage() {
                             {peer}
                           </div>
                           
-                          <div className="flex items-center gap-1">
-                            {/* Fullscreen Button */}
+                          <div className="flex items-center gap-1">                            {/* Fullscreen Button */}
                             <Button
                               size="sm"
                               variant="ghost"
                               onClick={(e) => {
                                 e.stopPropagation()
+                                // Add visual feedback for mobile
+                                const button = e.currentTarget
+                                button.style.transform = 'scale(0.95)'
+                                setTimeout(() => {
+                                  button.style.transform = 'scale(1)'
+                                }, 100)
                                 enterFullscreen(peer)
                               }}
-                              className="p-1 h-6 w-6 sm:h-7 sm:w-7"
+                              className="p-1 h-6 w-6 sm:h-7 sm:w-7 transition-transform active:scale-95"
                               title={`Enter fullscreen for ${peer}`}
                             >
                               <Maximize className="h-2.5 w-2.5 sm:h-3 sm:w-3" />
