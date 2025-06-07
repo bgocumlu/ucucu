@@ -5,6 +5,7 @@ import { useParams, useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import { ArrowLeft, Phone, Mic, MicOff, Volume2, Video, VideoOff, Monitor, MonitorOff, RotateCcw, FlipHorizontal, RefreshCw, Maximize } from "lucide-react"
 import { NotificationBell } from "@/components/notification-bell"
+import { VideoFullscreenModal } from "@/components/video-fullscreen-modal"
 
 // Extend Window interface for webkit AudioContext and fullscreen APIs
 declare global {
@@ -72,12 +73,24 @@ export default function CallPage() {
   const [peerMuted, setPeerMuted] = useState<Record<string, boolean>>({}) // <--- NEW: track muted state for each remote peer
   const [speakingPeers, setSpeakingPeers] = useState<Record<string, boolean>>({})
   const [localSpeaking, setLocalSpeaking] = useState(false)
-  
-  // Add state for camera switching
+    // Add state for camera switching
   const [currentCamera, setCurrentCamera] = useState<'user' | 'environment'>('user') // 'user' = front, 'environment' = back
   
   // Add state for camera mirror functionality
   const [isMirrored, setIsMirrored] = useState(true) // Default to mirrored for front camera
+
+  // Add state for fullscreen modal
+  const [fullscreenModal, setFullscreenModal] = useState<{
+    open: boolean
+    participant: string
+    isScreenShare: boolean
+    videoElement: HTMLVideoElement | null
+  }>({
+    open: false,
+    participant: '',
+    isScreenShare: false,
+    videoElement: null
+  })
 
   const analyserRef = useRef<AnalyserNode | null>(null)
   const localAudioContextRef = useRef<AudioContext | null>(null)  // For each participant, create refs for audio, video, and screen
@@ -800,134 +813,50 @@ export default function CallPage() {
   }  // --- Fullscreen controls for participant videos ---
   const enterFullscreen = (peer: string) => {
     const element = remoteScreenRefs.current[peer]?.current || remoteVideoRefs.current[peer]?.current
-    if (element) {
-      // For mobile devices, especially iOS, we need to handle fullscreen differently
-      const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)
-      const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent)
-      
-      if (isIOS) {
-        // iOS Safari: Use webkitEnterFullscreen if available (for video elements)
-        if ('webkitEnterFullscreen' in element && typeof element.webkitEnterFullscreen === 'function') {
-          try {
-            element.webkitEnterFullscreen()
-            return
-          } catch (error) {
-            console.log('iOS webkitEnterFullscreen failed:', error)
-          }
-        }
-        
-        // Fallback: Try to trigger native video controls fullscreen
-        if (element.tagName === 'VIDEO') {
-          element.setAttribute('controls', 'true')
-          element.setAttribute('playsinline', 'false')
-          element.play()
-          // Remove controls after a delay
-          setTimeout(() => {
-            element.removeAttribute('controls')
-            element.setAttribute('playsinline', 'true')
-          }, 100)
-          return
-        }
-      }
-      
-      // Standard fullscreen API with all vendor prefixes
+    if (!element) return
+
+    const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)
+    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent)
+    const isScreenShare = !!remoteScreenRefs.current[peer]?.current
+
+    // Try native fullscreen first (desktop and some mobile browsers)
+    if (!isMobile) {
       const requestFullscreen = element.requestFullscreen ||
                                element.webkitRequestFullscreen ||
                                element.webkitRequestFullScreen ||
                                element.mozRequestFullScreen ||
                                element.msRequestFullscreen
-      
+
       if (requestFullscreen) {
         try {
           requestFullscreen.call(element)
+          return
         } catch (error) {
-          console.error('Fullscreen request failed:', error)
-          
-          // Mobile fallback: Create a modal-like fullscreen experience
-          if (isMobile) {
-            createMobileFullscreenModal(element, peer)
-          }
+          console.error('Native fullscreen failed:', error)
         }
-      } else if (isMobile) {
-        // No fullscreen API support - create custom fullscreen modal
-        createMobileFullscreenModal(element, peer)
       }
     }
-  }
-  // Create a custom fullscreen modal for mobile devices
-  const createMobileFullscreenModal = (videoElement: HTMLVideoElement, peer: string) => {
-    // Create fullscreen overlay
-    const overlay = document.createElement('div')
-    overlay.className = 'mobile-fullscreen-overlay'
-    
-    // Create video clone
-    const videoClone = document.createElement('video')
-    videoClone.srcObject = videoElement.srcObject
-    videoClone.autoplay = true
-    videoClone.playsInline = true
-    videoClone.muted = videoElement.muted
-    videoClone.className = 'mobile-fullscreen-video'
-    
-    // Create close button
-    const closeButton = document.createElement('button')
-    closeButton.innerHTML = '✕'
-    closeButton.className = 'mobile-fullscreen-close'
-    closeButton.setAttribute('aria-label', 'Exit fullscreen')
-    
-    // Create participant label
-    const label = document.createElement('div')
-    label.textContent = peer
-    label.className = 'mobile-fullscreen-label'
-    
-    // Close function
-    const closeFullscreen = () => {
-      if (overlay.parentNode) {
-        document.body.removeChild(overlay)
+
+    // For iOS, try native video fullscreen first
+    if (isIOS && 'webkitEnterFullscreen' in element && typeof element.webkitEnterFullscreen === 'function') {
+      try {
+        element.webkitEnterFullscreen()
+        return
+      } catch (error) {
+        console.log('iOS webkitEnterFullscreen failed:', error)
       }
-      document.body.style.overflow = ''
-      document.removeEventListener('keydown', handleEscape)
     }
-    
-    // Event listeners
-    closeButton.addEventListener('click', closeFullscreen)
-    closeButton.addEventListener('touchend', closeFullscreen)
-    
-    overlay.addEventListener('click', (e) => {
-      if (e.target === overlay) {
-        closeFullscreen()
-      }
+
+    // Fallback to our custom modal (mobile devices or when native fullscreen fails)
+    setFullscreenModal({
+      open: true,
+      participant: peer,
+      isScreenShare,
+      videoElement: element
     })
-    
-    // Handle escape key and back button on mobile
-    const handleEscape = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        closeFullscreen()
-      }
-    }
-    document.addEventListener('keydown', handleEscape)
-    
-    // Handle mobile back button (Android)
-    window.addEventListener('popstate', closeFullscreen, { once: true })
-    
-    // Prevent body scroll
-    document.body.style.overflow = 'hidden'
-    
-    // Assemble and show
-    overlay.appendChild(videoClone)
-    overlay.appendChild(closeButton)
-    overlay.appendChild(label)
-    document.body.appendChild(overlay)
-    
-    // Auto-remove if video stream ends
-    if (videoElement.srcObject) {
-      const stream = videoElement.srcObject as MediaStream
-      stream.getTracks().forEach(track => {
-        track.addEventListener('ended', closeFullscreen)
-      })
-    }
-    
-    // Trigger a small haptic feedback on supported devices
-    if ('vibrate' in navigator) {
+
+    // Haptic feedback on mobile
+    if (isMobile && 'vibrate' in navigator) {
       navigator.vibrate(50)
     }
   }
@@ -2190,14 +2119,22 @@ export default function CallPage() {
                 )}
               </div>
             </div>
-            
-            {/* Hidden local audio element */}
+              {/* Hidden local audio element */}
             {!actualIsListener && (
               <audio ref={localAudioRef} autoPlay controls={false} muted={true} className="hidden" />
             )}
           </div>
         )}
       </main>
+
+      {/* Video Fullscreen Modal */}
+      <VideoFullscreenModal
+        open={fullscreenModal.open}
+        onOpenChange={(open) => setFullscreenModal(prev => ({ ...prev, open }))}
+        videoElement={fullscreenModal.videoElement}
+        participantName={fullscreenModal.participant}
+        isScreenShare={fullscreenModal.isScreenShare}
+      />
     </div>
   )
 }

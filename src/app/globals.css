@@ -235,3 +235,46 @@ body {
     font-size: 12px !important;
   }
 }
+
+/* Dialog-based fullscreen modal styles */
+.fullscreen-modal-content {
+  /* Override Radix Dialog default styles for true fullscreen */
+  position: fixed !important;
+  top: 0 !important;
+  left: 0 !important;
+  right: 0 !important;
+  bottom: 0 !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  max-width: none !important;
+  max-height: none !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: none !important;
+  border-radius: 0 !important;
+  transform: none !important;
+  background: black !important;
+  z-index: 100 !important;
+}
+
+/* Ensure the overlay doesn't interfere */
+[data-radix-dialog-overlay] {
+  background: transparent !important;
+}
+
+/* Fullscreen modal specific overrides */
+.fullscreen-modal-content video {
+  width: 100% !important;
+  height: 100% !important;
+  object-fit: contain !important;
+}
+
+/* Safe area support for devices with notches */
+@supports (padding: env(safe-area-inset-top)) {
+  .fullscreen-modal-content .absolute.top-4 {
+    top: max(1rem, env(safe-area-inset-top)) !important;
+  }
+  .fullscreen-modal-content .absolute.bottom-4 {
+    bottom: max(1rem, env(safe-area-inset-bottom)) !important;
+  }
+}
