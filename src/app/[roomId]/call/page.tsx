@@ -14,16 +14,6 @@ declare global {
   
   interface HTMLElement {
     webkitRequestFullscreen?: () => Promise<void>
-    webkitRequestFullScreen?: () => Promise<void>
-    mozRequestFullScreen?: () => Promise<void>
-    msRequestFullscreen?: () => Promise<void>
-  }
-  
-  interface HTMLVideoElement {
-    webkitEnterFullscreen?: () => void
-    webkitExitFullscreen?: () => void
-    webkitRequestFullscreen?: () => Promise<void>
-    webkitRequestFullScreen?: () => Promise<void>
     mozRequestFullScreen?: () => Promise<void>
     msRequestFullscreen?: () => Promise<void>
   }
@@ -797,93 +787,22 @@ export default function CallPage() {
       ...prev,
       [peer]: !prev[peer]
     }))
-  }  // --- Fullscreen controls for participant videos ---
-  const enterFullscreen = async (peer: string) => {
+  }
+  // --- Fullscreen controls for participant videos ---
+  const enterFullscreen = (peer: string) => {
     const element = remoteScreenRefs.current[peer]?.current || remoteVideoRefs.current[peer]?.current
-    if (!element) return
-
-    // Mobile device detection
-    const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)
-    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent)
-    const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent)
-    
-    console.log('Attempting fullscreen for:', peer, { isMobile, isIOS, isSafari })
-
-    // iOS Safari special handling - use webkitEnterFullscreen for video elements
-    if (isIOS && element.tagName === 'VIDEO') {
-      try {
-        // First try the iOS-specific video fullscreen method
-        if ('webkitEnterFullscreen' in element && typeof element.webkitEnterFullscreen === 'function') {
-          console.log('Using iOS webkitEnterFullscreen')
-          element.webkitEnterFullscreen()
-          return
-        }
-        
-        // Alternative iOS approach: enable native controls temporarily
-        const originalControls = element.getAttribute('controls')
-        const originalPlaysInline = element.getAttribute('playsinline')
-        
-        element.setAttribute('controls', 'true')
-        element.removeAttribute('playsinline')
-        
-        // Try to trigger the fullscreen via native controls
-        await element.play()
-        
-        // Restore original attributes after a delay
-        setTimeout(() => {
-          if (originalControls === null) {
-            element.removeAttribute('controls')
-          } else {
-            element.setAttribute('controls', originalControls)
-          }
-          
-          if (originalPlaysInline !== null) {
-            element.setAttribute('playsinline', originalPlaysInline)
-          }
-        }, 1000)
-        
-        return
-      } catch (error) {
-        console.warn('iOS fullscreen attempt failed:', error)
-        // Continue to standard fullscreen API fallback
+    if (element) {
+      if (element.requestFullscreen) {
+        element.requestFullscreen()
+      } else if (element.webkitRequestFullscreen) {
+        element.webkitRequestFullscreen()
+      } else if (element.mozRequestFullScreen) {
+        element.mozRequestFullScreen()
+      } else if (element.msRequestFullscreen) {
+        element.msRequestFullscreen()
       }
     }
-
-    // Standard fullscreen API with comprehensive vendor prefix support
-    try {
-      let fullscreenPromise: Promise<void> | undefined
-
-      if (element.requestFullscreen) {
-        console.log('Using standard requestFullscreen')
-        fullscreenPromise = element.requestFullscreen()
-      } else if (element.webkitRequestFullscreen) {
-        console.log('Using webkitRequestFullscreen')
-        fullscreenPromise = element.webkitRequestFullscreen()
-      } else if (element.webkitRequestFullScreen) {
-        console.log('Using webkitRequestFullScreen')
-        fullscreenPromise = element.webkitRequestFullScreen()
-      } else if (element.mozRequestFullScreen) {
-        console.log('Using mozRequestFullScreen')
-        fullscreenPromise = element.mozRequestFullScreen()
-      } else if (element.msRequestFullscreen) {
-        console.log('Using msRequestFullscreen')
-        fullscreenPromise = element.msRequestFullscreen()
-      }
-
-      if (fullscreenPromise) {
-        await fullscreenPromise
-        console.log('Fullscreen request successful')
-        
-        // Add haptic feedback on mobile devices
-        if (isMobile && 'vibrate' in navigator) {
-          navigator.vibrate(50)
-        }
-      } else {
-        throw new Error('No fullscreen API available')
-      }    } catch (error) {
-      console.error('Standard fullscreen failed:', error)
-      console.warn('Fullscreen not supported on this device/browser')
-    }  }
+  }
 
   // Listen for fullscreen changes (when user exits fullscreen with ESC)
   useEffect(() => {
