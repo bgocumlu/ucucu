@@ -108,6 +108,42 @@ export default function RootLayout({
           href="/icons/apple-splash-landscape.png"
           media="(device-width: 1024px) and (device-height: 1366px) and (-webkit-device-pixel-ratio: 2) and (orientation: landscape)"
         />
+        
+        {/* iPhone 16 Pro */}
+        <link 
+          rel="apple-touch-startup-image" 
+          href="/icons/apple-splash-portrait.png"
+          media="(device-width: 402px) and (device-height: 874px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)"
+        />
+        <link 
+          rel="apple-touch-startup-image" 
+          href="/icons/apple-splash-landscape.png"
+          media="(device-width: 402px) and (device-height: 874px) and (-webkit-device-pixel-ratio: 3) and (orientation: landscape)"
+        />
+        
+        {/* iPhone 16 Pro Max */}
+        <link 
+          rel="apple-touch-startup-image" 
+          href="/icons/apple-splash-portrait.png"
+          media="(device-width: 440px) and (device-height: 956px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)"
+        />
+        <link 
+          rel="apple-touch-startup-image" 
+          href="/icons/apple-splash-landscape.png"
+          media="(device-width: 440px) and (device-height: 956px) and (-webkit-device-pixel-ratio: 3) and (orientation: landscape)"
+        />
+        
+        {/* Generic fallbacks for unmatched devices */}
+        <link 
+          rel="apple-touch-startup-image" 
+          href="/icons/apple-splash-portrait.png"
+          media="(orientation: portrait)"
+        />
+        <link 
+          rel="apple-touch-startup-image" 
+          href="/icons/apple-splash-landscape.png"
+          media="(orientation: landscape)"
+        />
       </head>
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
