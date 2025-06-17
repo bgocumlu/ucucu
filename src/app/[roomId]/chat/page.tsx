@@ -48,6 +48,18 @@ export default function ChatPage() {
   const [isAtBottom, setIsAtBottom] = useState(true)
   const [isRecording, setIsRecording] = useState(false)
   const [isSendingFiles, setIsSendingFiles] = useState(false)
+  const [fileUploadProgress, setFileUploadProgress] = useState<{
+    current: number;
+    total: number;
+    fileName: string;
+  } | null>(null)
+  const [usersUploadingFiles, setUsersUploadingFiles] = useState<Set<string>>(new Set())
+  const [fileDeliveryStatus, setFileDeliveryStatus] = useState<Map<string, {
+    fileName: string;
+    sentAt: number;
+    deliveredTo: Set<string>;
+    totalRecipients: number;
+  }>>(new Map())
   const [showLeaveDialog, setShowLeaveDialog] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const chatContainerRef = useRef<HTMLDivElement>(null)
@@ -102,36 +114,73 @@ export default function ChatPage() {
     }    if (lastMessage.type === "newMessage" && lastMessage.roomId === roomId) {
       type IncomingMsg =
         | { username: string; text: string; timestamp: number; system?: boolean; isAI?: boolean; isTyping?: boolean; type?: undefined }
-        | { username: string; fileName: string; fileType: string; fileData: string; timestamp: number; type: "file"; asAudio?: boolean };
+        | { username: string; fileName: string; fileType: string; fileData: string; timestamp: number; type: "file"; asAudio?: boolean }
+        | { username: string; type: "fileUploadStart" | "fileUploadEnd"; fileName?: string; timestamp: number };
+      
       const msg = lastMessage.message as IncomingMsg;
-      if (msg.type === "file" && (msg.asAudio || (msg.fileType && msg.fileType.startsWith('audio/')))) {
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: (msg.timestamp || Date.now()).toString(),
-            type: "audio",
-            username: msg.username,
-            content: msg.fileName || "Voice message",
-            timestamp: new Date(msg.timestamp),
-            isOwn: msg.username === currentUser,
-            fileData: msg.fileData,
+      
+      // Handle file upload status messages
+      if (msg.type === "fileUploadStart") {
+        setUsersUploadingFiles(prev => new Set([...prev, msg.username]));
+      } else if (msg.type === "fileUploadEnd") {
+        setUsersUploadingFiles(prev => {
+          const newSet = new Set(prev);
+          newSet.delete(msg.username);
+          return newSet;
+        });      } else if (msg.type === "file" && (msg.asAudio || (msg.fileType && msg.fileType.startsWith('audio/')))) {
+        // Only add if it's not from current user (we already added optimistically)
+        if (msg.username !== currentUser) {
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `${msg.timestamp || Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+              type: "audio",
+              username: msg.username,
+              content: msg.fileName || "Voice message",
+              timestamp: new Date(msg.timestamp),
+              isOwn: false,
+              fileData: msg.fileData,
+              fileName: msg.fileName,
+            },
+          ]);
+            // Send confirmation that file was received
+          send({
+            type: "fileReceived",
+            roomId,
             fileName: msg.fileName,
-          },
-        ]);
+            senderId: msg.username,
+            username: currentUser,
+            timestamp: msg.timestamp
+          });
+        }
       } else if (msg.type === "file") {
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: (msg.timestamp || Date.now()).toString(),
-            type: "file",
-            username: msg.username,
-            content: msg.fileName || "File",
-            timestamp: new Date(msg.timestamp),
-            isOwn: msg.username === currentUser,
-            fileData: msg.fileData,
+        // Only add if it's not from current user (we already added optimistically)
+        if (msg.username !== currentUser) {
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `${msg.timestamp || Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+              type: "file",
+              username: msg.username,
+              content: msg.fileName || "File",
+              timestamp: new Date(msg.timestamp),
+              isOwn: false,
+              fileData: msg.fileData,
+              fileName: msg.fileName,
+            },
+          ]);
+          
+          // Send confirmation that file was received
+          send({
+            type: "fileReceived",
+            roomId,
             fileName: msg.fileName,
-          },
-        ]);      } else {
+            senderId: msg.username,
+            username: currentUser,
+            timestamp: msg.timestamp
+          });
+        }
+      } else {
         // Handle regular text messages (including AI messages)
         const msg = lastMessage.message as { 
           username: string; 
@@ -149,7 +198,7 @@ export default function ChatPage() {
             return [
               ...withoutTyping,
               {
-                id: `typing-${msg.timestamp}`,
+                id: `typing-${msg.timestamp}-${Math.random().toString(36).substr(2, 9)}`,
                 type: "text" as const,
                 username: msg.username,
                 content: msg.text,
@@ -167,7 +216,7 @@ export default function ChatPage() {
             return [
               ...withoutTyping,
               {
-                id: msg.timestamp.toString(),
+                id: `${msg.timestamp}-${Math.random().toString(36).substr(2, 9)}`,
                 type: msg.system ? "system" : "text",
                 username: msg.username,
                 content: msg.text,
@@ -182,7 +231,7 @@ export default function ChatPage() {
           setMessages((prev) => [
             ...prev,
             {
-              id: msg.timestamp.toString(),
+              id: `${msg.timestamp}-${Math.random().toString(36).substr(2, 9)}`,
               type: msg.system ? "system" : "text",
               username: msg.username,
               content: msg.text,
@@ -241,16 +290,65 @@ export default function ChatPage() {
             username,
             isOwner: found.owner ? username === found.owner : false,
           }))
-        )
+        )      }
+    }    // Handle file upload acknowledgments
+    if (lastMessage.type === "fileUploadAck") {
+      const { fileName, success } = lastMessage;
+      
+      if (success) {
+        console.log(`[FILE UPLOAD] Successfully uploaded: ${fileName}`);
+      } else {
+        console.error(`[FILE UPLOAD] Failed to upload: ${fileName}`);
       }
-    }  }, [lastMessage, roomId, currentUser, pendingUpdate])
-
+    }    // Handle file delivery confirmations
+    if (lastMessage.type === "fileDeliveryConfirmed") {
+      const confirmationData = lastMessage as unknown as {
+        fileName: string;
+        receiverUsername: string;
+        timestamp: number;
+        originalTimestamp: number;
+      };
+      console.log(`[FILE DELIVERY] ✅ ${confirmationData.fileName} confirmed delivered to ${confirmationData.receiverUsername} at ${new Date(confirmationData.timestamp).toISOString()}`);
+      
+      // Update delivery tracking
+      setFileDeliveryStatus(prev => {
+        const updated = new Map(prev);
+        const key = `${confirmationData.fileName}-${confirmationData.originalTimestamp}`;
+        const existing = updated.get(key);
+        if (existing) {
+          existing.deliveredTo.add(confirmationData.receiverUsername);
+          updated.set(key, existing);
+          
+          // Log progress
+          console.log(`[FILE DELIVERY] ${confirmationData.fileName}: ${existing.deliveredTo.size}/${existing.totalRecipients} recipients confirmed`);
+        }
+        return updated;
+      });
+    }
+  }, [lastMessage, roomId, currentUser, pendingUpdate, send])
   // Auto-scroll to bottom
   useEffect(() => {
     if (isAtBottom) {
       messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
     }
   }, [messages, isAtBottom])
+
+  // Monitor file delivery status and alert on potential issues
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const now = Date.now();
+      const DELIVERY_TIMEOUT = 10000; // 10 seconds
+      
+      fileDeliveryStatus.forEach((status, key) => {
+        const timeSinceSent = now - status.sentAt;
+        if (timeSinceSent > DELIVERY_TIMEOUT && status.deliveredTo.size < status.totalRecipients) {
+          console.warn(`[FILE DELIVERY] ⚠️ ${status.fileName} may not have reached all recipients (${status.deliveredTo.size}/${status.totalRecipients} confirmed)`);
+        }
+      });
+    }, 5000); // Check every 5 seconds
+
+    return () => clearInterval(interval);
+  }, [fileDeliveryStatus])
 
   // Handle scroll to detect if user is at bottom
   const handleScroll = () => {
@@ -296,48 +394,120 @@ export default function ChatPage() {
     if (validFiles.length === 0) {
       if (fileInputRef.current) fileInputRef.current.value = "";
       return;
-    }
-
-    // Send each file individually, reliably
+    }    // Send each file individually, reliably
     const sendFiles = async () => {
       setIsSendingFiles(true);
-      try {
+      setFileUploadProgress({ current: 0, total: validFiles.length, fileName: "" });
+      
+      // Notify others that this user started uploading files
+      send({
+        type: "sendMessage",
+        roomId,
+        username: currentUser,
+        text: "",
+        messageType: "fileUploadStart"
+      });      try {
         for (let idx = 0; idx < validFiles.length; idx++) {
           const file = validFiles[idx];
+          setFileUploadProgress({
+            current: idx + 1,
+            total: validFiles.length,
+            fileName: file.name
+          });
+          
           await new Promise<void>((resolve) => {
             const reader = new FileReader();
-            reader.onload = () => {
+            reader.onload = async () => {
               const base64 = reader.result as string;
-              // If audio file, send as audio message
-              if (file.type.startsWith('audio/')) {
-                send({
-                  type: "sendFile",
-                  roomId,
-                  username: currentUser,
-                  fileName: file.name,
-                  fileType: file.type,
-                  fileData: base64,
-                  timestamp: Date.now(),
-                  asAudio: true,
+              const timestamp = Date.now() + Math.random(); // Ensure uniqueness
+              const isAudio = file.type.startsWith('audio/');
+              
+              // Immediately add the file to sender's view (optimistic update)
+              const optimisticMessage = {
+                id: `${timestamp}_${Math.random()}`,
+                type: isAudio ? "audio" as const : "file" as const,
+                username: currentUser,
+                content: file.name,
+                timestamp: new Date(timestamp),
+                isOwn: true,
+                fileData: base64,
+                fileName: file.name,
+              };
+              
+              setMessages(prev => [...prev, optimisticMessage]);
+                // Send the file to server
+              try {
+                // Initialize delivery tracking for this file
+                const deliveryKey = `${file.name}-${timestamp}`;
+                const totalRecipients = Math.max(1, participants.length - 1); // Exclude sender
+                setFileDeliveryStatus(prev => {
+                  const updated = new Map(prev);
+                  updated.set(deliveryKey, {
+                    fileName: file.name,
+                    sentAt: timestamp,
+                    deliveredTo: new Set(),
+                    totalRecipients: totalRecipients
+                  });
+                  return updated;
                 });
-              } else {
-                send({
-                  type: "sendFile",
-                  roomId,
-                  username: currentUser,
-                  fileName: file.name,
-                  fileType: file.type,
-                  fileData: base64,
-                  timestamp: Date.now(),
-                });
+                
+                if (isAudio) {
+                  send({
+                    type: "sendFile",
+                    roomId,
+                    username: currentUser,
+                    fileName: file.name,
+                    fileType: file.type,
+                    fileData: base64,
+                    timestamp,
+                    asAudio: true,
+                  });
+                } else {
+                  send({
+                    type: "sendFile",
+                    roomId,
+                    username: currentUser,
+                    fileName: file.name,
+                    fileType: file.type,
+                    fileData: base64,
+                    timestamp,
+                  });
+                }
+                console.log(`[FILE UPLOAD] Sent ${file.name} to server (${totalRecipients} expected recipients)`);
+              } catch (error) {
+                console.error(`[FILE UPLOAD] Failed to send ${file.name}:`, error);
               }
+              
+              // Add small delay between files to prevent server overload
+              if (idx < validFiles.length - 1) {
+                await new Promise(resolve => setTimeout(resolve, 100));
+              }
+              
               resolve();
             };
             reader.readAsDataURL(file);
           });
-        }
-      } finally {
+        }      } finally {
+        // Notify others that this user finished uploading files
+        send({
+          type: "sendMessage",
+          roomId,
+          username: currentUser,
+          text: "",
+          messageType: "fileUploadEnd"
+        });
+        
         setIsSendingFiles(false);
+        setFileUploadProgress(null);
+        
+        // Failsafe: Clear upload status for current user after a delay
+        setTimeout(() => {
+          setUsersUploadingFiles(prev => {
+            const newSet = new Set(prev);
+            newSet.delete(currentUser);
+            return newSet;
+          });
+        }, 1000);
       }
     };
     sendFiles();
@@ -367,33 +537,91 @@ export default function ChatPage() {
         // If no valid files, exit
         if (validFiles.length === 0) {
           return;
-        }     
-
-        const sendFiles = async () => {
+        }         const sendFiles = async () => {
           setIsSendingFiles(true);
-          try {
+          setFileUploadProgress({ current: 0, total: validFiles.length, fileName: "" });
+          
+          // Notify others that this user started uploading files
+          send({
+            type: "sendMessage",
+            roomId,
+            username: currentUser,
+            text: "",
+            messageType: "fileUploadStart"
+          });          try {
             for (let idx = 0; idx < validFiles.length; idx++) {
               const file = validFiles[idx];
+              setFileUploadProgress({
+                current: idx + 1,
+                total: validFiles.length,
+                fileName: file.name
+              });
+              
               await new Promise<void>((resolve) => {
                 const reader = new FileReader();
-                reader.onload = () => {
+                reader.onload = async () => {
                   const base64 = reader.result as string;
-                  send({
-                    type: "sendFile",
-                    roomId,
+                  const timestamp = Date.now() + Math.random(); // Ensure uniqueness
+                  
+                  // Immediately add the file to sender's view (optimistic update)
+                  const optimisticMessage = {
+                    id: `${timestamp}_${Math.random()}`,
+                    type: "file" as const,
                     username: currentUser,
-                    fileName: file.name,
-                    fileType: file.type,
+                    content: file.name,
+                    timestamp: new Date(timestamp),
+                    isOwn: true,
                     fileData: base64,
-                    timestamp: Date.now(), // Use only Date.now() for valid date
-                  });
+                    fileName: file.name,
+                  };
+                  
+                  setMessages(prev => [...prev, optimisticMessage]);
+                  
+                  // Send the file to server
+                  try {
+                    send({
+                      type: "sendFile",
+                      roomId,
+                      username: currentUser,
+                      fileName: file.name,
+                      fileType: file.type,
+                      fileData: base64,
+                      timestamp,
+                    });                    console.log(`[FILE UPLOAD] Sent ${file.name} to server`);
+                  } catch (error) {
+                    console.error(`[FILE UPLOAD] Failed to send ${file.name}:`, error);
+                  }
+                  
+                  // Add small delay between files to prevent server overload
+                  if (idx < validFiles.length - 1) {
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                  }
+                  
                   resolve();
                 };
                 reader.readAsDataURL(file);
               });
-            }
-          } finally {
+            }          } finally {
+            // Notify others that this user finished uploading files
+            send({
+              type: "sendMessage",
+              roomId,
+              username: currentUser,
+              text: "",
+              messageType: "fileUploadEnd"
+            });
+            
             setIsSendingFiles(false);
+            setFileUploadProgress(null);
+            
+            // Failsafe: Clear upload status for current user after a delay
+            setTimeout(() => {
+              setUsersUploadingFiles(prev => {
+                const newSet = new Set(prev);
+                newSet.delete(currentUser);
+                return newSet;
+              });
+            }, 1000);
           }
         };
         sendFiles();
@@ -834,8 +1062,7 @@ export default function ChatPage() {
     // Cleanup: Reset title when component unmounts (user leaves room)
     return () => {
       document.title = "Ucucu";
-    };
-  }, [roomInfo.name, roomId]);
+    };  }, [roomInfo.name, roomId]);
 
   return (
     <div className="h-screen bg-white flex flex-col">
@@ -867,14 +1094,23 @@ export default function ChatPage() {
         title="Reconnect to room"
       >
         Reconnect
-      </Button>
-      <div className="flex flex-col min-w-0">
-        <h1
-          className="font-semibold text-gray-900 truncate max-w-[80px]"
-          title={roomInfo.name || roomId}
-        >
-          {roomInfo.name || roomId}
-        </h1>
+      </Button>      <div className="flex flex-col min-w-0">
+        <div className="flex items-center gap-2">
+          <h1
+            className="font-semibold text-gray-900 truncate max-w-[80px]"
+            title={roomInfo.name || roomId}
+          >
+            {roomInfo.name || roomId}
+          </h1>
+          {usersUploadingFiles.size > 0 && (
+            <div className="flex items-center gap-1">
+              <div className="w-2 h-2 bg-blue-500 rounded-full animate-pulse"></div>
+              <span className="text-xs text-blue-600 font-medium">
+                {usersUploadingFiles.size === 1 ? 'Uploading...' : `${usersUploadingFiles.size} uploading...`}
+              </span>
+            </div>
+          )}
+        </div>
         <p className="text-xs text-gray-500 truncate max-w-[80px]">/{roomId}</p>
       </div>
     </div>    {/* Right: Notification Bell, Avatars and settings always at top right */}    <div className="flex items-center gap-2 flex-shrink-0 min-w-0">
@@ -943,9 +1179,8 @@ export default function ChatPage() {
 
       {/* Input Area */}
       <div className="border-t border-gray-200 p-4 flex-shrink-0">        <div className="flex items-end space-x-2">
-          {/* File Upload */}          
-          <Button variant="ghost" size="sm" onClick={() => fileInputRef.current?.click()} className="flex-shrink-0" disabled={!isConnected} aria-label="Upload file">
-            <Paperclip className="h-4 w-4" />
+          {/* File Upload */}            <Button variant="ghost" size="sm" onClick={() => fileInputRef.current?.click()} className="flex-shrink-0" disabled={!isConnected || isSendingFiles} aria-label="Upload file">
+            <Paperclip className={`h-4 w-4 ${isSendingFiles ? 'animate-pulse' : ''}`} />
           </Button>
 
           {/* Text Input */}
@@ -1010,16 +1245,58 @@ export default function ChatPage() {
             <div className="w-2 h-2 bg-red-600 rounded-full animate-pulse"></div>
             <span>Recording... Tap to stop</span>
           </div>
+        )}        {isSendingFiles && isConnected && (
+          <div className="mt-2 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+            <div className="flex items-center space-x-3">
+              <div className="flex space-x-1">
+                <div className="w-2 h-2 bg-blue-600 rounded-full animate-bounce"></div>
+                <div className="w-2 h-2 bg-blue-600 rounded-full animate-bounce" style={{ animationDelay: "0.1s" }}></div>
+                <div className="w-2 h-2 bg-blue-600 rounded-full animate-bounce" style={{ animationDelay: "0.2s" }}></div>
+              </div>
+              <div className="flex-1">
+                {fileUploadProgress ? (
+                  <div>
+                    <div className="flex justify-between items-center mb-1">
+                      <span className="text-sm font-medium text-blue-700">
+                        Uploading {fileUploadProgress.current} of {fileUploadProgress.total}
+                      </span>
+                      <span className="text-xs text-blue-600">
+                        {Math.round((fileUploadProgress.current / fileUploadProgress.total) * 100)}%
+                      </span>
+                    </div>
+                    <div className="w-full bg-blue-200 rounded-full h-2 mb-1">
+                      <div 
+                        className="bg-blue-600 h-2 rounded-full transition-all duration-300" 
+                        style={{ width: `${(fileUploadProgress.current / fileUploadProgress.total) * 100}%` }}
+                      ></div>
+                    </div>                    {fileUploadProgress.fileName && (
+                      <span className="text-xs text-blue-600 truncate block">
+                        {fileUploadProgress.fileName}
+                      </span>
+                    )}
+                  </div>
+                ) : (
+                  <span className="text-sm text-blue-700">Preparing files...</span>
+                )}
+              </div>            </div>
+          </div>
         )}
 
-        {isSendingFiles && isConnected && (
-          <div className="mt-2 flex items-center space-x-2 text-blue-600 text-sm">
-            <div className="flex space-x-1">
-              <div className="w-2 h-2 bg-blue-600 rounded-full animate-bounce"></div>
-              <div className="w-2 h-2 bg-blue-600 rounded-full animate-bounce" style={{ animationDelay: "0.1s" }}></div>
-              <div className="w-2 h-2 bg-blue-600 rounded-full animate-bounce" style={{ animationDelay: "0.2s" }}></div>
+        {/* Show when other users are uploading files */}
+        {usersUploadingFiles.size > 0 && !isSendingFiles && isConnected && (
+          <div className="mt-2 p-2 bg-gray-50 border border-gray-200 rounded-lg">
+            <div className="flex items-center space-x-2">
+              <div className="w-2 h-2 bg-gray-500 rounded-full animate-pulse"></div>
+              <span className="text-sm text-gray-600">
+                {Array.from(usersUploadingFiles).map((username, index) => (
+                  <span key={username}>
+                    <span className="font-medium">{username}</span>
+                    {index < usersUploadingFiles.size - 1 && ', '}
+                  </span>
+                ))}
+                {usersUploadingFiles.size === 1 ? ' is uploading files...' : ' are uploading files...'}
+              </span>
             </div>
-            <span>Sending files...</span>
           </div>
         )}
       </div>
