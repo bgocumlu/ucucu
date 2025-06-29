@@ -598,7 +598,9 @@ setInterval(async () => {
 }, 30000); // every 30 seconds
 
 wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string; isAlive?: boolean }) => {
-  ws.isAlive = true;  ws.on('pong', () => {
+  ws.isAlive = true;
+  
+  ws.on('pong', () => {
     ws.isAlive = true;
     const room = ws.joinedRoom || 'none';
     const user = ws.joinedUser || 'unknown';
@@ -1196,7 +1198,98 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
             checkRoomDeletionAfterSubscriptionCleanup(roomId);
           }
         }
+      
+      // --- BEGIN: WebRTC Group Audio Call Signaling ---
+      } else if (msg.type === "call-join") {
+        // msg: { type, roomId, username, isListener }
+        const { roomId, username, isListener } = msg
+        if (!roomId || !username) return
+
+        // Check if user is actually in the room's participant list
+        if (!rooms[roomId] || !rooms[roomId].users.has(username)) {
+          console.log(`[SECURITY] User ${username} attempted to join call in room ${roomId} without being a participant`);
+          ws.send(JSON.stringify({ 
+            type: 'error', 
+            error: 'You must join the room before joining the call.',
+            redirect: `/${roomId}`,
+            action: 'rejoin'
+          }));
+          return;
+        }
+
+        // Create call room if needed
+        if (!callRooms[roomId]) callRooms[roomId] = {}
+        // Add this peer with room membership verified
+        callRooms[roomId][username] = { 
+          ws, 
+          username, 
+          isListener: !!isListener, 
+          roomVerified: true,
+          lastActivity: Date.now()
+        }
+
+        // Tell the new peer about all existing peers
+        Object.keys(callRooms[roomId]).forEach(existing => {
+          if (existing !== username) {
+            ws.send(JSON.stringify({ type: "call-new-peer", username: existing }))
+          }
+        })
+        // Tell all existing peers about the new peer
+        broadcastCall(roomId, "call-new-peer", { username }, username)
+        return
+        
+      } else if (msg.type === "call-offer" || msg.type === "call-answer" || msg.type === "call-ice") {
+        // msg: { type, roomId, from, to, payload }
+        const { roomId, from, to, payload } = msg
+        if (!roomId || !from || !to) return
+
+        // Check if sender is actually in the room's participant list
+        if (!rooms[roomId] || !rooms[roomId].users.has(from)) {
+          console.log(`[SECURITY] User ${from} attempted to send call signal to room ${roomId} without being a participant`);
+          ws.send(JSON.stringify({ 
+            type: 'error', 
+            error: 'You must join the room before participating in calls.',
+            redirect: `/${roomId}`,
+            action: 'rejoin'
+          }));
+          return;
+        }
+
+        const peers = callRooms[roomId]
+        if (peers && peers[to] && peers[to].ws.readyState === WebSocket.OPEN) {
+          peers[to].ws.send(JSON.stringify({ type: msg.type, from, payload }))
+          // Update activity for both sender and receiver
+          if (peers[from]) peers[from].lastActivity = Date.now()
+          peers[to].lastActivity = Date.now()
+        } else {
+          console.log(`[WEBRTC] Target peer ${to} not found or not connected in call room ${roomId}`)
+        }
+        return
+        
+      } else if (msg.type === "call-peer-left") {
+        // msg: { type, roomId, username }
+        const { roomId, username } = msg
+        
+        // Check if user is actually in the room's participant list
+        if (!rooms[roomId] || !rooms[roomId].users.has(username)) {
+          console.log(`[SECURITY] User ${username} attempted to leave call in room ${roomId} without being a participant`);
+          ws.send(JSON.stringify({ 
+            type: 'error', 
+            error: 'You must join the room before leaving the call.',
+            redirect: `/${roomId}`,
+            action: 'rejoin'
+          }));
+          return;
+        }
+
+        if (callRooms[roomId] && callRooms[roomId][username]) {
+          delete callRooms[roomId][username]
+          broadcastCall(roomId, "call-peer-left", { username }, username)
+          cleanupCallRoom(roomId)
+        }
+        return
       }
+      // --- END: WebRTC Group Audio Call Signaling ---
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     } catch (e) {
       ws.send(JSON.stringify({ type: 'error', error: 'Invalid message' }));
@@ -1441,195 +1534,6 @@ setInterval(() => {
 }, 120000) // Every 2 minutes
 
 // --- END: WebRTC Group Audio Call Signaling Support ---
-
-wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string; isAlive?: boolean }) => {
-  ws.isAlive = true;  ws.on('pong', () => {
-    ws.isAlive = true;
-    const room = ws.joinedRoom || 'none';
-    const user = ws.joinedUser || 'unknown';
-    console.log(`[HEARTBEAT][SERVER:${PORT}] Received pong from ${user} in room: ${room}`);
-  });
-
-  // Track which room and username this socket is in
-  const joinedRoom: string | null = null;
-  const joinedUser: string | null = null;
-  ws.joinedRoom = undefined;
-  ws.joinedUser = undefined;
-
-  ws.on('message', async (data: WebSocket.RawData) => {
-    try {
-      const msg = JSON.parse(data.toString());      // --- BEGIN: WebRTC Group Audio Call Signaling ---
-      if (msg.type === "call-join") {
-        // msg: { type, roomId, username, isListener }
-        const { roomId, username, isListener } = msg
-        if (!roomId || !username) return
-
-        // Check if user is actually in the room's participant list
-        if (!rooms[roomId] || !rooms[roomId].users.has(username)) {
-          console.log(`[SECURITY] User ${username} attempted to join call in room ${roomId} without being a participant`);
-          ws.send(JSON.stringify({ 
-            type: 'error', 
-            error: 'You must join the room before joining the call.',
-            redirect: `/${roomId}`,
-            action: 'rejoin'
-          }));
-          return;
-        }        // Create call room if needed
-        if (!callRooms[roomId]) callRooms[roomId] = {}
-        // Add this peer with room membership verified
-        callRooms[roomId][username] = { 
-          ws, 
-          username, 
-          isListener: !!isListener, 
-          roomVerified: true,
-          lastActivity: Date.now()
-        }
-
-        // Tell the new peer about all existing peers
-        Object.keys(callRooms[roomId]).forEach(existing => {
-          if (existing !== username) {
-            ws.send(JSON.stringify({ type: "call-new-peer", username: existing }))
-          }
-        })
-        // Tell all existing peers about the new peer
-        broadcastCall(roomId, "call-new-peer", { username }, username)
-
-        // Clean up on close
-        ws.on("close", () => {
-          if (callRooms[roomId] && callRooms[roomId][username]) {
-            delete callRooms[roomId][username]
-            broadcastCall(roomId, "call-peer-left", { username }, username)
-            cleanupCallRoom(roomId)
-          }
-        })
-        // Clean up on error
-        ws.on("error", () => {
-          if (callRooms[roomId] && callRooms[roomId][username]) {
-            delete callRooms[roomId][username]
-            broadcastCall(roomId, "call-peer-left", { username }, username)
-            cleanupCallRoom(roomId)
-          }
-        })
-        return
-      }      
-      if (msg.type === "call-offer" || msg.type === "call-answer" || msg.type === "call-ice") {
-        // msg: { type, roomId, from, to, payload }
-        const { roomId, from, to, payload } = msg
-        if (!roomId || !from || !to) return
-
-        // Check if sender is actually in the room's participant list
-        if (!rooms[roomId] || !rooms[roomId].users.has(from)) {
-          console.log(`[SECURITY] User ${from} attempted to send call signal to room ${roomId} without being a participant`);
-          ws.send(JSON.stringify({ 
-            type: 'error', 
-            error: 'You must join the room before participating in calls.',
-            redirect: `/${roomId}`,
-            action: 'rejoin'
-          }));
-          return;
-        }
-
-        const peers = callRooms[roomId]
-        if (peers && peers[to] && peers[to].ws.readyState === WebSocket.OPEN) {
-          peers[to].ws.send(JSON.stringify({ type: msg.type, from, payload }))
-          // Update activity for both sender and receiver
-          if (peers[from]) peers[from].lastActivity = Date.now()
-          peers[to].lastActivity = Date.now()
-        } else {
-          console.log(`[WEBRTC] Target peer ${to} not found or not connected in call room ${roomId}`)
-        }
-        return
-      }      
-      if (msg.type === "call-peer-left") {
-        // msg: { type, roomId, username }
-        const { roomId, username } = msg
-        
-        // Check if user is actually in the room's participant list
-        if (!rooms[roomId] || !rooms[roomId].users.has(username)) {
-          console.log(`[SECURITY] User ${username} attempted to leave call in room ${roomId} without being a participant`);
-          ws.send(JSON.stringify({ 
-            type: 'error', 
-            error: 'You must join the room before leaving the call.',
-            redirect: `/${roomId}`,
-            action: 'rejoin'
-          }));
-          return;
-        }
-
-        if (callRooms[roomId] && callRooms[roomId][username]) {
-          delete callRooms[roomId][username]
-          broadcastCall(roomId, "call-peer-left", { username }, username)
-          cleanupCallRoom(roomId)
-        }
-        return
-      }
-      // --- END: WebRTC Group Audio Call Signaling ---      // ...existing code...
-    } catch {
-      ws.send(JSON.stringify({ type: 'error', error: 'Invalid message' }));
-    }
-  });
-  ws.on('close', async () => {
-    if (typeof joinedRoom === 'string' && joinedUser && joinedRoom in rooms && rooms[joinedRoom]) {
-      rooms[joinedRoom].users.delete(joinedUser);
-      
-      // Clean up WebRTC call connections for this user
-      for (const [callRoomId, peers] of Object.entries(callRooms)) {
-        if (joinedUser && peers[joinedUser]) {
-          console.log(`[WEBRTC] Cleaning up call connection for ${joinedUser} in room ${callRoomId}`);
-          delete peers[joinedUser];
-          // Notify other call participants that this peer left
-          broadcastCall(callRoomId, "call-peer-left", { username: joinedUser }, joinedUser);
-          cleanupCallRoom(callRoomId);
-        }
-      }
-      
-      // Broadcast leave notification message (system message, only to clients in the room)
-      const leaveMsg = { username: '', text: `${joinedUser} left the chat.`, timestamp: Date.now(), system: true };
-      const usersArr = Array.from(rooms[joinedRoom].users);
-      
-      await broadcastToRoom(joinedRoom, 'newMessage', { message: leaveMsg });
-      
-      const roomInfo = { 
-        id: joinedRoom, 
-        name: rooms[joinedRoom].name, 
-        count: rooms[joinedRoom].users.size, 
-        maxParticipants: rooms[joinedRoom].maxParticipants, 
-        locked: rooms[joinedRoom].locked, 
-        visibility: rooms[joinedRoom].visibility, 
-        exists: true, 
-        owner: rooms[joinedRoom].owner, 
-        users: usersArr 
-      };
-      await broadcastToRoom(joinedRoom, 'roomInfo', { room: roomInfo });
-      
-      broadcastRooms(); // Broadcast participant count change      // Check if room should be deleted (considering subscriptions)
-      if (rooms[joinedRoom].users.size === 0) {
-        checkRoomDeletionAfterSubscriptionCleanup(joinedRoom);
-      }
-    }
-  });
-  ws.on('error', async (err) => {
-    // @ts-expect-error: custom error code property for ws errors
-    if (err && err.code === 'WS_ERR_UNSUPPORTED_MESSAGE_LENGTH') {
-      ws.send(JSON.stringify({ type: 'error', error: 'File too large. Max file size exceeded.' }));
-      // Also notify the user in the room if possible
-      if (ws.joinedRoom && ws.joinedUser) {
-        const systemMsg = {
-          username: '',
-          text: `${ws.joinedUser} tried to send a file that was too large and it was not sent.`,
-          timestamp: Date.now(),
-          system: true
-        };
-        await broadcastToRoom(ws.joinedRoom, 'newMessage', { message: systemMsg });
-      }
-      ws.send(JSON.stringify({ type: 'error', error: 'WebSocket error: ' + (err?.message || err) }));
-      console.error('[ws-server] File too large error:', err);
-    } else {
-      ws.send(JSON.stringify({ type: 'error', error: 'WebSocket error: ' + (err?.message || err) }));
-      console.error('[ws-server] WebSocket error:', err);
-    }
-  });
-});
 
 // Graceful shutdown handling
 const cleanup = () => {
