@@ -115,6 +115,18 @@ setInterval(() => {
   const now = Date.now();
   const CLEANUP_THRESHOLD = 30000; // 30 seconds
   const REBROADCAST_THRESHOLD = 5000; // 5 seconds
+  const MAX_TRACKING_ENTRIES = 1000; // Prevent unbounded growth
+  
+  // If we have too many entries, force cleanup of oldest ones
+  if (fileDeliveryTracking.size > MAX_TRACKING_ENTRIES) {
+    const entries = Array.from(fileDeliveryTracking.entries());
+    entries.sort((a, b) => a[1].timestamp - b[1].timestamp);
+    const toDelete = entries.slice(0, Math.floor(MAX_TRACKING_ENTRIES * 0.3));
+    toDelete.forEach(([key]) => {
+      console.log(`[FILE-DELIVERY-CLEANUP] Force removing old tracking entry: ${key}`);
+      fileDeliveryTracking.delete(key);
+    });
+  }
   
   for (const [key, tracker] of fileDeliveryTracking.entries()) {
     const age = now - tracker.broadcastTime;
@@ -131,6 +143,8 @@ setInterval(() => {
         // Rebroadcast the file
         broadcastToRoom(tracker.roomId, 'newMessage', { message: tracker.message }).then(success => {
           console.log(`[FILE-DELIVERY-RETRY] Rebroadcast result for ${tracker.filename}: ${success ? 'SUCCESS' : 'FAILED'}`);
+        }).catch(error => {
+          console.error(`[FILE-DELIVERY-RETRY] Error rebroadcasting ${tracker.filename}:`, error);
         });
         
         // Update broadcast time to prevent constant rebroadcasts
@@ -695,7 +709,17 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
         };
         await broadcastToRoom(roomId, 'roomInfo', { room: roomInfo });      } else if (msg.type === 'sendMessage') {
         const { roomId, username, text, messageType } = msg;
-          // Handle file upload status messages
+        
+        // Rate limiting check
+        if (!checkRateLimit(`${username}-${roomId}`, false)) {
+          ws.send(JSON.stringify({ 
+            type: 'error', 
+            error: 'Rate limit exceeded. Please slow down your messaging.' 
+          }));
+          return;
+        }
+        
+        // Handle file upload status messages
         if (messageType === 'fileUploadStart') {
           if (rooms[roomId] && rooms[roomId].users.has(username)) {
             const message = { username, type: 'fileUploadStart', timestamp: Date.now() };
@@ -800,7 +824,7 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
               console.log(`[AI] Processing command from ${username}: ${aiPrompt}`);
               
               // 1. Send the user's AI command message immediately
-              const userMessage = { username, text, timestamp: Date.now() };
+              const userMessage = { username, text: aiPrompt, timestamp: Date.now() };
               await broadcastToRoom(roomId, 'newMessage', { message: userMessage });
               
               // 2. Process AI request and send response when ready
@@ -833,7 +857,18 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
             await sendNotificationsForMessage(roomId, message);
           }
         }      } else if (msg.type === 'sendFile') {
-        const { roomId, username, fileName, fileType, fileData, timestamp, asAudio } = msg;        console.log(`[ws-server] Received sendFile: ${fileName} from ${username} in room ${roomId}`);
+        const { roomId, username, fileName, fileType, fileData, timestamp, asAudio } = msg;
+        
+        // Rate limiting check for files
+        if (!checkRateLimit(`${username}-${roomId}`, true)) {
+          ws.send(JSON.stringify({ 
+            type: 'error', 
+            error: 'File upload rate limit exceeded. Please wait before sending another file.' 
+          }));
+          return;
+        }
+        
+        console.log(`[ws-server] Received sendFile: ${fileName} from ${username} in room ${roomId}`);
         const message = { username, fileName, fileType, fileData, timestamp, type: 'file', ...(asAudio ? { asAudio: true } : {}) };if (rooms[roomId]) {          // Check if user is actually in the room's participant list
           if (!rooms[roomId].users.has(username)) {
             console.log(`[SECURITY] User ${username} attempted to send file to room ${roomId} without being a participant`);
@@ -1129,7 +1164,8 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
         if (joinedRoom === roomId && joinedUser === username && rooms[roomId]) {
           // Remove user from room
           rooms[roomId].users.delete(username);
-            // Send leave notification message (system message, only to clients in the room)
+          
+          // Send leave notification message (system message, only to clients in the room)
           const leaveMsg = { username: '', text: `${username} left the chat.`, timestamp: Date.now(), system: true };
           const usersArr = Array.from(rooms[roomId].users);
           
@@ -1169,6 +1205,18 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
   ws.on('close', async () => {
     if (typeof joinedRoom === 'string' && joinedUser && joinedRoom in rooms && rooms[joinedRoom]) {
       rooms[joinedRoom].users.delete(joinedUser);
+      
+      // Clean up WebRTC call connections for this user
+      for (const [callRoomId, peers] of Object.entries(callRooms)) {
+        if (joinedUser && peers[joinedUser]) {
+          console.log(`[WEBRTC] Cleaning up call connection for ${joinedUser} in room ${callRoomId}`);
+          delete peers[joinedUser];
+          // Notify other call participants that this peer left
+          broadcastCall(callRoomId, "call-peer-left", { username: joinedUser }, joinedUser);
+          cleanupCallRoom(callRoomId);
+        }
+      }
+      
       // Broadcast leave notification message (system message, only to clients in the room)
       const leaveMsg = { username: '', text: `${joinedUser} left the chat.`, timestamp: Date.now(), system: true };
       const usersArr = Array.from(rooms[joinedRoom].users);
@@ -1284,6 +1332,7 @@ type CallPeerInfo = {
   username: string
   isListener: boolean
   roomVerified?: boolean // Cache room membership verification
+  lastActivity: number // Track last activity for cleanup
 }
 const callRooms: Record<string, Record<string, CallPeerInfo>> = {}
 
@@ -1291,21 +1340,107 @@ const callRooms: Record<string, Record<string, CallPeerInfo>> = {}
 function broadcastCall(roomId: string, type: string, data: Record<string, unknown>, exceptUsername?: string) {
   const peers = callRooms[roomId]
   if (!peers) return
+  
+  let activePeers = 0
+  let deadConnections = 0
+  
   Object.entries(peers).forEach(([username, info]) => {
-    if (username !== exceptUsername && info.ws.readyState === WebSocket.OPEN) {
-      info.ws.send(JSON.stringify({ type, ...data }))
+    if (username !== exceptUsername) {
+      if (info.ws.readyState === WebSocket.OPEN) {
+        try {
+          info.ws.send(JSON.stringify({ type, ...data }))
+          info.lastActivity = Date.now() // Update activity timestamp
+          activePeers++
+        } catch (error) {
+          console.error(`[WEBRTC] Failed to send ${type} to ${username}:`, error)
+          deadConnections++
+        }
+      } else {
+        console.log(`[WEBRTC] Dead connection detected for ${username} in call room ${roomId}`)
+        deadConnections++
+      }
     }
   })
+  
+  console.log(`[WEBRTC] Broadcast ${type} to room ${roomId}: ${activePeers} active, ${deadConnections} dead connections`)
+  
+  // Clean up dead connections
+  if (deadConnections > 0) {
+    cleanupDeadCallConnections(roomId)
+  }
+}
+
+// Clean up dead connections in call room
+function cleanupDeadCallConnections(roomId: string) {
+  const peers = callRooms[roomId]
+  if (!peers) return
+  
+  let cleanedCount = 0
+  const toRemove: string[] = []
+  
+  Object.entries(peers).forEach(([username, info]) => {
+    if (info.ws.readyState !== WebSocket.OPEN) {
+      toRemove.push(username)
+      cleanedCount++
+    }
+  })
+  
+  toRemove.forEach(username => {
+    delete peers[username]
+    // Notify other peers that this peer left
+    broadcastCall(roomId, "call-peer-left", { username }, username)
+  })
+  
+  if (cleanedCount > 0) {
+    console.log(`[WEBRTC] Cleaned ${cleanedCount} dead connections from call room ${roomId}`)
+  }
+  
+  cleanupCallRoom(roomId)
 }
 
 // Clean up call room if empty
 function cleanupCallRoom(roomId: string) {
   if (callRooms[roomId] && Object.keys(callRooms[roomId]).length === 0) {
     delete callRooms[roomId]
+    console.log(`[WEBRTC] Deleted empty call room: ${roomId}`)
   }
 }
 
-// --- END: WebRTC Group Audio Call Signaling ---
+// Periodic cleanup of inactive call connections
+setInterval(() => {
+  const now = Date.now()
+  const CALL_TIMEOUT = 5 * 60 * 1000 // 5 minutes of inactivity
+  let totalCleaned = 0
+  
+  for (const [roomId, peers] of Object.entries(callRooms)) {
+    const toRemove: string[] = []
+    
+    Object.entries(peers).forEach(([username, info]) => {
+      const inactive = now - info.lastActivity > CALL_TIMEOUT
+      const deadConnection = info.ws.readyState !== WebSocket.OPEN
+      
+      if (inactive || deadConnection) {
+        toRemove.push(username)
+        console.log(`[WEBRTC] Removing inactive/dead call peer: ${username} from room ${roomId} (inactive: ${inactive}, dead: ${deadConnection})`)
+      }
+    })
+    
+    toRemove.forEach(username => {
+      delete peers[username]
+      totalCleaned++
+      // Notify other peers that this peer left
+      broadcastCall(roomId, "call-peer-left", { username }, username)
+    })
+    
+    cleanupCallRoom(roomId)
+  }
+  
+  if (totalCleaned > 0) {
+    console.log(`[WEBRTC] Periodic cleanup: Removed ${totalCleaned} inactive call connections`)
+  }
+}, 120000) // Every 2 minutes
+
+// --- END: WebRTC Group Audio Call Signaling Support ---
 
 wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string; isAlive?: boolean }) => {
   ws.isAlive = true;  ws.on('pong', () => {
@@ -1342,7 +1477,13 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
         }        // Create call room if needed
         if (!callRooms[roomId]) callRooms[roomId] = {}
         // Add this peer with room membership verified
-        callRooms[roomId][username] = { ws, username, isListener: !!isListener, roomVerified: true }
+        callRooms[roomId][username] = { 
+          ws, 
+          username, 
+          isListener: !!isListener, 
+          roomVerified: true,
+          lastActivity: Date.now()
+        }
 
         // Tell the new peer about all existing peers
         Object.keys(callRooms[roomId]).forEach(existing => {
@@ -1391,6 +1532,11 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
         const peers = callRooms[roomId]
         if (peers && peers[to] && peers[to].ws.readyState === WebSocket.OPEN) {
           peers[to].ws.send(JSON.stringify({ type: msg.type, from, payload }))
+          // Update activity for both sender and receiver
+          if (peers[from]) peers[from].lastActivity = Date.now()
+          peers[to].lastActivity = Date.now()
+        } else {
+          console.log(`[WEBRTC] Target peer ${to} not found or not connected in call room ${roomId}`)
         }
         return
       }      
@@ -1425,6 +1571,18 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
   ws.on('close', async () => {
     if (typeof joinedRoom === 'string' && joinedUser && joinedRoom in rooms && rooms[joinedRoom]) {
       rooms[joinedRoom].users.delete(joinedUser);
+      
+      // Clean up WebRTC call connections for this user
+      for (const [callRoomId, peers] of Object.entries(callRooms)) {
+        if (joinedUser && peers[joinedUser]) {
+          console.log(`[WEBRTC] Cleaning up call connection for ${joinedUser} in room ${callRoomId}`);
+          delete peers[joinedUser];
+          // Notify other call participants that this peer left
+          broadcastCall(callRoomId, "call-peer-left", { username: joinedUser }, joinedUser);
+          cleanupCallRoom(callRoomId);
+        }
+      }
+      
       // Broadcast leave notification message (system message, only to clients in the room)
       const leaveMsg = { username: '', text: `${joinedUser} left the chat.`, timestamp: Date.now(), system: true };
       const usersArr = Array.from(rooms[joinedRoom].users);
@@ -1472,3 +1630,98 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
     }
   });
 });
+
+// Graceful shutdown handling
+const cleanup = () => {
+  console.log('[WebSocket Server] Starting graceful shutdown...');
+  
+  // Close all WebSocket connections
+  wss.clients.forEach((client) => {
+    if (client.readyState === WebSocket.OPEN) {
+      client.close(1000, 'Server shutting down');
+    }
+  });
+  
+  // Close the server
+  server.close(() => {
+    console.log('[WebSocket Server] HTTP server closed');
+    process.exit(0);
+  });
+  
+  // Force exit after 10 seconds if graceful shutdown fails
+  setTimeout(() => {
+    console.log('[WebSocket Server] Force exiting...');
+    process.exit(1);
+  }, 10000);
+};
+
+// Handle shutdown signals
+process.on('SIGTERM', cleanup);
+process.on('SIGINT', cleanup);
+process.on('uncaughtException', (error) => {
+  console.error('[WebSocket Server] Uncaught exception:', error);
+  cleanup();
+});
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[WebSocket Server] Unhandled rejection at:', promise, 'reason:', reason);
+  // Don't exit on unhandled rejections, just log them
+});
+
+// Memory monitoring (log every 10 minutes)
+setInterval(() => {
+  const memUsage = process.memoryUsage();
+  const formatMB = (bytes: number) => Math.round(bytes / 1024 / 1024 * 100) / 100;
+  
+  // Count WebRTC call rooms and connections
+  let totalCallConnections = 0;
+  const callRoomCount = Object.keys(callRooms).length;
+  for (const peers of Object.values(callRooms)) {
+    totalCallConnections += Object.keys(peers).length;
+  }
+  
+  console.log(`[MEMORY] RSS: ${formatMB(memUsage.rss)}MB, Heap Used: ${formatMB(memUsage.heapUsed)}MB, Heap Total: ${formatMB(memUsage.heapTotal)}MB`);
+  console.log(`[STATS] Rooms: ${Object.keys(rooms).length}, File Tracking: ${fileDeliveryTracking.size}, Notification Subscriptions: ${Array.from(notificationSubscriptions.values()).reduce((sum, arr) => sum + arr.length, 0)}, Connected Clients: ${wss.clients.size}`);
+  console.log(`[WEBRTC STATS] Call Rooms: ${callRoomCount}, Active Call Connections: ${totalCallConnections}`);
+  
+  // Alert if memory usage is high
+  const memoryLimitMB = 500; // Adjust based on your server capacity
+  if (formatMB(memUsage.heapUsed) > memoryLimitMB) {
+    console.warn(`[MEMORY WARNING] Heap usage (${formatMB(memUsage.heapUsed)}MB) exceeds threshold (${memoryLimitMB}MB)`);
+  }
+}, 600000); // Every 10 minutes
+
+// Rate limiting to prevent spam and resource exhaustion
+const rateLimits = new Map<string, { count: number; resetTime: number }>();
+const RATE_LIMIT_WINDOW = 60000; // 1 minute
+const MAX_MESSAGES_PER_MINUTE = 30;
+const MAX_FILES_PER_MINUTE = 5;
+
+function checkRateLimit(identifier: string, isFile: boolean = false): boolean {
+  const now = Date.now();
+  const limit = isFile ? MAX_FILES_PER_MINUTE : MAX_MESSAGES_PER_MINUTE;
+  const key = `${identifier}_${isFile ? 'file' : 'msg'}`;
+  
+  const current = rateLimits.get(key);
+  
+  if (!current || now > current.resetTime) {
+    rateLimits.set(key, { count: 1, resetTime: now + RATE_LIMIT_WINDOW });
+    return true;
+  }
+  
+  if (current.count >= limit) {
+    return false;
+  }
+  
+  current.count++;
+  return true;
+}
+
+// Clean up rate limit entries periodically
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, data] of rateLimits.entries()) {
+    if (now > data.resetTime) {
+      rateLimits.delete(key);
+    }
+  }
+}, 300000); // Clean every 5 minutes
