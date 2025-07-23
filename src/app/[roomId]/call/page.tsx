@@ -236,16 +236,121 @@ export default function CallPage() {
     } else {
       // Unmuting
       if (localStreamRef.current) {
-        // If we have a stream, just enable the tracks
-        localStreamRef.current.getAudioTracks().forEach(track => {
-          track.enabled = true
-          console.log('Audio track unmuted:', track.label, track.enabled)
-          if (track.label === "Arbitrary Audio Track") {
-            alert("Microphone Error - Please press reconnect unmuted\nyou can not use the microphone until you reconnect.")
+        // Check if we have an arbitrary audio track (no real microphone access)
+        const hasArbitraryTrack = localStreamRef.current.getAudioTracks().some(track => 
+          track.label === "Arbitrary Audio Track"
+        )
+        
+        if (hasArbitraryTrack) {
+          // Try to get real microphone permission
+          try {
+            console.log('Attempting to get real microphone access to replace arbitrary track...')
+            
+            // First check if microphone devices are available
+            let hasAudioDevices = false
+            try {
+              const devices = await navigator.mediaDevices.enumerateDevices()
+              hasAudioDevices = devices.some(device => device.kind === 'audioinput')
+              console.log('Available audio input devices:', devices.filter(d => d.kind === 'audioinput').length)
+            } catch (deviceError) {
+              console.warn('Could not enumerate devices:', deviceError)
+            }
+            
+            if (!hasAudioDevices) {
+              throw new DOMException('No microphone devices found on this system. Please connect a microphone and try again.', 'NotFoundError')
+            }
+            
+            // Force a new permission request - this should trigger the browser permission dialog
+            const newStream = await navigator.mediaDevices.getUserMedia({ 
+              audio: {
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true
+              }, 
+              video: false 
+            })
+            
+            // Stop the old arbitrary audio tracks
+            localStreamRef.current.getAudioTracks().forEach(track => track.stop())
+            
+            // Replace with real microphone stream
+            localStreamRef.current = newStream
+            if (localAudioRef.current) {
+              localAudioRef.current.srcObject = newStream
+            }
+            
+            // Replace tracks in all existing peer connections
+            Object.values(peerConnections.current).forEach(pc => {
+              // Remove old arbitrary tracks
+              pc.getSenders().forEach(sender => {
+                if (sender.track && sender.track.kind === 'audio') {
+                  pc.removeTrack(sender)
+                }
+              })
+              
+              // Add new real microphone tracks
+              newStream.getAudioTracks().forEach(track => {
+                pc.addTrack(track, newStream)
+              })
+            })
+            
+            // Trigger renegotiation for all peers
+            Object.entries(peerConnections.current).forEach(async ([remote, pc]) => {
+              try {
+                const offer = await pc.createOffer()
+                await pc.setLocalDescription(offer)
+                if (wsRef.current) {
+                  wsRef.current.send(JSON.stringify({ 
+                    type: "call-offer", 
+                    roomId, 
+                    from: currentUser, 
+                    to: remote, 
+                    payload: pc.localDescription 
+                  }))
+                }
+              } catch (error) {
+                console.error('Error creating unmute offer:', error)
+              }
+            })
+            
+            setMuted(false)
+            setError("")
+            console.log('Successfully replaced arbitrary track with real microphone')
+          } catch (error) {
+            console.warn('Failed to get real microphone access:', error)
+            // Show more helpful error message based on the error type
+            const mediaError = error as DOMException
+            if (mediaError.name === 'NotAllowedError') {
+              setError("Microphone permission denied. Please click the microphone icon in your browser's address bar and allow microphone access, then try again.")
+            } else if (mediaError.name === 'NotFoundError') {
+              setError("No microphone found on this system. Please connect a microphone and refresh the page to try again.")
+            } else if (mediaError.name === 'NotSupportedError') {
+              setError("Microphone access not supported by your browser. Please try using a modern browser like Chrome, Firefox, or Edge.")
+            } else if (mediaError.name === 'NotReadableError') {
+              setError("Microphone is being used by another application. Please close other applications using the microphone and try again.")
+            } else if (mediaError.name === 'OverconstrainedError') {
+              setError("Microphone doesn't support the required settings. Please try with a different microphone.")
+            } else {
+              setError(`Failed to access microphone: ${mediaError.message || 'Unknown error'}. Please check your system audio settings and try again.`)
+            }
+            
+            // Keep the arbitrary track enabled for WebRTC connection but stay muted
+            localStreamRef.current.getAudioTracks().forEach(track => {
+              track.enabled = true
+              console.log('Keeping arbitrary audio track enabled for WebRTC (permission denied):', track.label)
+            })
+            // Stay muted since we couldn't get real microphone access
+            setMuted(true)
           }
-        })
-        setMuted(false)
-        setError("")
+        } else {
+          // We have real microphone tracks, just enable them
+          localStreamRef.current.getAudioTracks().forEach(track => {
+            track.enabled = true
+            console.log('Audio track unmuted:', track.label, track.enabled)
+          })
+          setMuted(false)
+          setError("")
+        }
       } else {
         // If no stream, request permission and create new stream
         try {
@@ -490,13 +595,14 @@ export default function CallPage() {
       if (localAudioRef.current) {
         localAudioRef.current.srcObject = localStream
       }
-      // Keep audio track disabled since user is muted
-      setMuted(false)
+      // Keep the arbitrary audio track enabled for WebRTC connection establishment
+      // but set the UI state to muted so user knows they need to grant permission
+      setMuted(true) // Set UI state to muted
       localStream.getAudioTracks().forEach(track => {
-        track.enabled = false
-        console.log('Join: Arbitrary audio track created but disabled (muted):', track.label)
+        track.enabled = true // Keep track enabled for WebRTC
+        console.log('Join: Arbitrary audio track created and enabled for WebRTC:', track.label)
       })
-      handleMute() // Ensure muted state is set      setError("Microphone access denied. Joined with silent audio track. Click unmute to try again.")
+      setError("Microphone access denied. You can still hear others. Click unmute to grant microphone permission.")
     }
     
     // Always use arbitrary video track at startup for WebRTC connection establishment
@@ -1414,7 +1520,6 @@ export default function CallPage() {
           })
           setMuted(false)
         } catch (err) {
-          setMuted(false);
           console.warn("Reconnect: Mic access denied, creating arbitrary audio track:", err)
           // Create arbitrary audio track to establish WebRTC connection
           newLocalStream = createArbitraryAudioTrack()
@@ -1422,23 +1527,28 @@ export default function CallPage() {
           if (localAudioRef.current) {
             localAudioRef.current.srcObject = newLocalStream
           }
-          handleMute();
-          setError("Microphone access denied. Reconnected with silent audio track. Click unmute to try again.")
+          // Keep the arbitrary track enabled but set UI to muted
+          newLocalStream.getAudioTracks().forEach(track => {
+            track.enabled = true
+            console.log('Reconnect: Arbitrary audio track enabled for WebRTC:', track.label)
+          })
+          setMuted(true)
+          setError("Microphone access denied. Reconnected but others won't hear you. Click unmute to grant microphone permission.")
         }
       } else {
         // Even if muted, create an arbitrary audio track for WebRTC connection establishment
-        setMuted(false);
         console.log("Reconnect: Creating arbitrary audio track for muted user")
         newLocalStream = createArbitraryAudioTrack()
         localStreamRef.current = newLocalStream
         if (localAudioRef.current) {
           localAudioRef.current.srcObject = newLocalStream
-        }        // Keep audio track disabled since user was muted
+        }
+        // Keep audio track enabled for WebRTC but UI shows muted
         newLocalStream.getAudioTracks().forEach(track => {
-          track.enabled = false
-          console.log('Reconnect: Arbitrary audio track created but disabled (muted):', track.label)
+          track.enabled = true // Keep enabled for WebRTC connection
+          console.log('Reconnect: Arbitrary audio track enabled for WebRTC (was muted):', track.label)
         })
-        setMuted(true)
+        setMuted(true) // UI shows muted
       }      // Always create arbitrary video track for WebRTC connection establishment (no camera access requested)
       // Video and screen sharing will be disabled after connection establishment
       let reconnectVideoStream: MediaStream | null = null
