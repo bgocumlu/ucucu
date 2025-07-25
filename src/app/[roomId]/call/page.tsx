@@ -328,19 +328,31 @@ export default function CallPage() {
               localAudioRef.current.srcObject = newStream
             }
             
-            // Replace tracks in all existing peer connections
+            // Replace tracks in all existing peer connections using replaceTrack to maintain m-line order
             Object.values(peerConnections.current).forEach(pc => {
-              // Remove old arbitrary tracks
-              pc.getSenders().forEach(sender => {
-                if (sender.track && sender.track.kind === 'audio') {
-                  pc.removeTrack(sender)
+              const newTrack = newStream.getAudioTracks()[0]
+              if (newTrack) {
+                // Find existing audio sender to replace track (preserves m-line order)
+                const existingAudioSender = pc.getSenders().find(sender => 
+                  sender.track && sender.track.kind === 'audio'
+                )
+                
+                if (existingAudioSender && existingAudioSender.track) {
+                  // Use replaceTrack to maintain m-line order
+                  existingAudioSender.replaceTrack(newTrack).then(() => {
+                    console.log('✅ Successfully replaced arbitrary audio with real microphone using replaceTrack')
+                  }).catch(error => {
+                    console.warn('⚠️ replaceTrack failed, falling back to remove/add:', error)
+                    // Fallback: remove old and add new (may cause m-line reordering)
+                    pc.removeTrack(existingAudioSender)
+                    pc.addTrack(newTrack, newStream)
+                  })
+                } else {
+                  // No existing audio sender, add new track
+                  pc.addTrack(newTrack, newStream)
+                  console.log('✅ Added new real microphone track (no existing audio sender)')
                 }
-              })
-              
-              // Add new real microphone tracks
-              newStream.getAudioTracks().forEach(track => {
-                pc.addTrack(track, newStream)
-              })
+              }
             })
             
             // Trigger renegotiation for all peers
@@ -472,6 +484,12 @@ export default function CallPage() {
       
       // Handle specific WebRTC errors
       if (error.name === 'InvalidStateError' || error.name === 'InvalidAccessError') {
+        // Check for m-line ordering issue specifically
+        if (error.message.includes('m-line') || error.message.includes("order doesn't match")) {
+          console.error('🚨 M-LINE ORDERING ERROR - peer connection needs recreation')
+          return 'recreate'
+        }
+        
         if (desc.type === 'offer') {
           if (pc.signalingState === 'have-local-offer' && !isPolite) {
             // Impolite peer ignores colliding offer
@@ -507,6 +525,63 @@ export default function CallPage() {
       
       // Re-throw other errors
       throw error
+    }
+  }
+
+  // UTILITY: Safe track replacement that maintains m-line order
+  const safeReplaceTrack = async (pc: RTCPeerConnection, oldTrack: MediaStreamTrack | null, newTrack: MediaStreamTrack | null, stream: MediaStream, trackType: 'audio' | 'video' | 'screen' | 'system-audio'): Promise<boolean> => {
+    try {
+      // Find the appropriate sender based on track type and current track
+      let targetSender: RTCRtpSender | undefined
+      
+      if (trackType === 'audio') {
+        // Find microphone audio sender (not system audio)
+        targetSender = pc.getSenders().find(sender => 
+          sender.track && sender.track.kind === 'audio' && 
+          !sender.track.label.toLowerCase().includes('system') &&
+          !sender.track.label.toLowerCase().includes('screen')
+        )
+      } else if (trackType === 'system-audio') {
+        // Find system audio sender
+        targetSender = pc.getSenders().find(sender => 
+          sender.track && sender.track.kind === 'audio' && 
+          (sender.track.label.toLowerCase().includes('system') || 
+           sender.track.label.toLowerCase().includes('screen'))
+        )
+      } else if (trackType === 'video') {
+        // Find camera video sender (not screen)
+        targetSender = pc.getSenders().find(sender => 
+          sender.track && sender.track.kind === 'video' && 
+          !sender.track.label.toLowerCase().includes('screen') &&
+          !sender.track.label.toLowerCase().includes('monitor') &&
+          !sender.track.label.toLowerCase().includes('display')
+        )
+      } else if (trackType === 'screen') {
+        // Find screen video sender
+        targetSender = pc.getSenders().find(sender => 
+          sender.track && sender.track.kind === 'video' && 
+          (sender.track.label.toLowerCase().includes('screen') ||
+           sender.track.label.toLowerCase().includes('monitor') ||
+           sender.track.label.toLowerCase().includes('display'))
+        )
+      }
+      
+      if (targetSender) {
+        // Replace existing track (maintains m-line order)
+        await targetSender.replaceTrack(newTrack)
+        console.log(`✅ Successfully replaced ${trackType} track using replaceTrack`)
+        return true
+      } else if (newTrack) {
+        // No existing sender, add new track (this may change m-line order but is necessary)
+        pc.addTrack(newTrack, stream)
+        console.log(`✅ Added new ${trackType} track (no existing sender to replace)`)
+        return true
+      }
+      
+      return false
+    } catch (error) {
+      console.warn(`⚠️ Failed to replace ${trackType} track:`, error)
+      return false
     }
   }
 
@@ -693,8 +768,11 @@ export default function CallPage() {
     }
     
     // --- ENHANCED: Always add local tracks to new peer connection with robust arbitrary track foundation ---
-    // IMPORTANT: Add tracks in consistent order to avoid m-line ordering issues
-    console.log(`🔗 Creating ROBUST peer connection for ${remote}. Adding tracks in order:`)
+    // CRITICAL: Add tracks in STRICT CONSISTENT ORDER to avoid m-line ordering issues
+    console.log(`🔗 Creating ROBUST peer connection for ${remote}. Adding tracks in strict order:`)
+    
+    // STRICT ORDER: Always maintain the same track order across all negotiations
+    // Order: 1) Audio (mic), 2) System Audio, 3) Video (camera), 4) Screen Share
     
     // 1. FOUNDATION: Always ensure we have persistent arbitrary tracks for WebRTC foundation
     const currentAudioTracks = localStreamRef.current?.getAudioTracks() || []
@@ -718,53 +796,59 @@ export default function CallPage() {
       localVideoStreamRef.current = arbitraryVideoStream
     }
     
-    // 2. Add microphone audio tracks (real or arbitrary)
+    // STRICT ORDER IMPLEMENTATION: Add tracks in exact order to maintain m-line consistency
+    
+    // 1. FIRST: Add microphone audio tracks (real or arbitrary) - ALWAYS position 0
     if (localStreamRef.current) {
-      console.log(`🔗 🎤 Adding ${localStreamRef.current.getTracks().length} audio tracks (${hasRealAudio ? 'real' : 'arbitrary'})`)
-      localStreamRef.current.getTracks().forEach(track => {
-        if (track.kind === 'audio' && !pc.getSenders().some(sender => sender.track === track)) {
-          pc.addTrack(track, localStreamRef.current!)
-          const isArbitrary = 'isArbitraryTrack' in track
-          console.log(`🔗 ✅ Added ${isArbitrary ? 'arbitrary' : 'real'} audio track: ${track.label}, enabled: ${track.enabled}`)
+      const audioTracks = localStreamRef.current.getAudioTracks()
+      if (audioTracks.length > 0) {
+        const audioTrack = audioTracks[0] // Use only first audio track to maintain order
+        if (!pc.getSenders().some(sender => sender.track === audioTrack)) {
+          pc.addTrack(audioTrack, localStreamRef.current)
+          const isArbitrary = 'isArbitraryTrack' in audioTrack
+          console.log(`🔗 ✅ [POS 0] Added ${isArbitrary ? 'arbitrary' : 'real'} audio track: ${audioTrack.label}, enabled: ${audioTrack.enabled}`)
         }
-      })
+      }
     }
     
-    // 3. Add system audio tracks (if available)
+    // 2. SECOND: Add system audio tracks (if available) - ALWAYS position 1
     if (localSystemAudioStreamRef.current) {
-      console.log(`🔗 🔊 Adding ${localSystemAudioStreamRef.current.getTracks().length} system audio tracks`)
-      localSystemAudioStreamRef.current.getTracks().forEach(track => {
-        if (track.kind === 'audio' && !pc.getSenders().some(sender => sender.track === track)) {
-          pc.addTrack(track, localSystemAudioStreamRef.current!)
-          console.log(`🔗 ✅ Added system audio track: ${track.label}, enabled: ${track.enabled}`)
+      const systemAudioTracks = localSystemAudioStreamRef.current.getAudioTracks()
+      if (systemAudioTracks.length > 0) {
+        const systemAudioTrack = systemAudioTracks[0] // Use only first system audio track
+        if (!pc.getSenders().some(sender => sender.track === systemAudioTrack)) {
+          pc.addTrack(systemAudioTrack, localSystemAudioStreamRef.current)
+          console.log(`🔗 ✅ [POS 1] Added system audio track: ${systemAudioTrack.label}, enabled: ${systemAudioTrack.enabled}`)
         }
-      })
+      }
     }
     
-    // 4. Add video tracks (real or arbitrary)
+    // 3. THIRD: Add video tracks (real or arbitrary) - ALWAYS position 2
     if (localVideoStreamRef.current) {
-      console.log(`🔗 📹 Adding ${localVideoStreamRef.current.getTracks().length} video tracks (${hasRealVideo ? 'real' : 'arbitrary'})`)
-      localVideoStreamRef.current.getTracks().forEach(track => {
-        if (track.kind === 'video' && !pc.getSenders().some(sender => sender.track === track)) {
-          pc.addTrack(track, localVideoStreamRef.current!)
-          const isArbitrary = 'isArbitraryTrack' in track
-          console.log(`🔗 ✅ Added ${isArbitrary ? 'arbitrary' : 'real'} video track: ${track.label}`)
+      const videoTracks = localVideoStreamRef.current.getVideoTracks()
+      if (videoTracks.length > 0) {
+        const videoTrack = videoTracks[0] // Use only first video track to maintain order
+        if (!pc.getSenders().some(sender => sender.track === videoTrack)) {
+          pc.addTrack(videoTrack, localVideoStreamRef.current)
+          const isArbitrary = 'isArbitraryTrack' in videoTrack
+          console.log(`🔗 ✅ [POS 2] Added ${isArbitrary ? 'arbitrary' : 'real'} video track: ${videoTrack.label}`)
         }
-      })
+      }
     }
     
-    // 5. Add screen share tracks (if available)
+    // 4. FOURTH: Add screen share tracks (if available) - ALWAYS position 3
     if (localScreenStreamRef.current) {
-      console.log(`🔗 🖥️ Adding ${localScreenStreamRef.current.getTracks().length} screen share tracks`)
-      localScreenStreamRef.current.getTracks().forEach(track => {
-        if (!pc.getSenders().some(sender => sender.track === track)) {
-          pc.addTrack(track, localScreenStreamRef.current!)
-          console.log(`🔗 ✅ Added screen share track: ${track.label}`)
+      const screenTracks = localScreenStreamRef.current.getVideoTracks()
+      if (screenTracks.length > 0) {
+        const screenTrack = screenTracks[0] // Use only first screen track
+        if (!pc.getSenders().some(sender => sender.track === screenTrack)) {
+          pc.addTrack(screenTrack, localScreenStreamRef.current)
+          console.log(`🔗 ✅ [POS 3] Added screen share track: ${screenTrack.label}`)
         }
-      })
+      }
     }
     
-    console.log(`🔗 ✅ ROBUST peer connection for ${remote} created with ${pc.getSenders().length} senders`)
+    console.log(`🔗 ✅ ROBUST peer connection for ${remote} created with ${pc.getSenders().length} senders in strict order`)
     
     return pc
   }, [roomId, currentUser]) // Dependencies for useCallback
@@ -1411,46 +1495,25 @@ export default function CallPage() {
       const renegotiationPromises = Object.entries(peerConnections.current).map(async ([remote, pc]) => {
         const newVideoTrack = stream.getVideoTracks()[0]
         
-        // Find existing video sender (non-screen)
-        const existingVideoSender = pc.getSenders().find(sender =>
+        // Find existing video sender (non-screen) and use safe replacement
+        const existingVideoTrack = pc.getSenders().find(sender =>
           sender.track && sender.track.kind === 'video' && !sender.track.label.includes('screen')
-        )
+        )?.track || null
 
-        if (existingVideoSender) {
-          // Use replaceTrack for seamless camera switch (no renegotiation needed)
-          try {
-            await existingVideoSender.replaceTrack(newVideoTrack)
-            console.log(`Replaced camera track for ${remote}`)            
-            // Set encoding parameters for ULTRA HIGH QUALITY streaming
-            const parameters = existingVideoSender.getParameters()
-            if (!parameters.encodings) {
-              parameters.encodings = [{}]
+        const success = await safeReplaceTrack(pc, existingVideoTrack, newVideoTrack, stream, 'video')
+        if (!success) {
+          console.warn(`Failed to safely replace camera track for ${remote}, falling back to remove/add`)
+          // Fallback: Remove old tracks and add new ones (may cause m-line reordering)
+          pc.getSenders().forEach(sender => {
+            if (sender.track && sender.track.kind === 'video' && !sender.track.label.includes('screen')) {
+              pc.removeTrack(sender)
             }
-            // STREAMING PLATFORM QUALITY: High bitrate for 60fps smooth video
-            if (parameters.encodings[0]) {
-              parameters.encodings[0].maxBitrate = 4000000 // 4 Mbps for 60fps 1080p
-              parameters.encodings[0].maxFramerate = 60    // 60fps streaming quality
-              parameters.encodings[0].scaleResolutionDownBy = 1 // No downscaling
-            }
-            
-            await existingVideoSender.setParameters(parameters)
-            
-            return // No renegotiation needed with replaceTrack
-          } catch (error) {
-            console.warn(`Failed to replace camera track for ${remote}, falling back to full renegotiation:`, error)
-          }
-        }
+          })
 
-        // Fallback: Remove old tracks and add new ones (requires renegotiation)
-        pc.getSenders().forEach(sender => {
-          if (sender.track && sender.track.kind === 'video' && !sender.track.label.includes('screen')) {
-            pc.removeTrack(sender)
+          // Add new video tracks
+          if (!pc.getSenders().some(sender => sender.track === newVideoTrack)) {
+            pc.addTrack(newVideoTrack, stream)
           }
-        })
-
-        // Add new video tracks
-        if (!pc.getSenders().some(sender => sender.track === newVideoTrack)) {
-          pc.addTrack(newVideoTrack, stream)
         }
         
         // Trigger renegotiation only if needed
@@ -1492,13 +1555,24 @@ export default function CallPage() {
         localVideoStreamRef.current = null
       }
       
-      // Remove video tracks and trigger parallel renegotiation
+      // Remove video tracks using safe replacement (maintain m-line order)
       const renegotiationPromises = Object.entries(peerConnections.current).map(async ([remote, pc]) => {
-        pc.getSenders().forEach(sender => {
-          if (sender.track && sender.track.kind === 'video' && !sender.track.label.includes('screen')) {
-            pc.removeTrack(sender)
-          }
-        })
+        // Use safeReplaceTrack to replace video track with null (maintains m-line order)
+        const currentVideoTrack = pc.getSenders().find(sender => 
+          sender.track && sender.track.kind === 'video' && 
+          !sender.track.label.toLowerCase().includes('screen')
+        )?.track || null
+        
+        const success = await safeReplaceTrack(pc, currentVideoTrack, null, new MediaStream(), 'video')
+        if (!success) {
+          console.warn(`Failed to safely replace video track for ${remote}, falling back to remove`)
+          // Fallback: remove track (may cause m-line reordering but necessary if replaceTrack fails)
+          pc.getSenders().forEach(sender => {
+            if (sender.track && sender.track.kind === 'video' && !sender.track.label.includes('screen')) {
+              pc.removeTrack(sender)
+            }
+          })
+        }
         
         // Trigger renegotiation
         try {
@@ -1539,26 +1613,15 @@ export default function CallPage() {
         const renegotiationPromises = Object.entries(peerConnections.current).map(async ([remote, pc]) => {
           const videoTrack = stream.getVideoTracks()[0]
           
-          // Check for existing video track sender to use replaceTrack if possible
-          const existingVideoSender = pc.getSenders().find(sender => 
-            sender.track && sender.track.kind === 'video' && !sender.track.label.includes('screen')
-          )
-          
-          if (existingVideoSender && existingVideoSender.track) {
-            // Replace existing video track (avoids renegotiation)
-            try {
-              await existingVideoSender.replaceTrack(videoTrack)
-              console.log(`Replaced video track for ${remote}`)
-              return // No renegotiation needed
-            } catch (error) {
-              console.warn(`Failed to replace video track for ${remote}, falling back to addTrack:`, error)
+          // Use safeReplaceTrack to maintain m-line order
+          const success = await safeReplaceTrack(pc, null, videoTrack, stream, 'video')
+          if (!success) {
+            console.warn(`Failed to safely add video track for ${remote}, falling back to addTrack`)
+            // Fallback: add track normally (may cause m-line reordering)
+            if (!pc.getSenders().some(sender => sender.track === videoTrack)) {
+              pc.addTrack(videoTrack, stream)
+              console.log(`Added video track to peer connection: ${remote}`)
             }
-          }
-          
-          // Add new track if no existing track or replace failed
-          if (!pc.getSenders().some(sender => sender.track === videoTrack)) {
-            pc.addTrack(videoTrack, stream)
-            console.log(`Added video track to peer connection: ${remote}`)
           }
           
           // Set encoding parameters for video optimization
@@ -1611,7 +1674,7 @@ export default function CallPage() {
   }// --- Toggle screen sharing with optimized parallel renegotiation ---
   const toggleScreenShare = async () => {
     if (screenSharing) {
-      // Turn off screen sharing
+      // Turn off screen sharing with safe track replacement
       if (localScreenStreamRef.current) {
         localScreenStreamRef.current.getTracks().forEach(track => track.stop())
         localScreenStreamRef.current = null
@@ -1623,43 +1686,32 @@ export default function CallPage() {
         localSystemAudioStreamRef.current = null
       }
       
-      // Remove screen and system audio tracks and trigger parallel renegotiation
+      // Use safe track replacement to maintain m-line order
       const renegotiationPromises = Object.entries(peerConnections.current).map(async ([remote, pc]) => {
-        // Remove screen video tracks
-        pc.getSenders().forEach(sender => {
-          if (sender.track && sender.track.kind === 'video' && 
-              (sender.track.label.toLowerCase().includes('screen') || 
-               sender.track.label.toLowerCase().includes('monitor') ||
-               sender.track.label.toLowerCase().includes('display'))) {
-            pc.removeTrack(sender)
-          }
-        })
+        // Remove screen video track safely
+        const currentScreenTrack = pc.getSenders().find(sender => 
+          sender.track && sender.track.kind === 'video' && 
+          (sender.track.label.toLowerCase().includes('screen') || 
+           sender.track.label.toLowerCase().includes('monitor') ||
+           sender.track.label.toLowerCase().includes('display'))
+        )?.track || null
         
-        // CRITICAL FIX: Remove ALL audio tracks and re-add only microphone to prevent echo
-        const audioSendersToRemove: RTCRtpSender[] = []
-        pc.getSenders().forEach(sender => {
-          if (sender.track && sender.track.kind === 'audio') {
-            console.log(`🗑️ Marking audio track for removal to prevent echo: ${sender.track.label}`)
-            audioSendersToRemove.push(sender)
-          }
-        })
-        
-        // Remove all audio senders to clean up any combined/duplicate tracks
-        audioSendersToRemove.forEach(sender => {
-          pc.removeTrack(sender)
-          console.log(`✅ Removed audio track: ${sender.track?.label}`)
-        })
-        
-        // Re-add ONLY clean microphone audio if available
-        if (localStreamRef.current) {
-          const micTracks = localStreamRef.current.getAudioTracks()
-          micTracks.forEach(track => {
-            if (!pc.getSenders().some(sender => sender.track === track)) {
-              pc.addTrack(track, localStreamRef.current!)
-              console.log(`🎤 ✅ Re-added clean microphone track: ${track.label}`)
-            }
-          })
+        if (currentScreenTrack) {
+          await safeReplaceTrack(pc, currentScreenTrack, null, new MediaStream(), 'screen')
         }
+        
+        // Remove system audio track safely
+        const currentSystemAudioTrack = pc.getSenders().find(sender => 
+          sender.track && sender.track.kind === 'audio' && 
+          (sender.track.label.toLowerCase().includes('system') || 
+           sender.track.label.toLowerCase().includes('screen'))
+        )?.track || null
+        
+        if (currentSystemAudioTrack) {
+          await safeReplaceTrack(pc, currentSystemAudioTrack, null, new MediaStream(), 'system-audio')
+        }
+        
+        console.log(`✅ Screen sharing and system audio safely removed for ${remote}`)
         
         // Trigger renegotiation
         try {
