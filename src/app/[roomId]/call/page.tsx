@@ -2909,12 +2909,8 @@ export default function CallPage() {
                         autoPlay
                         playsInline
                         muted
-                        className="w-full h-full rounded bg-gray-900"
-                        style={{ 
-                          transform: isMirrored ? 'scaleX(-1)' : 'none',
-                          objectFit: 'cover',
-                          objectPosition: 'center'
-                        }}
+                        className="w-full h-full object-cover rounded"
+                        style={{ transform: isMirrored ? 'scaleX(-1)' : 'none' }}
                       />
                       
                       {/* Local video indicator */}
@@ -3046,11 +3042,7 @@ export default function CallPage() {
                               ref={remoteVideoRefs.current[peer]}
                               autoPlay
                               playsInline
-                              className="w-full h-full rounded bg-gray-900"
-                              style={{
-                                objectFit: 'cover',
-                                objectPosition: 'center'
-                              }}
+                              className="w-full h-full object-cover rounded"
                             />
                           ) : hasScreenShare ? (
                             <video
