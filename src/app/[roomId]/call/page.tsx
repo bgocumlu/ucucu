@@ -42,6 +42,7 @@ export default function CallPage() {
   const [connecting, setConnecting] = useState(false)
   const [reconnecting, setReconnecting] = useState(false)
   const [connectionSequenceComplete, setConnectionSequenceComplete] = useState(false)
+  const [connectionSequenceProgress, setConnectionSequenceProgress] = useState(0)
   const [error, setError] = useState("")
   const [remoteStreams, setRemoteStreams] = useState<Record<string, MediaStream>>({})
   const [remoteVideoStreams, setRemoteVideoStreams] = useState<Record<string, MediaStream>>({})
@@ -857,20 +858,24 @@ export default function CallPage() {
 // Join call room with UNIVERSAL CONNECTION PROTOCOL
   const joinCall = async () => {
     setConnecting(true)
+    setConnectionSequenceProgress(0)
     setError("")
     console.log('🚀 Starting UNIVERSAL CONNECTION PROTOCOL...')
     
     // STEP 1: ALWAYS create persistent arbitrary tracks as foundation for ALL users
     console.log('🚀 📦 Creating universal track foundation for reliable connections...')
+    setConnectionSequenceProgress(10)
     
     // Create reliable arbitrary foundation FIRST
     console.log('🚀 🔧 Creating persistent arbitrary audio foundation')
     const arbitraryAudioStream = createArbitraryAudioTrack()
     localStreamRef.current = arbitraryAudioStream
+    setConnectionSequenceProgress(20)
     
     console.log('🚀 🔧 Creating persistent arbitrary video foundation')  
     const arbitraryVideoStream = createArbitraryVideoTrack()
     localVideoStreamRef.current = arbitraryVideoStream
+    setConnectionSequenceProgress(30)
     
     // Set both as enabled for UI consistency during connection establishment
     setVideoEnabled(true)
@@ -878,11 +883,13 @@ export default function CallPage() {
     
     // STEP 2: Attempt to upgrade to real microphone (but keep arbitrary as backup)
     console.log('🚀 🎤 Attempting to upgrade to real microphone...')
+    setConnectionSequenceProgress(40)
     try {
       const realAudioStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false })
       
       // SUCCESS: Replace arbitrary audio with real audio
       console.log('🚀 ✅ Microphone access granted - upgrading foundation')
+      setConnectionSequenceProgress(60)
       
       // Stop arbitrary audio tracks
       if (localStreamRef.current) {
@@ -907,6 +914,7 @@ export default function CallPage() {
       
     } catch (err) {
       console.log('🚀 📦 Microphone upgrade failed, keeping arbitrary audio foundation:', err)
+      setConnectionSequenceProgress(60)
       
       // Keep arbitrary audio as foundation
       if (localAudioRef.current && localStreamRef.current) {
@@ -926,6 +934,7 @@ export default function CallPage() {
     
     // STEP 3: Keep arbitrary video longer for reliable connections
     console.log('🚀 📹 Setting up video foundation with extended persistence')
+    setConnectionSequenceProgress(70)
     setTimeout(() => {
       // After connections are established, disable video UI but keep arbitrary tracks
       if (localVideoStreamRef.current) {
@@ -941,12 +950,14 @@ export default function CallPage() {
       setVideoEnabled(false)
       // Mark connection sequence as complete so video controls become available
       setConnectionSequenceComplete(true)
+      setConnectionSequenceProgress(100)
       console.log('🚀 ✅ Video UI disabled but foundation maintained - connection sequence complete')
     }, 10000) // Extended timeout for better connectivity
     
     // Always join as a normal participant (never as listener)
     setActualIsListener(false)
     console.log('🚀 ✅ Universal track foundation established - connecting to signaling...')
+    setConnectionSequenceProgress(80)
       // Connect to signaling
     const ws = new WebSocket(SIGNALING_SERVER_URL)
     wsRef.current = ws
@@ -955,6 +966,7 @@ export default function CallPage() {
       ws.send(JSON.stringify({ type: "call-join", roomId, username: currentUser, isListener: false }))
       setJoined(true)
       setConnecting(false)
+      setConnectionSequenceProgress(90)
     }
     ws.onmessage = async (event) => {
       const msg = JSON.parse(event.data)
@@ -1202,6 +1214,7 @@ export default function CallPage() {
       // Reset state
     setJoined(false)
     setConnectionSequenceComplete(false)
+    setConnectionSequenceProgress(0)
     setRemoteStreams({})
     setRemoteVideoStreams({})
     setRemoteScreenStreams({})
@@ -2084,14 +2097,14 @@ export default function CallPage() {
     console.log('🔧 Creating ROBUST arbitrary audio track for WebRTC connection')
     
     try {
-      // Create audio context and generate audible but quiet audio
+      // Create audio context and generate inaudible but WebRTC-detectable audio
       const audioContext = new (window.AudioContext || window.webkitAudioContext)()
       const oscillator = audioContext.createOscillator()
       const gainNode = audioContext.createGain()
       
-      // Create audible but very quiet audio (important for WebRTC to consider it "active")
+      // Create extremely quiet audio (just enough for WebRTC to consider it "active")
       oscillator.frequency.setValueAtTime(440, audioContext.currentTime) // 440 Hz tone
-      gainNode.gain.setValueAtTime(0.001, audioContext.currentTime) // Quiet but audible to WebRTC
+      gainNode.gain.setValueAtTime(0.00001, audioContext.currentTime) // Virtually inaudible but detectable by WebRTC
       
       oscillator.connect(gainNode)
       
@@ -2118,13 +2131,14 @@ export default function CallPage() {
           writable: false
         })
         
-        console.log('🔧 ✅ Robust arbitrary audio track created:', {
+        console.log('🔧 ✅ Robust arbitrary audio track created (virtually inaudible):', {
           label: audioTrack.label,
           kind: audioTrack.kind,
           enabled: audioTrack.enabled,
           readyState: audioTrack.readyState,
           id: audioTrack.id,
-          isArbitrary: true
+          isArbitrary: true,
+          gainLevel: 0.00001
         })
       } else {
         console.warn('🔧 ❌ Failed to create audio track from arbitrary stream')
@@ -2654,27 +2668,82 @@ export default function CallPage() {
       </header>
       <main className="flex-1 overflow-y-auto px-4 py-6 min-h-0">        {!joined ? (
           <div className="max-w-md mx-auto flex flex-col items-center gap-4">
-            <div className="text-center mb-4">
-              <h2 className="text-lg font-semibold mb-2">Join the Call</h2>
-              <p className="text-sm text-gray-600">Choose how you want to join</p>
-            </div>
-              <div className="w-full space-y-3">
-              <Button onClick={() => joinCall()} disabled={connecting} className="w-full">
-                <Mic className="h-5 w-5 mr-2" /> Join Call
-              </Button>
-            </div>
+            {connecting ? (
+              // Connection Sequence Loading Indicator
+              <div className="text-center space-y-6">
+                <div className="text-center mb-4">
+                  <h2 className="text-lg font-semibold mb-2">Connecting to Call</h2>
+                  <p className="text-sm text-gray-600">Setting up your connection...</p>
+                </div>
+                
+                {/* Progress Bar */}
+                <div className="w-full bg-gray-200 rounded-full h-2">
+                  <div 
+                    className="bg-blue-600 h-2 rounded-full transition-all duration-500 ease-out"
+                    style={{ width: `${connectionSequenceProgress}%` }}
+                  ></div>
+                </div>
+                
+                {/* Progress Text */}
+                <div className="text-sm text-gray-600">
+                  {connectionSequenceProgress < 20 && "Initializing audio foundation..."}
+                  {connectionSequenceProgress >= 20 && connectionSequenceProgress < 40 && "Setting up video foundation..."}
+                  {connectionSequenceProgress >= 40 && connectionSequenceProgress < 60 && "Requesting microphone access..."}
+                  {connectionSequenceProgress >= 60 && connectionSequenceProgress < 80 && "Configuring media streams..."}
+                  {connectionSequenceProgress >= 80 && connectionSequenceProgress < 90 && "Connecting to signaling server..."}
+                  {connectionSequenceProgress >= 90 && connectionSequenceProgress < 100 && "Establishing peer connections..."}
+                  {connectionSequenceProgress >= 100 && "Connection complete!"}
+                </div>
+                
+                {/* Animated Spinner */}
+                <div className="flex justify-center">
+                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+                </div>
+                
+                {/* Connection sequence status - only show during setup */}
+                {!connectionSequenceComplete && (
+                  <div className="text-xs text-gray-500 text-center space-y-2">
+                    <p>Setting up reliable connection...</p>
+                    <p>Video controls will appear once setup is complete.</p>
+                  </div>
+                )}
+              </div>
+            ) : (
+              // Initial Join Screen
+              <>
+                <div className="text-center mb-4">
+                  <h2 className="text-lg font-semibold mb-2">Join the Call</h2>
+                  <p className="text-sm text-gray-600">Choose how you want to join</p>
+                </div>
+                  <div className="w-full space-y-3">
+                  <Button onClick={() => joinCall()} disabled={connecting} className="w-full">
+                    <Mic className="h-5 w-5 mr-2" /> Join Call
+                  </Button>
+                </div>
+                
+                <div className="text-xs text-gray-500 text-center">
+                  Microphone permission will be requested automatically.<br/>
+                  If denied, you&apos;ll join muted and can unmute to try again.
+                </div>
+              </>
+            )}
             
             {error && <div className="text-red-600 text-sm mt-4 p-3 bg-red-50 rounded">{error}</div>}
-              <div className="text-xs text-gray-500 text-center">
-              Microphone permission will be requested automatically.<br/>
-              If denied, you&apos;ll join muted and can unmute to try again.
-            </div>
           </div>) : (
           <div className="h-full flex flex-col min-h-0 space-y-4">            
           {/* Control Panel */}
             <div className="bg-gray-50 rounded-lg p-3 flex-shrink-0">
               <div className="flex items-center justify-between flex-wrap gap-2">
-                <div className="text-sm font-medium text-gray-700">Controls</div>
+                <div className="text-sm font-medium text-gray-700 flex items-center gap-2">
+                  Controls
+                  {/* Show loading indicator during connection sequence */}
+                  {!connectionSequenceComplete && (
+                    <div className="flex items-center gap-2 text-blue-600">
+                      <div className="animate-spin rounded-full h-3 w-3 border-b border-blue-600"></div>
+                      <span className="text-xs">Setting up...</span>
+                    </div>
+                  )}
+                </div>
                 <div className="flex items-center gap-2 flex-wrap">{/* Audio Controls */}
                   {!actualIsListener && (
                     <Button
