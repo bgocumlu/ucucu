@@ -41,6 +41,7 @@ export default function CallPage() {
   const [joined, setJoined] = useState(false)
   const [connecting, setConnecting] = useState(false)
   const [reconnecting, setReconnecting] = useState(false)
+  const [connectionSequenceComplete, setConnectionSequenceComplete] = useState(false)
   const [error, setError] = useState("")
   const [remoteStreams, setRemoteStreams] = useState<Record<string, MediaStream>>({})
   const [remoteVideoStreams, setRemoteVideoStreams] = useState<Record<string, MediaStream>>({})
@@ -938,7 +939,9 @@ export default function CallPage() {
         }
       }
       setVideoEnabled(false)
-      console.log('🚀 ✅ Video UI disabled but foundation maintained')
+      // Mark connection sequence as complete so video controls become available
+      setConnectionSequenceComplete(true)
+      console.log('🚀 ✅ Video UI disabled but foundation maintained - connection sequence complete')
     }, 10000) // Extended timeout for better connectivity
     
     // Always join as a normal participant (never as listener)
@@ -1129,8 +1132,9 @@ export default function CallPage() {
           break
         }
         case "error": {
-          console.error('Call WebSocket error:', msg.message)
-          setError(msg.message || "An error occurred")
+          const errorMessage = msg.message || msg.error || "An unknown error occurred"
+          console.error('Call WebSocket error:', errorMessage, msg)
+          setError(errorMessage)
           
           // If the error has redirect information, redirect to the room
           if (msg.redirectTo) {
@@ -1142,8 +1146,14 @@ export default function CallPage() {
         }
       }
     }
-    ws.onclose = () => setJoined(false)
-    ws.onerror = () => setError("WebSocket error")
+    ws.onclose = () => {
+      console.log('WebSocket connection closed')
+      setJoined(false)
+    }
+    ws.onerror = (error) => {
+      console.error('WebSocket connection error:', error)
+      setError("Connection error. Please check your internet connection and try again.")
+    }
   }  // Leave call room
   const leaveCall = () => {
     // Send leave message to server
@@ -1191,6 +1201,7 @@ export default function CallPage() {
     }
       // Reset state
     setJoined(false)
+    setConnectionSequenceComplete(false)
     setRemoteStreams({})
     setRemoteVideoStreams({})
     setRemoteScreenStreams({})
@@ -1267,8 +1278,19 @@ export default function CallPage() {
 
   // 🔗 ULTRA-ROBUST CONNECTION: Immediate fail detection and aggressive recovery system
   useEffect(() => {
+    // Only run health monitor if we're joined and have participants or connections
+    if (!joined || (participants.size === 0 && Object.keys(connectionHealth).length === 0)) {
+      return
+    }
+
     const healthMonitor = setInterval(() => {
-      console.log('🔗 🔍 Health monitor checking connections:', Object.keys(connectionHealth))
+      const connectionCount = Object.keys(connectionHealth).length
+      const participantCount = participants.size
+      
+      // Only log if we have connections or participants to monitor
+      if (connectionCount > 0 || participantCount > 1) { // More than 1 because we exclude ourselves
+        console.log('🔗 🔍 Health monitor checking connections:', Object.keys(connectionHealth))
+      }
       
       Object.entries(connectionHealth).forEach(([peerId, health]) => {
         const pc = peerConnections.current[peerId]
@@ -1410,7 +1432,7 @@ export default function CallPage() {
     }, 2000) // Much more frequent checks - every 2 seconds for immediate detection
     
     return () => clearInterval(healthMonitor)
-  }, [connectionHealth, roomId, currentUser, participants, createPeerConnection])
+  }, [joined, connectionHealth, roomId, currentUser, participants, createPeerConnection])
 
   // --- Mute/unmute a remote participant ---
   const togglePeerMute = (peer: string) => {
@@ -2665,8 +2687,8 @@ export default function CallPage() {
                       <span className="hidden sm:inline">{muted ? "Unmute" : "Mic"}</span>
                     </Button>
                   )}
-                    {/* Video Controls */}
-                  {!actualIsListener && (
+                    {/* Video Controls - only show after connection sequence is complete */}
+                  {!actualIsListener && connectionSequenceComplete && (
                     <Button
                       size="sm"
                       variant={videoEnabled ? "default" : "outline"}
@@ -2677,8 +2699,8 @@ export default function CallPage() {
                       <span className="hidden sm:inline">Video</span>
                     </Button>
                   )}
-                    {/* Camera Switch Controls - only show when video is enabled */}
-                  {!actualIsListener && videoEnabled && (
+                    {/* Camera Switch Controls - only show when video is enabled and sequence complete */}
+                  {!actualIsListener && videoEnabled && connectionSequenceComplete && (
                     <Button
                       size="sm"
                       variant="outline"
@@ -2691,8 +2713,8 @@ export default function CallPage() {
                     </Button>
                   )}
                   
-                  {/* Mirror Toggle Controls - only show when video is enabled */}
-                  {!actualIsListener && videoEnabled && (
+                  {/* Mirror Toggle Controls - only show when video is enabled and sequence complete */}
+                  {!actualIsListener && videoEnabled && connectionSequenceComplete && (
                     <Button
                       size="sm"
                       variant={isMirrored ? "default" : "outline"}
