@@ -532,15 +532,24 @@ export default function CallPage() {
   }
 
   // UTILITY: Safe track replacement that maintains m-line order
-  const safeReplaceTrack = async (pc: RTCPeerConnection, oldTrack: MediaStreamTrack | null, newTrack: MediaStreamTrack | null, stream: MediaStream, trackType: 'audio' | 'video' | 'screen'): Promise<boolean> => {
+  const safeReplaceTrack = async (pc: RTCPeerConnection, oldTrack: MediaStreamTrack | null, newTrack: MediaStreamTrack | null, stream: MediaStream, trackType: 'audio' | 'video' | 'screen' | 'system-audio'): Promise<boolean> => {
     try {
       // Find the appropriate sender based on track type and current track
       let targetSender: RTCRtpSender | undefined
       
       if (trackType === 'audio') {
-        // Find the first audio sender (we only use ONE audio track now)
+        // Find microphone audio sender (not system audio)
         targetSender = pc.getSenders().find(sender => 
-          sender.track && sender.track.kind === 'audio'
+          sender.track && sender.track.kind === 'audio' && 
+          !sender.track.label.toLowerCase().includes('system') &&
+          !sender.track.label.toLowerCase().includes('screen')
+        )
+      } else if (trackType === 'system-audio') {
+        // Find system audio sender
+        targetSender = pc.getSenders().find(sender => 
+          sender.track && sender.track.kind === 'audio' && 
+          (sender.track.label.toLowerCase().includes('system') || 
+           sender.track.label.toLowerCase().includes('screen'))
         )
       } else if (trackType === 'video') {
         // Find camera video sender (not screen)
@@ -580,59 +589,21 @@ export default function CallPage() {
   }
 
   const recreatePeerConnection = async (peerId: string) => {
-    console.log(`🔥 RECREATING peer connection for ${peerId} due to m-line ordering error`)
+    console.log(`Recreating peer connection for ${peerId}`)
     
-    // CRITICAL: Store current track state before recreation to maintain consistency
-    const existingPC = peerConnections.current[peerId]
-    let existingTrackInfo: { kind: string; label: string; enabled: boolean }[] = []
-    
-    if (existingPC) {
-      existingTrackInfo = existingPC.getSenders().map(sender => ({
-        kind: sender.track?.kind || 'unknown',
-        label: sender.track?.label || 'unknown',
-        enabled: sender.track?.enabled || false
-      }))
-      console.log(`🔥 Storing existing track order for ${peerId}:`, existingTrackInfo)
-      
-      // Close existing connection
-      existingPC.close()
+    // Close existing connection
+    if (peerConnections.current[peerId]) {
+      peerConnections.current[peerId].close()
       delete peerConnections.current[peerId]
     }
     
-    // Clear any existing timeouts
-    if (connectionTimeouts.current[peerId]) {
-      clearTimeout(connectionTimeouts.current[peerId])
-      delete connectionTimeouts.current[peerId]
-    }
-    
-    // IMPORTANT: Wait a moment for complete cleanup
-    await new Promise(resolve => setTimeout(resolve, 100))
-    
-    // Create new connection with IDENTICAL track order
-    console.log(`🔥 Creating FRESH peer connection for ${peerId} with consistent track order`)
+    // Create new connection
     const newPc = createPeerConnection(peerId)
     
-    // VERIFY: Log new track order and compare with previous
-    const newTrackInfo = newPc.getSenders().map(sender => ({
-      kind: sender.track?.kind || 'unknown',
-      label: sender.track?.label || 'unknown', 
-      enabled: sender.track?.enabled || false
-    }))
-    
-    console.log(`🔥 NEW track order for ${peerId}:`, newTrackInfo)
-    console.log(`🔥 Order consistency check:`, {
-      previousCount: existingTrackInfo.length,
-      newCount: newTrackInfo.length,
-      kindsMatch: existingTrackInfo.map(t => t.kind).join(',') === newTrackInfo.map(t => t.kind).join(','),
-      orderChanged: JSON.stringify(existingTrackInfo) !== JSON.stringify(newTrackInfo)
-    })
-    
-    // Trigger new negotiation with ICE restart for clean slate
+    // Trigger new negotiation
     try {
-      console.log(`🔥 Sending FRESH offer to ${peerId} with ICE restart`)
-      const offer = await newPc.createOffer({ iceRestart: true })
+      const offer = await newPc.createOffer()
       await newPc.setLocalDescription(offer)
-      
       if (wsRef.current) {
         wsRef.current.send(JSON.stringify({ 
           type: "call-offer", 
@@ -642,408 +613,10 @@ export default function CallPage() {
           payload: newPc.localDescription 
         }))
       }
-      
-      console.log(`🔥 ✅ FRESH peer connection created for ${peerId} - should resolve m-line ordering`)
     } catch (error) {
-      console.error(`🔥 ❌ Error in recreated peer connection offer for ${peerId}:`, error)
+      console.error('Error in recreated peer connection offer:', error)
     }
   }
-
-  // UNIVERSAL TRACK SYNCHRONIZATION: Ensure all peers have complete media state
-  const synchronizeAllMediaTracks = useCallback(async (targetPeer?: string) => {
-    console.log('🔄 UNIVERSAL MEDIA SYNC: Starting comprehensive track synchronization...')
-    
-    const peersToSync = targetPeer ? [targetPeer] : Object.keys(peerConnections.current)
-    
-    for (const peerId of peersToSync) {
-      const pc = peerConnections.current[peerId]
-      if (!pc) continue
-      
-      console.log(`🔄 📡 Synchronizing ALL media tracks for peer: ${peerId}`)
-      
-      // Get current senders to avoid duplicates
-      const existingSenders = pc.getSenders()
-      
-      // 1. AUDIO SYNCHRONIZATION: Handle microphone and system audio intelligently
-      const hasMicrophone = localStreamRef.current && localStreamRef.current.getAudioTracks().length > 0
-      const hasSystemAudio = localSystemAudioStreamRef.current && localSystemAudioStreamRef.current.getAudioTracks().length > 0
-      
-      console.log(`🔄 🎵 Audio sync state for ${peerId}:`, {
-        hasMicrophone,
-        hasSystemAudio,
-        microphoneTracks: localStreamRef.current?.getAudioTracks().length || 0,
-        systemAudioTracks: localSystemAudioStreamRef.current?.getAudioTracks().length || 0
-      })
-      
-      if (hasMicrophone && hasSystemAudio) {
-        // CRITICAL: Check for existing master mixed track stored as custom property first
-        const streamWithMixedTrack = localStreamRef.current as MediaStream & { masterMixedTrack?: MediaStreamTrack }
-        const storedMasterMixedTrack = streamWithMixedTrack.masterMixedTrack
-        
-        // Also check for master mixed track in the actual stream tracks
-        const inStreamMasterMixedTrack = localStreamRef.current?.getAudioTracks().find(track => 
-          'isMixedAudio' in track && (track as MediaStreamTrack & { isMixedAudio: boolean }).isMixedAudio
-        )
-        
-        const masterMixedTrack = storedMasterMixedTrack || inStreamMasterMixedTrack
-        
-        if (masterMixedTrack && masterMixedTrack.readyState === 'live') {
-          // SMART PROTECTION: Check if the master mixed track is already correctly assigned
-          const existingAudioSender = existingSenders.find(sender => 
-            sender.track && sender.track.kind === 'audio'
-          )
-          
-          if (existingAudioSender && existingAudioSender.track === masterMixedTrack) {
-            console.log(`🔄 🔍 SKIP SYNC: ${peerId} already has correct master mixed track - no action needed`)
-            console.log(`🔄 🔍 Track verification:`, {
-              label: masterMixedTrack.label,
-              id: masterMixedTrack.id,
-              enabled: masterMixedTrack.enabled,
-              readyState: masterMixedTrack.readyState,
-              senderMatches: true
-            })
-            continue // Skip this peer - already correctly configured
-          }
-          
-          console.log(`🔄 🎵 MASTER MIXED AUDIO: Using existing master mixed track for ${peerId}`)
-          console.log(`🔄 🎵 Master track details:`, {
-            label: masterMixedTrack.label,
-            id: masterMixedTrack.id,
-            enabled: masterMixedTrack.enabled,
-            readyState: masterMixedTrack.readyState,
-            isMixedAudio: 'isMixedAudio' in masterMixedTrack,
-            containsSystemAudio: 'containsSystemAudio' in masterMixedTrack,
-            source: storedMasterMixedTrack ? 'stored property' : 'in-stream track'
-          })
-          
-          if (existingAudioSender && existingAudioSender.track !== masterMixedTrack) {
-            try {
-              console.log(`🔄 🔄 REPLACING track for ${peerId}: ${existingAudioSender.track?.label} → ${masterMixedTrack.label}`)
-              await existingAudioSender.replaceTrack(masterMixedTrack)
-              console.log(`🔄 ✅ ${peerId} audio track SUCCESSFULLY replaced with MASTER mixed audio (mic+system)`)
-              
-              // VERIFY: Check the replacement actually worked
-              const currentTrack = existingAudioSender.track
-              const isCorrectTrack = currentTrack === masterMixedTrack
-              console.log(`🔄 🔍 Track replacement verification for ${peerId}:`, {
-                replacementWorked: isCorrectTrack,
-                currentTrackLabel: currentTrack?.label,
-                expectedTrackLabel: masterMixedTrack.label,
-                currentTrackId: currentTrack?.id,
-                expectedTrackId: masterMixedTrack.id
-              })
-              
-              if (!isCorrectTrack) {
-                console.error(`🔄 ❌ Track replacement FAILED for ${peerId} - track mismatch detected!`)
-              }
-            } catch (error) {
-              console.error(`🔄 ❌ Failed to replace with master mixed track for ${peerId}:`, error)
-              // Fallback: force add the master mixed track
-              console.log(`🔄 🔄 FALLBACK: Force adding master mixed track for ${peerId}`)
-              try {
-                pc.addTrack(masterMixedTrack, localStreamRef.current!)
-                console.log(`🔄 ✅ FALLBACK: Master mixed track force-added for ${peerId}`)
-              } catch (addError) {
-                console.error(`🔄 ❌ FALLBACK FAILED for ${peerId}:`, addError)
-              }
-            }
-          } else if (!existingAudioSender) {
-            // Add master mixed track if no existing sender
-            pc.addTrack(masterMixedTrack, localStreamRef.current!)
-            console.log(`🔄 ✅ ${peerId} master mixed audio track added (no existing sender)`)
-          } else {
-            // Sender exists and track matches - verify it's actually working
-            const currentTrack = existingAudioSender.track
-            const isCorrectTrack = currentTrack === masterMixedTrack
-            console.log(`🔄 🔍 VERIFICATION: ${peerId} track status:`, {
-              senderExists: !!existingAudioSender,
-              trackMatches: isCorrectTrack,
-              currentTrackLabel: currentTrack?.label,
-              expectedTrackLabel: masterMixedTrack.label,
-              trackEnabled: currentTrack?.enabled,
-              trackState: currentTrack?.readyState
-            })
-            
-            if (isCorrectTrack) {
-              console.log(`🔄 ✅ ${peerId} already has the correct master mixed track and it's verified`)
-            } else {
-              console.warn(`🔄 ⚠️ ${peerId} track verification FAILED - forcing replacement`)
-              try {
-                await existingAudioSender.replaceTrack(masterMixedTrack)
-                console.log(`🔄 ✅ ${peerId} track FORCE-REPLACED during verification`)
-              } catch (error) {
-                console.error(`🔄 ❌ FORCE-REPLACEMENT failed for ${peerId}:`, error)
-              }
-            }
-          }
-          
-          // CRITICAL: Skip individual mixed audio creation when we have master mixed track
-          console.log(`🔄 📝 SYNC PRESERVATION: Skipping individual mixed audio for ${peerId} - master mixed track active`)
-        } else {
-          console.log(`🔄 🎵 INDIVIDUAL MIXED AUDIO: Creating combined mic+system audio for late joiner ${peerId}`)
-          
-          // Get existing audio sender to replace the track
-          const existingAudioSender = existingSenders.find(sender => 
-            sender.track && sender.track.kind === 'audio'
-          )
-          
-          if (existingAudioSender) {
-            // IMPORTANT: Check if we've already created a mixed track for this peer to avoid recreation
-            const existingMixedContext = mixedAudioContextsRef.current.get(peerId)
-            if (existingMixedContext && existingMixedContext.state !== 'closed') {
-              console.log(`🔄 ⏭️ Skipping mixed audio creation for ${peerId} - already exists`)
-              return // Skip creating new mixed track
-            }
-            // Create mixed audio track for late joiner
-            try {
-              const audioContext = new AudioContext({
-                sampleRate: 48000,
-                latencyHint: 'interactive'
-              })
-              
-              if (audioContext.state === 'suspended') {
-                await audioContext.resume()
-              }
-              
-              const mixedOutput = audioContext.createGain()
-              
-              // Create sources for both audio streams
-              const microphoneSource = audioContext.createMediaStreamSource(localStreamRef.current!)
-              const systemSource = audioContext.createMediaStreamSource(localSystemAudioStreamRef.current!)
-              
-              // Set balanced gain levels
-              const micGain = audioContext.createGain()
-              const systemGain = audioContext.createGain()
-              micGain.gain.setValueAtTime(0.7, audioContext.currentTime) // 70% microphone
-              systemGain.gain.setValueAtTime(0.8, audioContext.currentTime) // 80% system audio
-              
-              // Connect sources through gain nodes to the output
-              microphoneSource.connect(micGain)
-              systemSource.connect(systemGain)
-              micGain.connect(mixedOutput)
-              systemGain.connect(mixedOutput)
-              
-              // Create destination and get mixed stream
-              const destination = audioContext.createMediaStreamDestination()
-              mixedOutput.connect(destination)
-              
-              const mixedTrack = destination.stream.getAudioTracks()[0]
-              if (mixedTrack) {
-                // Mark the mixed track
-                Object.defineProperty(mixedTrack, 'label', {
-                  value: 'Mixed Audio (Microphone + System) - Late Joiner Sync',
-                  writable: false
-                })
-                
-                Object.defineProperty(mixedTrack, 'isMixedAudio', {
-                  value: true,
-                  writable: false
-                })
-                
-                // Replace existing audio track with mixed one
-                await existingAudioSender.replaceTrack(mixedTrack)
-                console.log(`🔄 ✅ Late joiner ${peerId} audio track replaced with INDIVIDUAL mixed audio (mic+system)`)
-                
-                // Store audio context for cleanup
-                mixedAudioContextsRef.current.set(peerId, audioContext)
-              } else {
-                console.warn(`🔄 ❌ Failed to create mixed audio track for late joiner ${peerId}`)
-                await audioContext.close()
-              }
-            } catch (error) {
-              console.error(`🔄 ❌ Failed to create mixed audio for late joiner ${peerId}:`, error)
-              // Fallback: add tracks separately
-              if (localStreamRef.current) {
-                const audioTracks = localStreamRef.current.getAudioTracks()
-                for (const track of audioTracks) {
-                  const existingSender = existingSenders.find(s => s.track?.id === track.id)
-                  if (!existingSender) {
-                    pc.addTrack(track, localStreamRef.current!)
-                    console.log(`🔄 🎤 Added MICROPHONE track (fallback) for ${peerId}:`, track.label)
-                  }
-                }
-              }
-            }
-          } else {
-            // No existing audio sender, add microphone first, then system audio
-            if (localStreamRef.current) {
-              const audioTracks = localStreamRef.current.getAudioTracks()
-              for (const track of audioTracks) {
-                const existingSender = existingSenders.find(s => s.track?.id === track.id)
-                if (!existingSender) {
-                  pc.addTrack(track, localStreamRef.current!)
-                  console.log(`🔄 🎤 Added MICROPHONE track for ${peerId}:`, track.label)
-                }
-              }
-            }
-            
-            // Add system audio as well
-            if (localSystemAudioStreamRef.current) {
-              const systemAudioTracks = localSystemAudioStreamRef.current.getAudioTracks()
-              for (const track of systemAudioTracks) {
-                const existingSender = existingSenders.find(s => s.track?.id === track.id)
-                if (!existingSender) {
-                  pc.addTrack(track, localSystemAudioStreamRef.current!)
-                  console.log(`🔄 🔊 Added SYSTEM AUDIO track for ${peerId}:`, track.label)
-                }
-              }
-            }
-          }
-        }
-      } else if (hasMicrophone) {
-        // Only microphone audio - add normally
-        const audioTracks = localStreamRef.current!.getAudioTracks()
-        for (const track of audioTracks) {
-          const existingSender = existingSenders.find(s => s.track?.id === track.id)
-          if (!existingSender) {
-            pc.addTrack(track, localStreamRef.current!)
-            console.log(`🔄 🎤 Added MICROPHONE-ONLY track for ${peerId}:`, track.label)
-          }
-        }
-      } else if (hasSystemAudio) {
-        // Only system audio - add normally  
-        const systemAudioTracks = localSystemAudioStreamRef.current!.getAudioTracks()
-        for (const track of systemAudioTracks) {
-          const existingSender = existingSenders.find(s => s.track?.id === track.id)
-          if (!existingSender) {
-            pc.addTrack(track, localSystemAudioStreamRef.current!)
-            console.log(`🔄 🔊 Added SYSTEM-AUDIO-ONLY track for ${peerId}:`, track.label)
-          }
-        }
-      }
-      
-      // 2. VIDEO SYNCHRONIZATION: Ensure camera video if enabled
-      if (localVideoStreamRef.current && videoEnabled) {
-        const videoTracks = localVideoStreamRef.current.getVideoTracks()
-        for (const track of videoTracks) {
-          // Skip arbitrary video tracks when video is disabled
-          if ('isArbitraryTrack' in track && !videoEnabled) continue
-          
-          const existingSender = existingSenders.find(s => s.track?.id === track.id)
-          if (!existingSender) {
-            pc.addTrack(track, localVideoStreamRef.current!)
-            console.log(`🔄 📹 Added VIDEO track for ${peerId}:`, track.label)
-          }
-        }
-      }
-      
-      // 3. SCREEN SHARE SYNCHRONIZATION: Ensure screen sharing if active
-      if (localScreenStreamRef.current && screenSharing) {
-        const screenTracks = localScreenStreamRef.current.getVideoTracks()
-        for (const track of screenTracks) {
-          const existingSender = existingSenders.find(s => s.track?.id === track.id)
-          if (!existingSender) {
-            pc.addTrack(track, localScreenStreamRef.current!)
-            console.log(`🔄 📺 Added SCREEN SHARE track for ${peerId}:`, track.label)
-          }
-        }
-        
-        // Screen audio tracks - NOTE: These are already handled in the mixed audio logic above
-        // when both microphone and system audio are present. Only add separately if no microphone.
-        if (!hasMicrophone) {
-          const screenAudioTracks = localScreenStreamRef.current.getAudioTracks()
-          for (const track of screenAudioTracks) {
-            const existingSender = existingSenders.find(s => s.track?.id === track.id)
-            if (!existingSender) {
-              pc.addTrack(track, localScreenStreamRef.current!)
-              console.log(`🔄 🔊 Added SCREEN AUDIO track for ${peerId}:`, track.label)
-            }
-          }
-        } else {
-          console.log(`🔄 📝 Skipping separate screen audio tracks for ${peerId} - already included in mixed audio`)
-        }
-      }
-      
-      console.log(`🔄 ✅ ENHANCED Media synchronization complete for ${peerId} - Total senders: ${pc.getSenders().length}`)
-      console.log(`🔄 � Final sync summary for ${peerId}:`, {
-        audioHandling: hasMicrophone && hasSystemAudio ? 'MIXED' : hasMicrophone ? 'MIC_ONLY' : hasSystemAudio ? 'SYSTEM_ONLY' : 'NONE',
-        videoEnabled,
-        screenSharing,
-        totalSenders: pc.getSenders().length
-      })
-      
-      // Trigger renegotiation after synchronization
-      try {
-        if (pc.signalingState === 'stable') {
-          const offer = await pc.createOffer()
-          await pc.setLocalDescription(offer)
-          if (wsRef.current) {
-            wsRef.current.send(JSON.stringify({ 
-              type: "call-offer", 
-              roomId, 
-              from: currentUser, 
-              to: peerId, 
-              payload: pc.localDescription 
-            }))
-          }
-          console.log(`🔄 ✅ Renegotiation offer sent to ${peerId} after synchronization`)
-        }
-      } catch (error) {
-        console.error(`🔄 ❌ Failed to renegotiate with ${peerId} after synchronization:`, error)
-      }
-    }
-  }, [videoEnabled, screenSharing, roomId, currentUser])
-
-  // SELECTIVE SYNC: Only sync non-audio tracks to avoid interfering with working mixed audio
-  const synchronizeNonAudioTracks = useCallback(async (targetPeer: string) => {
-    console.log(`🔄 🎵 NON-AUDIO SYNC: Starting selective track synchronization for ${targetPeer} (audio preserved)`)
-    
-    const pc = peerConnections.current[targetPeer]
-    if (!pc) return
-    
-    // Get current senders to avoid duplicates
-    const existingSenders = pc.getSenders()
-    
-    // 1. VIDEO SYNCHRONIZATION: Ensure camera video if enabled
-    if (localVideoStreamRef.current && videoEnabled) {
-      const videoTracks = localVideoStreamRef.current.getVideoTracks()
-      for (const track of videoTracks) {
-        const alreadyHasTrack = existingSenders.some(sender => sender.track === track)
-        if (!alreadyHasTrack) {
-          pc.addTrack(track, localVideoStreamRef.current)
-          console.log(`🔄 📹 Added missing video track for ${targetPeer}: ${track.label}`)
-        }
-      }
-    }
-    
-    // 2. SCREEN SHARE SYNCHRONIZATION: Ensure screen sharing if active
-    if (localScreenStreamRef.current && screenSharing) {
-      const screenTracks = localScreenStreamRef.current.getVideoTracks()
-      for (const track of screenTracks) {
-        const alreadyHasTrack = existingSenders.some(sender => sender.track === track)
-        if (!alreadyHasTrack) {
-          pc.addTrack(track, localScreenStreamRef.current)
-          console.log(`🔄 🖥️ Added missing screen share track for ${targetPeer}: ${track.label}`)
-        }
-      }
-      
-      // IMPORTANT: Do NOT add screen audio tracks - those are handled by mixed audio
-      console.log(`🔄 🎵 Skipping screen audio tracks for ${targetPeer} - already handled by working mixed audio`)
-    }
-    
-    console.log(`🔄 ✅ NON-AUDIO synchronization complete for ${targetPeer} - audio preserved, other tracks synced`)
-    
-    // Trigger renegotiation after synchronization
-    try {
-      if (pc.signalingState === 'stable') {
-        const offer = await pc.createOffer()
-        await pc.setLocalDescription(offer)
-        
-        if (wsRef.current) {
-          wsRef.current.send(JSON.stringify({
-            type: "call-offer",
-            roomId,
-            from: currentUser,
-            to: targetPeer,
-            payload: pc.localDescription
-          }))
-        }
-        console.log(`🔄 ✅ Renegotiation offer sent to ${targetPeer} after non-audio sync`)
-      }
-    } catch (error) {
-      console.error(`🔄 ❌ Failed to renegotiate with ${targetPeer} after non-audio sync:`, error)
-    }
-  }, [videoEnabled, screenSharing, roomId, currentUser])
 
   const createPeerConnection = useCallback((remote: string) => {
     const pc = new RTCPeerConnection(ICE_CONFIG)
@@ -1061,11 +634,26 @@ export default function CallPage() {
         console.log(`🔗 � TIMEOUT RECOVERY: Marking ${remote} as failed for immediate recreation`)
         setConnectionHealth(prev => ({ ...prev, [remote]: 'failed' }))
       }
-    }, 30000) // Longer timeout - 30 seconds to allow proper connection establishment
+    }, 10000) // Shorter timeout - 10 seconds instead of 15
     
     connectionTimeouts.current[remote] = timeout
     
-    // Remove aggressive quick check to give connections time to establish properly
+    // Additional quick check for stuck "new" state
+    const quickCheck = setTimeout(() => {
+      if (pc.connectionState === 'new') {
+        console.log(`🔗 ⚡ QUICK CHECK: ${remote} still in 'new' state after 3 seconds - may be stuck`)
+        // Don't fail yet, but warn
+        console.log(`🔗 📊 Connection details for ${remote}:`, {
+          connectionState: pc.connectionState,
+          iceConnectionState: pc.iceConnectionState,
+          iceGatheringState: pc.iceGatheringState,
+          signalingState: pc.signalingState
+        })
+      }
+    }, 3000)
+    
+    // Store quick check timeout for cleanup
+    setTimeout(() => clearTimeout(quickCheck), 11000)
     
     // Enhanced connection state monitoring with ICE state tracking
     pc.onconnectionstatechange = () => {
@@ -1138,59 +726,55 @@ export default function CallPage() {
       const track = e.track
       const stream = e.streams[0]
       
-      console.log(`📡 Received track from ${remote}:`, {
-        kind: track.kind,
-        label: track.label,
-        id: track.id,
-        enabled: track.enabled,
-        readyState: track.readyState
-      })
+      console.log('Received track:', track.kind, track.label, 'from', remote)
       
       if (track.kind === 'audio') {
-        // Check if this is a mixed audio track
+        // Check if this is a mixed audio track (contains both mic and system audio)
         const isMixedAudio = track.label.toLowerCase().includes('mixed audio') ||
-                           track.label.toLowerCase().includes('microphone + system') ||
-                           ('isMixedAudio' in track && (track as MediaStreamTrack & { isMixedAudio: boolean }).isMixedAudio)
+                           track.label.toLowerCase().includes('microphone + system')
         
-        // Check if this is system audio
-        const isSystemAudio = track.label.toLowerCase().includes('system audio') ||
+        // Distinguish between microphone, system audio, and mixed audio
+        const isSystemAudio = ('isSystemAudio' in track && (track as { isSystemAudio: boolean }).isSystemAudio) ||
+                             track.label.toLowerCase().includes('system audio') ||
                              track.label.toLowerCase().includes('screen') ||
-                             ('isSystemAudio' in track && (track as MediaStreamTrack & { isSystemAudio: boolean }).isSystemAudio)
+                             track.label.toLowerCase().includes('monitor') ||
+                             track.label.toLowerCase().includes('display') ||
+                             track.label.toLowerCase().includes('desktop')
         
-        console.log(`🎵 Audio track analysis for ${remote}:`, {
+        console.log('Audio track analysis:', {
           trackLabel: track.label,
+          hasSystemAudioProperty: 'isSystemAudio' in track,
+          isSystemAudioValue: ('isSystemAudio' in track) ? (track as { isSystemAudio: boolean }).isSystemAudio : undefined,
           isMixedAudio: isMixedAudio,
-          isSystemAudio: isSystemAudio
+          isSystemAudio: isSystemAudio,
+          remote: remote
         })
         
         if (isMixedAudio) {
-          console.log(`🎵 ✅ Received mixed audio (mic + system) from ${remote}`)
-          // Mixed audio contains both microphone and system audio
+          console.log('🎵 Setting as mixed audio (mic + system) for', remote, 'label:', track.label)
+          // Mixed audio goes to the main audio stream and gets duplicated to system audio for compatibility
           setRemoteStreams(prev => ({ ...prev, [remote]: stream }))
-          // Also set as system audio for compatibility with UI that expects separate system audio
           setRemoteSystemAudioStreams(prev => ({ ...prev, [remote]: stream }))
         } else if (isSystemAudio) {
-          console.log(`🔊 ✅ Received system audio from ${remote}`)
+          console.log('🔊 Setting as system audio for', remote, 'label:', track.label)
           setRemoteSystemAudioStreams(prev => ({ ...prev, [remote]: stream }))
         } else {
-          console.log(`🎤 ✅ Received microphone audio from ${remote}`)
+          console.log('🎤 Setting as microphone audio for', remote, 'label:', track.label)
           setRemoteStreams(prev => ({ ...prev, [remote]: stream }))
         }
       } else if (track.kind === 'video') {
-        // Check track label to determine if it's screen share
+        // Check track label or use track settings to determine if it's screen share
+        // Screen share tracks typically have labels containing 'screen' or have specific constraints
         const isScreenShare = track.label.toLowerCase().includes('screen') || 
                              track.label.toLowerCase().includes('monitor') ||
                              track.label.toLowerCase().includes('display') ||
                              track.getSettings().displaySurface === 'monitor'
         
         if (isScreenShare) {
-          console.log(`🖥️ ✅ Received screen share from ${remote}:`, {
-            label: track.label,
-            settings: track.getSettings()
-          })
+          console.log('Setting as screen share for', remote)
           setRemoteScreenStreams(prev => ({ ...prev, [remote]: stream }))
         } else {
-          console.log(`📹 ✅ Received camera video from ${remote}`)
+          console.log('Setting as video for', remote)
           setRemoteVideoStreams(prev => ({ ...prev, [remote]: stream }))
         }
       }
@@ -1208,16 +792,11 @@ export default function CallPage() {
     const hasRealAudio = currentAudioTracks.some(track => !('isArbitraryTrack' in track))
     
     if (!hasRealAudio) {
-      console.log(`🔗 📦 No real audio detected, ensuring arbitrary audio foundation exists for ${remote}`)
+      console.log(`🔗 📦 No real audio detected, ensuring arbitrary audio foundation exists`)
       if (!localStreamRef.current || currentAudioTracks.length === 0) {
-        console.log(`🔗 🔧 Creating new arbitrary audio foundation for peer connection`)
+        console.log(`🔗 🔧 Creating new arbitrary audio foundation`)
         const arbitraryAudioStream = createArbitraryAudioTrack()
         localStreamRef.current = arbitraryAudioStream
-        
-        // Update local audio element
-        if (localAudioRef.current) {
-          localAudioRef.current.srcObject = arbitraryAudioStream
-        }
       }
     }
     
@@ -1225,189 +804,67 @@ export default function CallPage() {
     const hasRealVideo = currentVideoTracks.some(track => !('isArbitraryTrack' in track))
     
     if (!hasRealVideo && (!localVideoStreamRef.current || currentVideoTracks.length === 0)) {
-      console.log(`🔗 🔧 Creating persistent arbitrary video foundation for ${remote}`)
+      console.log(`🔗 🔧 Creating persistent arbitrary video foundation`)
       const arbitraryVideoStream = createArbitraryVideoTrack()
       localVideoStreamRef.current = arbitraryVideoStream
-      
-      // Update local video element if not already set
-      if (localVideoRef.current && !localVideoRef.current.srcObject) {
-        localVideoRef.current.srcObject = arbitraryVideoStream
-      }
     }
     
     // STRICT ORDER IMPLEMENTATION: Add tracks in exact order to maintain m-line consistency
     
-    // CRITICAL DEBUGGING: Log current state before track addition
-    console.log(`🔗 🔍 COMPREHENSIVE STATE CHECK for ${remote}:`, {
-      screenSharing,
-      hasLocalSystemAudio: !!localSystemAudioStreamRef.current,
-      localStreamExists: !!localStreamRef.current,
-      audioTracksCount: localStreamRef.current?.getAudioTracks().length || 0,
-      videoEnabled,
-      videoTracksCount: localVideoStreamRef.current?.getVideoTracks().length || 0,
-      screenTracksCount: localScreenStreamRef.current?.getVideoTracks().length || 0,
-      systemAudioTracksCount: localSystemAudioStreamRef.current?.getAudioTracks().length || 0
-    })
-    
-    // 1. FIRST: Add SINGLE audio track (real, arbitrary, or mixed) - ALWAYS position 0
+    // 1. FIRST: Add microphone audio tracks (real or arbitrary) - ALWAYS position 0
     if (localStreamRef.current) {
       const audioTracks = localStreamRef.current.getAudioTracks()
-      
-      // CRITICAL: Check for stored master mixed track for late joiners during screen sharing
-      const streamWithMixedTrack = localStreamRef.current as MediaStream & { masterMixedTrack?: MediaStreamTrack }
-      const storedMasterMixedTrack = streamWithMixedTrack.masterMixedTrack
-      
-      // Also check for master mixed track in the actual stream tracks
-      const inStreamMasterMixedTrack = audioTracks.find(track => 
-        'isMixedAudio' in track && (track as MediaStreamTrack & { isMixedAudio: boolean }).isMixedAudio
-      )
-      
-      const masterMixedTrack = storedMasterMixedTrack || inStreamMasterMixedTrack
-      
-      // DEBUGGING: Log master mixed track detection
-      console.log(`🔗 🔍 Master mixed track detection for ${remote}:`, {
-        screenSharing,
-        hasSystemAudio: !!localSystemAudioStreamRef.current,
-        storedMasterMixedTrack: !!storedMasterMixedTrack,
-        storedTrackState: storedMasterMixedTrack?.readyState,
-        storedTrackLabel: storedMasterMixedTrack?.label,
-        inStreamMasterMixedTrack: !!inStreamMasterMixedTrack,
-        inStreamTrackState: inStreamMasterMixedTrack?.readyState,
-        inStreamTrackLabel: inStreamMasterMixedTrack?.label,
-        finalMasterMixedTrack: !!masterMixedTrack,
-        finalTrackState: masterMixedTrack?.readyState,
-        finalTrackLabel: masterMixedTrack?.label,
-        audioTracksCount: audioTracks.length,
-        audioTrackLabels: audioTracks.map(t => t.label),
-        conditionsMet: !!(masterMixedTrack && masterMixedTrack.readyState === 'live' && screenSharing && localSystemAudioStreamRef.current)
-      })
-      
-      // ENHANCED: Use master mixed track if we're screen sharing with system audio
-      if (masterMixedTrack && masterMixedTrack.readyState === 'live' && screenSharing && localSystemAudioStreamRef.current) {
-        // Use the master mixed track for late joiners during screen sharing with system audio
-        if (!pc.getSenders().some(sender => sender.track === masterMixedTrack)) {
-          pc.addTrack(masterMixedTrack, localStreamRef.current)
-          console.log(`🔗 ✅ [POS 0] Added master mixed audio track for late joiner ${remote}: ${masterMixedTrack.label}, enabled: ${masterMixedTrack.enabled}`)
-          console.log(`🔗 🎵 Late joiner ${remote} will receive BOTH microphone and system audio in single mixed track`)
-        }
-      } else if (audioTracks.length > 0) {
+      if (audioTracks.length > 0) {
         const audioTrack = audioTracks[0] // Use only first audio track to maintain order
         if (!pc.getSenders().some(sender => sender.track === audioTrack)) {
           pc.addTrack(audioTrack, localStreamRef.current)
           const isArbitrary = 'isArbitraryTrack' in audioTrack
-          const isMixed = audioTrack.label.toLowerCase().includes('mixed')
-          console.log(`🔗 ✅ [POS 0] Added ${isArbitrary ? 'arbitrary' : isMixed ? 'mixed' : 'real'} audio track: ${audioTrack.label}, enabled: ${audioTrack.enabled}`)
-          
-          // IMPORTANT: If we're screen sharing with system audio but no master mixed track,
-          // we should warn that this late joiner won't get the optimal experience
-          if (screenSharing && localSystemAudioStreamRef.current && !isMixed) {
-            console.warn(`🔗 ⚠️ Late joiner ${remote} is getting separate microphone track - system audio will be added separately (not optimal)`)
-          }
+          console.log(`🔗 ✅ [POS 0] Added ${isArbitrary ? 'arbitrary' : 'real'} audio track: ${audioTrack.label}, enabled: ${audioTrack.enabled}`)
         }
       }
     }
     
-    // 2. SECOND: Add video tracks (real or arbitrary) - ALWAYS position 1
-    if (localVideoStreamRef.current && videoEnabled) {
+    // 2. SECOND: Add system audio tracks (if available) - ALWAYS position 1
+    if (localSystemAudioStreamRef.current) {
+      const systemAudioTracks = localSystemAudioStreamRef.current.getAudioTracks()
+      if (systemAudioTracks.length > 0) {
+        const systemAudioTrack = systemAudioTracks[0] // Use only first system audio track
+        if (!pc.getSenders().some(sender => sender.track === systemAudioTrack)) {
+          pc.addTrack(systemAudioTrack, localSystemAudioStreamRef.current)
+          console.log(`🔗 ✅ [POS 1] Added system audio track: ${systemAudioTrack.label}, enabled: ${systemAudioTrack.enabled}`)
+        }
+      }
+    }
+    
+    // 3. THIRD: Add video tracks (real or arbitrary) - ALWAYS position 2
+    if (localVideoStreamRef.current) {
       const videoTracks = localVideoStreamRef.current.getVideoTracks()
       if (videoTracks.length > 0) {
         const videoTrack = videoTracks[0] // Use only first video track to maintain order
         if (!pc.getSenders().some(sender => sender.track === videoTrack)) {
           pc.addTrack(videoTrack, localVideoStreamRef.current)
           const isArbitrary = 'isArbitraryTrack' in videoTrack
-          console.log(`🔗 ✅ [POS 1] Added ${isArbitrary ? 'arbitrary' : 'real'} video track: ${videoTrack.label}`)
+          console.log(`🔗 ✅ [POS 2] Added ${isArbitrary ? 'arbitrary' : 'real'} video track: ${videoTrack.label}`)
         }
       }
     }
     
-    // 3. THIRD: Add screen share tracks (if available) - ALWAYS position 2
-    if (localScreenStreamRef.current && screenSharing) {
+    // 4. FOURTH: Add screen share tracks (if available) - ALWAYS position 3
+    if (localScreenStreamRef.current) {
       const screenTracks = localScreenStreamRef.current.getVideoTracks()
       if (screenTracks.length > 0) {
         const screenTrack = screenTracks[0] // Use only first screen track
         if (!pc.getSenders().some(sender => sender.track === screenTrack)) {
           pc.addTrack(screenTrack, localScreenStreamRef.current)
-          console.log(`🔗 ✅ [POS 2] Added screen share track: ${screenTrack.label}`)
+          console.log(`🔗 ✅ [POS 3] Added screen share track: ${screenTrack.label}`)
         }
-      }
-      
-      // Also add any audio tracks from screen sharing
-      const screenAudioTracks = localScreenStreamRef.current.getAudioTracks()
-      screenAudioTracks.forEach(track => {
-        if (!pc.getSenders().some(sender => sender.track === track)) {
-          pc.addTrack(track, localScreenStreamRef.current!)
-          console.log(`🔗 ✅ [POS 2+] Added screen audio track: ${track.label}`)
-        }
-      })
-    }
-    
-    // 4. FOURTH: Add system audio tracks (if available) - ALWAYS position 3+
-    // BUT ONLY if we don't already have a master mixed track that contains system audio
-    if (localSystemAudioStreamRef.current) {
-      // Check if we already have a master mixed track that contains system audio
-      const streamWithMixedTrack = localStreamRef.current as MediaStream & { masterMixedTrack?: MediaStreamTrack }
-      const storedMasterMixedTrack = streamWithMixedTrack.masterMixedTrack
-      const inStreamMasterMixedTrack = localStreamRef.current?.getAudioTracks().find(track => 
-        'isMixedAudio' in track && 
-        'containsSystemAudio' in track &&
-        (track as MediaStreamTrack & { isMixedAudio: boolean; containsSystemAudio: boolean }).isMixedAudio &&
-        (track as MediaStreamTrack & { isMixedAudio: boolean; containsSystemAudio: boolean }).containsSystemAudio
-      )
-      
-      const hasMasterMixedTrack = (storedMasterMixedTrack && storedMasterMixedTrack.readyState === 'live') || inStreamMasterMixedTrack
-      
-      // ENHANCED: Also check if we already added a master mixed track in step 1
-      const alreadyAddedMasterMixed = pc.getSenders().some(sender => 
-        sender.track && 
-        'isMixedAudio' in sender.track && 
-        (sender.track as MediaStreamTrack & { isMixedAudio: boolean }).isMixedAudio
-      )
-      
-      console.log(`🔗 🔍 System audio decision for ${remote}:`, {
-        hasMasterMixedTrack: !!hasMasterMixedTrack,
-        alreadyAddedMasterMixed,
-        systemAudioTracksCount: localSystemAudioStreamRef.current.getAudioTracks().length,
-        willSkip: !!(hasMasterMixedTrack || alreadyAddedMasterMixed)
-      })
-      
-      if (hasMasterMixedTrack || alreadyAddedMasterMixed) {
-        console.log(`🔗 📝 Skipping separate system audio tracks for ${remote} - already included in master mixed track`)
-      } else {
-        const systemAudioTracks = localSystemAudioStreamRef.current.getAudioTracks()
-        systemAudioTracks.forEach(track => {
-          if (!pc.getSenders().some(sender => sender.track === track)) {
-            pc.addTrack(track, localSystemAudioStreamRef.current!)
-            console.log(`🔗 ✅ [POS 3+] Added system audio track: ${track.label}`)
-          }
-        })
       }
     }
     
-    // FINAL DEBUGGING: Log final track order for debugging m-line issues
-    const finalSenders = pc.getSenders()
-    console.log(`🔗 🔍 FINAL TRACK ORDER for ${remote}:`, {
-      totalSenders: finalSenders.length,
-      trackOrder: finalSenders.map((sender, index) => ({
-        position: index,
-        kind: sender.track?.kind,
-        label: sender.track?.label,
-        enabled: sender.track?.enabled,
-        id: sender.track?.id
-      }))
-    })
-    
-    console.log(`🔗 ✅ ULTRA-ROBUST peer connection for ${remote} created with ${pc.getSenders().length} senders in strict order`)
-    console.log(`🔗 📊 Complete media state for ${remote}:`, {
-      audioTracks: localStreamRef.current?.getAudioTracks().length || 0,
-      videoTracks: (localVideoStreamRef.current?.getVideoTracks().length || 0) * (videoEnabled ? 1 : 0),
-      screenTracks: (localScreenStreamRef.current?.getVideoTracks().length || 0) * (screenSharing ? 1 : 0),
-      screenAudioTracks: (localScreenStreamRef.current?.getAudioTracks().length || 0) * (screenSharing ? 1 : 0),
-      systemAudioTracks: localSystemAudioStreamRef.current?.getAudioTracks().length || 0,
-      totalSenders: pc.getSenders().length
-    })
+    console.log(`🔗 ✅ ROBUST peer connection for ${remote} created with ${pc.getSenders().length} senders in strict order`)
     
     return pc
-  }, [roomId, currentUser, screenSharing, videoEnabled]) // Dependencies for useCallback
+  }, [roomId, currentUser]) // Dependencies for useCallback
 
 // Join call room with UNIVERSAL CONNECTION PROTOCOL
   const joinCall = async () => {
@@ -1528,135 +985,31 @@ export default function CallPage() {
           const newPeer = msg.username
           if (newPeer === currentUser) return
           
-          console.log(`🔗 🚀 LATE JOINER DETECTED: ${newPeer} - establishing ULTRA-ROBUST connection with ALL current tracks`)
+          console.log(`🔗 NEW PEER detected: ${newPeer} - establishing ROBUST connection`)
           
           // Add to participants list
           setParticipants(prev => new Set([...prev, newPeer]))
           
           let pc = peerConnections.current[newPeer]
           if (!pc) {
-            console.log(`🔗 ⚡ Creating ULTRA-ROBUST peer connection for late joiner ${newPeer}`)
-            // The createPeerConnection function will automatically add all current tracks
-            // including screen sharing and system audio based on current state
-            pc = createPeerConnection(newPeer)
-            
-            console.log(`🔗 ✅ Initial connection created for ${newPeer} with ${pc.getSenders().length} senders`)
-          }
-          
-          // CRITICAL: Ensure COMPLETE media state synchronization for late joiners
-          console.log(`🔗 🔄 LATE JOINER MEDIA SYNC: Ensuring ${newPeer} receives ALL current media`)
-          
-          // INTELLIGENT SYNC: Only run sync if we don't already have optimal master mixed track setup
-          const hasScreenSharingWithAudio = screenSharing && localSystemAudioStreamRef.current && localStreamRef.current
-          
-          if (hasScreenSharingWithAudio) {
-            // Check if we already have master mixed track properly set up
-            const streamWithMixedTrack = localStreamRef.current as MediaStream & { masterMixedTrack?: MediaStreamTrack }
-            const storedMasterMixedTrack = streamWithMixedTrack.masterMixedTrack
-            const inStreamMasterMixedTrack = localStreamRef.current?.getAudioTracks().find(track => 
-              'isMixedAudio' in track && (track as MediaStreamTrack & { isMixedAudio: boolean }).isMixedAudio
-            )
-            const hasMasterMixedTrack = (storedMasterMixedTrack && storedMasterMixedTrack.readyState === 'live') || inStreamMasterMixedTrack
-            
-            // Check if the peer connection already has the master mixed track
-            const alreadyHasMasterMixed = pc.getSenders().some(sender => 
-              sender.track && 
-              'isMixedAudio' in sender.track && 
-              (sender.track as MediaStreamTrack & { isMixedAudio: boolean }).isMixedAudio
-            )
-            
-            console.log(`🔗 🔍 SYNC DECISION for ${newPeer}:`, {
-              hasScreenSharingWithAudio: true,
-              hasMasterMixedTrack: !!hasMasterMixedTrack,
-              alreadyHasMasterMixed,
-              willSkipSync: !!(hasMasterMixedTrack && alreadyHasMasterMixed),
-              masterTrackLabel: hasMasterMixedTrack ? (storedMasterMixedTrack || inStreamMasterMixedTrack)?.label : 'none'
-            })
-            
-            if (hasMasterMixedTrack && alreadyHasMasterMixed) {
-              console.log(`🔗 ✅ SYNC SKIPPED: ${newPeer} already has optimal master mixed track - no sync needed`)
-              console.log(`🔗 🎵 ${newPeer} will continue receiving both microphone and system audio in single optimized track`)
-            } else {
-              console.log(`🔗 ⚠️ SYNC NEEDED: ${newPeer} missing master mixed track - running sync`)
-              // Force synchronization after a brief delay to allow connection to initialize
-              setTimeout(async () => {
-                try {
-                  await synchronizeAllMediaTracks(newPeer)
-                  console.log(`🔗 ✅ Late joiner ${newPeer} synchronized with ALL current media`)
-                } catch (error) {
-                  console.error(`🔗 ❌ Failed to synchronize media for late joiner ${newPeer}:`, error)
-                }
-              }, 200)
-            }
-          } else {
-            console.log(`🔗 📝 STANDARD SYNC: No screen sharing with audio - running normal sync for ${newPeer}`)
-            // Force synchronization after a brief delay to allow connection to initialize
-            setTimeout(async () => {
-              try {
-                await synchronizeAllMediaTracks(newPeer)
-                console.log(`🔗 ✅ Late joiner ${newPeer} synchronized with ALL current media`)
-              } catch (error) {
-                console.error(`🔗 ❌ Failed to synchronize media for late joiner ${newPeer}:`, error)
-              }
-            }, 200)
-          }
-          
-          // COMPREHENSIVE DEBUGGING: Log all current media state
-          const currentAudioTracks = localStreamRef.current?.getTracks() || []
-          const currentVideoTracks = localVideoStreamRef.current?.getTracks() || []
-          const currentScreenTracks = localScreenStreamRef.current?.getTracks() || []
-          const currentSystemAudioTracks = localSystemAudioStreamRef.current?.getTracks() || []
-          
-          console.log(`🔗 📊 COMPLETE media state for late joiner ${newPeer}:`, {
-            audio: {
-              count: currentAudioTracks.length,
-              tracks: currentAudioTracks.map(t => ({label: t.label, enabled: t.enabled, kind: t.kind}))
-            },
-            video: {
-              count: currentVideoTracks.length,
-              enabled: videoEnabled,
-              tracks: currentVideoTracks.map(t => ({label: t.label, enabled: t.enabled, kind: t.kind}))
-            },
-            screenShare: {
-              count: currentScreenTracks.length,
-              active: screenSharing,
-              tracks: currentScreenTracks.map(t => ({label: t.label, enabled: t.enabled, kind: t.kind}))
-            },
-            systemAudio: {
-              count: currentSystemAudioTracks.length,
-              tracks: currentSystemAudioTracks.map(t => ({label: t.label, enabled: t.enabled, kind: t.kind}))
-            },
-            currentSenders: pc.getSenders().length,
-            states: {
-              screenSharing,
-              videoEnabled,
-              muted
-            }
-          })
-          if (!pc) {
             console.log(`🔗 Creating new ROBUST peer connection for ${newPeer}`)
-            // The createPeerConnection function will automatically add all current tracks
-            // including screen sharing and system audio based on current state
             pc = createPeerConnection(newPeer)
-            
-            console.log(`� ✅ Peer connection created for ${newPeer} with ${pc.getSenders().length} senders (including any active screen sharing)`)
           }
           
-          // ROBUST CONNECTION: Log all current media state for debugging
+          // ROBUST CONNECTION: Always check for ANY tracks (including arbitrary)
           const audioTracks = localStreamRef.current?.getTracks() || []
           const videoTracks = localVideoStreamRef.current?.getTracks() || []
           const screenTracks = localScreenStreamRef.current?.getTracks() || []
           const systemAudioTracks = localSystemAudioStreamRef.current?.getTracks() || []
           
-          console.log(`🔗 Current media state for new peer ${newPeer}:`, {
+          const hasAnyTracks = audioTracks.length > 0 || videoTracks.length > 0 || screenTracks.length > 0 || systemAudioTracks.length > 0
+          
+          console.log(`🔗 Media status for ${newPeer}:`, {
             audio: audioTracks.length,
             video: videoTracks.length,
             screen: screenTracks.length,
             systemAudio: systemAudioTracks.length,
-            screenSharing: screenSharing,
-            videoEnabled: videoEnabled,
-            muted: muted,
-            senders: pc.getSenders().length
+            totalTracks: hasAnyTracks
           })
           
           // Perfect negotiation with GUARANTEED connection establishment
@@ -1670,7 +1023,7 @@ export default function CallPage() {
               // Check if negotiation hasn't started yet
               if (pc && pc.signalingState === 'stable') {
                 try {
-                  console.log(`🔗 ✅ Creating ROBUST offer for new peer ${newPeer} with ${pc.getSenders().length} senders`)
+                  console.log(`🔗 ✅ Creating ROBUST offer for new peer ${newPeer}`)
                   const offer = await pc.createOffer()
                   await pc.setLocalDescription(offer)
                   ws.send(JSON.stringify({ type: "call-offer", roomId, from: currentUser, to: newPeer, payload: pc.localDescription }))
@@ -1836,48 +1189,19 @@ export default function CallPage() {
     }
   }  // Leave call room
   const leaveCall = () => {
-    console.log('🚪 Leaving call - starting comprehensive cleanup...')
-    
-    // FIRST: Reset joined state to stop health monitor immediately
-    setJoined(false)
-    
-    // Send leave message to server BEFORE closing WebSocket
+    // Send leave message to server
     if (wsRef.current && currentUser) {
-      try {
-        wsRef.current.send(JSON.stringify({ type: "call-peer-left", roomId, username: currentUser }))
-        console.log('🚪 Sent leave message to server')
-      } catch (error) {
-        console.warn('🚪 Failed to send leave message:', error)
-      }
-    }
-    
-    // Close WebSocket connection IMMEDIATELY to stop reconnection attempts
-    if (wsRef.current) {
-      wsRef.current.onclose = null // Remove onclose handler to prevent unexpected behavior
-      wsRef.current.onerror = null // Remove error handler
-      wsRef.current.onmessage = null // Remove message handler
-      wsRef.current.close()
-      wsRef.current = null
-      console.log('🚪 WebSocket connection closed and cleaned up')
+      wsRef.current.send(JSON.stringify({ type: "call-peer-left", roomId, username: currentUser }))
     }
     
     // Close all peer connections
-    Object.values(peerConnections.current).forEach(pc => {
-      pc.onconnectionstatechange = null // Remove event handlers
-      pc.oniceconnectionstatechange = null
-      pc.onicegatheringstatechange = null
-      pc.onicecandidate = null
-      pc.ontrack = null
-      pc.close()
-    })
+    Object.values(peerConnections.current).forEach(pc => pc.close())
     peerConnections.current = {}
-    console.log('🚪 All peer connections closed and cleaned up')
     
     // Clean up connection timeouts and health monitoring
     Object.values(connectionTimeouts.current).forEach(timeout => clearTimeout(timeout))
     connectionTimeouts.current = {}
     setConnectionHealth({})
-    console.log('🚪 Connection timeouts and health monitoring cleared')
     
     // Stop local stream tracks
     if (localStreamRef.current) {
@@ -1903,6 +1227,12 @@ export default function CallPage() {
       localSystemAudioStreamRef.current = null
     }
     
+    // Close WebSocket connection
+    if (wsRef.current) {
+      wsRef.current.close()
+      wsRef.current = null
+    }
+    
     // Clean up mixed audio contexts
     mixedAudioContextsRef.current.forEach((audioContext, peerId) => {
       console.log(`🎵 Closing mixed audio context for ${peerId}`)
@@ -1910,13 +1240,8 @@ export default function CallPage() {
     })
     mixedAudioContextsRef.current.clear()
     
-    // Clean up local audio context if it exists
-    if (localAudioContextRef.current) {
-      localAudioContextRef.current.close().catch(console.warn)
-      localAudioContextRef.current = null
-    }
-    
-    // Reset state
+      // Reset state
+    setJoined(false)
     setConnectionSequenceComplete(false)
     setConnectionSequenceProgress(0)
     setRemoteStreams({})
@@ -1930,11 +1255,8 @@ export default function CallPage() {
     setLocalPreviewExpanded(false) // Collapse local preview
     setError("")
     
-    console.log('🚪 ✅ Call cleanup completed - navigating to chat')
-    
     // Navigate back to chat
-    router.push(`/${encodeURIComponent(roomId)}/chat`)
-  }
+    router.push(`/${encodeURIComponent(roomId)}/chat`)  }
 // Add local tracks to all peer connections when available
   useEffect(() => {
     if (actualIsListener) return
@@ -2029,25 +1351,16 @@ export default function CallPage() {
         const iceState = pc.iceConnectionState
         console.log(`🔗 📊 ${peerId}: health=${health}, connection=${actualState}, ice=${iceState}`)
         
-        // SMART FAILURE DETECTION: Only restart if truly stuck or failed
-        const isActuallyStuck = (
-          (actualState === 'failed') || // Connection completely failed
-          (iceState === 'failed') || // ICE failed 
-          (actualState === 'closed') || // Connection closed
-          // Only consider disconnected as stuck if it's been disconnected for a while
-          (actualState === 'disconnected' && health === 'disconnected')
+        // CRITICAL: Detect stuck connections immediately
+        const isStuck = (
+          (actualState === 'new' && health === 'connecting') || // Stuck in new state too long
+          (actualState === 'new' && health === 'failed') || // Previously failed, still stuck
+          (actualState === 'connecting' && iceState === 'failed') || // ICE failed
+          (actualState === 'disconnected') || // Connection lost
+          (actualState === 'failed') // Connection completely failed
         )
         
-        // PATIENCE FOR CONNECTING STATES: Let connections that are making progress continue
-        const isProgressing = (
-          actualState === 'connecting' || // Still connecting
-          actualState === 'new' || // Just started
-          iceState === 'checking' || // ICE connectivity check in progress
-          iceState === 'connected' || // ICE connected
-          iceState === 'completed' // ICE completed
-        )
-        
-        if (isActuallyStuck && !isProgressing) {
+        if (isStuck) {
           console.log(`🔗 � IMMEDIATE RECOVERY: ${peerId} is stuck/failed (connection=${actualState}, ice=${iceState}, health=${health})`)
           
           // AGGRESSIVE IMMEDIATE RECOVERY - NO DELAYS
@@ -2123,123 +1436,6 @@ export default function CallPage() {
             console.log(`🔗 📝 Updating health for ${peerId}: ${health} → ${validState}`)
             setConnectionHealth(prev => ({ ...prev, [peerId]: validState }))
           }
-          
-          // ENHANCED: Smart periodic media synchronization for connected peers
-          if (actualState === 'connected') {
-            // Check if tracks are actually out of sync before forcing a sync
-            const now = Date.now()
-            const pcWithSync = pc as RTCPeerConnection & { _lastMediaSync?: number }
-            const lastSync = pcWithSync._lastMediaSync || 0
-            
-            if (now - lastSync > 120000) { // Sync only every 2 minutes to reduce interference
-              // INTELLIGENT sync: Calculate expected track count based on current media state
-              const senders = pc.getSenders()
-              const actualTrackCount = senders.filter(s => s.track).length
-              
-              // Calculate REAL expected track count based on current media states
-              let expectedTrackCount = 0
-              
-              // Audio: Always 1 track (microphone, system, mixed, or arbitrary)
-              if (localStreamRef.current && localStreamRef.current.getAudioTracks().length > 0) {
-                expectedTrackCount += 1
-              }
-              
-              // Video: 1 track if video enabled
-              if (videoEnabled && localVideoStreamRef.current && localVideoStreamRef.current.getVideoTracks().length > 0) {
-                expectedTrackCount += 1
-              }
-              
-              // Screen share video: 1 track if screen sharing
-              if (screenSharing && localScreenStreamRef.current && localScreenStreamRef.current.getVideoTracks().length > 0) {
-                expectedTrackCount += 1
-              }
-              
-              // Screen share audio: Additional audio tracks from screen sharing (if not mixed)
-              if (screenSharing && localScreenStreamRef.current && localScreenStreamRef.current.getAudioTracks().length > 0) {
-                // Check if we have master mixed track that includes system audio
-                const streamWithMixedTrack = localStreamRef.current as MediaStream & { masterMixedTrack?: MediaStreamTrack }
-                const hasMasterMixedTrack = streamWithMixedTrack.masterMixedTrack?.readyState === 'live' ||
-                  localStreamRef.current?.getAudioTracks().some(track => 
-                    'isMixedAudio' in track && (track as MediaStreamTrack & { isMixedAudio: boolean }).isMixedAudio
-                  )
-                
-                // Check if peer already has any mixed audio (master or individual)
-                const hasAnyMixedAudio = senders.some(sender => 
-                  sender.track && 
-                  sender.track.kind === 'audio' &&
-                  (
-                    ('isMixedAudio' in sender.track) ||
-                    (sender.track.label.toLowerCase().includes('mixed audio'))
-                  )
-                )
-                
-                if (!hasMasterMixedTrack && !hasAnyMixedAudio) {
-                  expectedTrackCount += localScreenStreamRef.current.getAudioTracks().length
-                }
-              }
-              
-              // System audio: Only if NOT included in master mixed track
-              if (localSystemAudioStreamRef.current && localSystemAudioStreamRef.current.getAudioTracks().length > 0) {
-                // Check if we have master mixed track that includes system audio
-                const streamWithMixedTrack = localStreamRef.current as MediaStream & { masterMixedTrack?: MediaStreamTrack }
-                const hasMasterMixedTrack = streamWithMixedTrack.masterMixedTrack?.readyState === 'live' ||
-                  localStreamRef.current?.getAudioTracks().some(track => 
-                    'isMixedAudio' in track && (track as MediaStreamTrack & { isMixedAudio: boolean }).isMixedAudio
-                  )
-                
-                if (!hasMasterMixedTrack) {
-                  expectedTrackCount += localSystemAudioStreamRef.current.getAudioTracks().length
-                }
-              }
-              
-              // Also check if peer already has working master mixed audio OR individual mixed audio
-              const hasWorkingMasterMixed = senders.some(sender => 
-                sender.track && 
-                sender.track.readyState === 'live' &&
-                (
-                  // Check for master mixed track
-                  ('isMixedAudio' in sender.track && (sender.track as MediaStreamTrack & { isMixedAudio: boolean }).isMixedAudio) ||
-                  // Check for individual mixed track (also contains both mic + system)
-                  (sender.track.label.toLowerCase().includes('mixed audio') && 
-                   sender.track.label.toLowerCase().includes('microphone') && 
-                   sender.track.label.toLowerCase().includes('system'))
-                )
-              )
-              
-              console.log(`🔗 🔍 Smart sync analysis for ${peerId}:`, {
-                actualTracks: actualTrackCount,
-                expectedTracks: expectedTrackCount,
-                hasWorkingMasterMixed,
-                mediaStates: {
-                  audio: !!localStreamRef.current?.getAudioTracks().length,
-                  video: videoEnabled,
-                  screen: screenSharing,
-                  systemAudio: !!localSystemAudioStreamRef.current?.getAudioTracks().length
-                }
-              })
-              
-              if (hasWorkingMasterMixed && actualTrackCount === expectedTrackCount) {
-                // PERFECT STATE: Working mixed audio AND correct track count - no sync needed
-                pcWithSync._lastMediaSync = now
-                console.log(`🔗 🔒 SYNC BLOCKED: ${peerId} has working mixed audio and correct track count - no interference allowed`)
-              } else if (hasWorkingMasterMixed && actualTrackCount !== expectedTrackCount) {
-                // PARTIAL SYNC: Working mixed audio but missing other tracks (likely screen share)
-                pcWithSync._lastMediaSync = now
-                console.log(`🔗 � SELECTIVE SYNC: ${peerId} has working mixed audio but missing tracks - syncing non-audio tracks only`)
-                
-                // Only sync non-audio tracks to avoid interfering with working audio
-                synchronizeNonAudioTracks(peerId)
-              } else if (actualTrackCount !== expectedTrackCount) {
-                console.log(`🔗 🔄 Smart sync for ${peerId}: track count mismatch (expected ${expectedTrackCount}, actual ${actualTrackCount})`)
-                synchronizeAllMediaTracks(peerId)
-                pcWithSync._lastMediaSync = now
-              } else {
-                // No mismatch detected - just update timestamp without syncing
-                pcWithSync._lastMediaSync = now
-                console.log(`🔗 ✅ Smart sync check for ${peerId}: tracks already synchronized (${actualTrackCount}/${expectedTrackCount})`)
-              }
-            }
-          }
         }
       })
       
@@ -2275,10 +1471,10 @@ export default function CallPage() {
         }
       })
       
-    }, 5000) // Less frequent checks - every 5 seconds for stability
+    }, 2000) // Much more frequent checks - every 2 seconds for immediate detection
     
     return () => clearInterval(healthMonitor)
-  }, [joined, connectionHealth, roomId, currentUser, participants, createPeerConnection, synchronizeAllMediaTracks, synchronizeNonAudioTracks, screenSharing, videoEnabled])
+  }, [joined, connectionHealth, roomId, currentUser, participants, createPeerConnection])
 
   // --- Mute/unmute a remote participant ---
   const togglePeerMute = (peer: string) => {
@@ -2576,7 +1772,7 @@ export default function CallPage() {
         )?.track || null
         
         if (currentSystemAudioTrack) {
-          await safeReplaceTrack(pc, currentSystemAudioTrack, null, new MediaStream(), 'audio')
+          await safeReplaceTrack(pc, currentSystemAudioTrack, null, new MediaStream(), 'system-audio')
         }
         
         console.log(`✅ Screen sharing and system audio safely removed for ${remote}`)
@@ -2696,169 +1892,6 @@ export default function CallPage() {
           }
           
           console.log(`🎵 Combined audio stream created with ${combinedAudioTracks.length} tracks (${microphoneTrackCount} mic + ${systemAudioTracks.length} system)`)
-          
-          // CRITICAL: Create a single mixed audio track for ALL peers (including late joiners)
-          if (localStreamRef.current && microphoneTrackCount > 0) {
-            console.log('🎵 🔄 Creating master mixed audio track for consistent late joiner support...')
-            
-            // IMPORTANT: Preserve the original microphone stream BEFORE creating mixed track
-            const originalMicrophoneStream = localStreamRef.current
-            const micTracks = originalMicrophoneStream.getAudioTracks()
-            console.log('🎵 🔍 Pre-mixing microphone state:', {
-              trackCount: micTracks.length,
-              tracks: micTracks.map(track => ({
-                label: track.label,
-                enabled: track.enabled,
-                readyState: track.readyState,
-                muted: track.muted
-              }))
-            })
-            
-            // Ensure microphone tracks are enabled for mixing
-            micTracks.forEach(track => {
-              if (!track.enabled && !muted) {
-                track.enabled = true
-                console.log('🎵 ✅ Re-enabled microphone track for mixing:', track.label)
-              }
-            })
-            
-            try {
-              const masterAudioContext = new AudioContext({
-                sampleRate: 48000,
-                latencyHint: 'interactive'
-              })
-              
-              if (masterAudioContext.state === 'suspended') {
-                await masterAudioContext.resume()
-              }
-              
-              const masterMixedOutput = masterAudioContext.createGain()
-              
-              // CRITICAL: Create sources from the ORIGINAL streams, not the reference that will be updated
-              const masterMicSource = masterAudioContext.createMediaStreamSource(originalMicrophoneStream)
-              const masterSystemSource = masterAudioContext.createMediaStreamSource(systemAudioStream)
-              
-              // Set balanced gain levels
-              const masterMicGain = masterAudioContext.createGain()
-              const masterSystemGain = masterAudioContext.createGain()
-              masterMicGain.gain.setValueAtTime(0.7, masterAudioContext.currentTime) // 70% microphone
-              masterSystemGain.gain.setValueAtTime(0.8, masterAudioContext.currentTime) // 80% system audio
-              
-              console.log('🎵 🔧 Audio mixing setup:', {
-                micGainLevel: 0.7,
-                systemGainLevel: 0.8,
-                audioContextState: masterAudioContext.state,
-                micSourceConnected: !!masterMicSource,
-                systemSourceConnected: !!masterSystemSource,
-                originalMicTracks: originalMicrophoneStream.getAudioTracks().length,
-                systemTracks: systemAudioStream.getAudioTracks().length
-              })
-              
-              // Connect sources through gain nodes to the output
-              masterMicSource.connect(masterMicGain)
-              masterSystemSource.connect(masterSystemGain)
-              masterMicGain.connect(masterMixedOutput)
-              masterSystemGain.connect(masterMixedOutput)
-              
-              // Create destination and get mixed stream
-              const masterDestination = masterAudioContext.createMediaStreamDestination()
-              masterMixedOutput.connect(masterDestination)
-              
-              const masterMixedTrack = masterDestination.stream.getAudioTracks()[0]
-              if (masterMixedTrack) {
-                // Mark the master mixed track
-                Object.defineProperty(masterMixedTrack, 'label', {
-                  value: 'Master Mixed Audio (Microphone + System) - Screen Share',
-                  writable: false
-                })
-                
-                Object.defineProperty(masterMixedTrack, 'isMixedAudio', {
-                  value: true,
-                  writable: false
-                })
-                
-                Object.defineProperty(masterMixedTrack, 'containsSystemAudio', {
-                  value: true,
-                  writable: false
-                })
-                
-                console.log('🎵 ✅ Master mixed track created:', {
-                  label: masterMixedTrack.label,
-                  enabled: masterMixedTrack.enabled,
-                  readyState: masterMixedTrack.readyState,
-                  id: masterMixedTrack.id
-                })
-                
-                // CRITICAL FIX: Update existing peer connections with replaceTrack() instead of modifying stream
-                // This preserves audio connection for existing peers while providing master mixed track
-                
-                // IMMEDIATELY update all existing peer connections with master mixed track
-                console.log('🎵 🔄 Updating all existing peer connections with master mixed audio...')
-                
-                const updatePromises = Object.entries(peerConnections.current).map(async ([remote, pc]) => {
-                  const existingAudioSender = pc.getSenders().find(sender => 
-                    sender.track && sender.track.kind === 'audio'
-                  )
-                  
-                  if (existingAudioSender) {
-                    try {
-                      await existingAudioSender.replaceTrack(masterMixedTrack)
-                      console.log(`🎵 ✅ Successfully updated ${remote} with master mixed audio`)
-                    } catch (error) {
-                      console.error(`🎵 ❌ Failed to update ${remote} with master mixed audio:`, error)
-                    }
-                  }
-                })
-                
-                // Wait for all peer connections to be updated
-                await Promise.allSettled(updatePromises)
-                
-                // DON'T modify the local stream reference - keep the original microphone stream
-                // The master mixed track will be used by peer connections via replaceTrack()
-                // but we keep the original stream for local monitoring and future audio mixing
-                console.log('🎵 ✅ Master mixed track distributed to all existing peers, original stream preserved')
-                
-                // Update local audio element to monitor the mixed audio for local feedback
-                if (localAudioRef.current) {
-                  // Create a temporary stream with just the master mixed track for local monitoring
-                  const localMonitoringStream = new MediaStream([masterMixedTrack])
-                  localAudioRef.current.srcObject = localMonitoringStream
-                }
-                
-                // Store a reference to the master mixed track for late joiners
-                // We'll check for this in createPeerConnection instead of modifying localStreamRef
-                const streamWithMixedTrack = localStreamRef.current as MediaStream & { masterMixedTrack?: MediaStreamTrack }
-                if (!streamWithMixedTrack.masterMixedTrack) {
-                  Object.defineProperty(streamWithMixedTrack, 'masterMixedTrack', {
-                    value: masterMixedTrack,
-                    writable: true,
-                    enumerable: false
-                  })
-                }
-                
-                // Store the master audio context for cleanup
-                mixedAudioContextsRef.current.set('master', masterAudioContext)
-                
-                console.log('🎵 ✅ Master mixed audio active for existing peers, original microphone stream preserved for stability')
-                
-                // IMPORTANT: Keep the original microphone stream reference for audio context
-                console.log('🎵 📌 Original microphone stream preserved - audio mixing will continue working')
-                
-                // Store reference to original stream for potential cleanup later
-                setTimeout(() => {
-                  // Only stop if we're sure the mixed track is working and being used
-                  if (masterMixedTrack.readyState === 'live') {
-                    console.log('🎵 🧹 Master mixed track confirmed working, original mic stream can be cleaned up')
-                  }
-                }, 5000) // Wait 5 seconds before cleanup
-              } else {
-                console.warn('🎵 ❌ Failed to create master mixed audio track')
-                await masterAudioContext.close()
-              }
-            } catch (error) {
-              console.error('🎵 ❌ Failed to create master mixed audio:', error)
-            }
-          }
         } else {
           console.log('❌ No system audio captured with screen share')
         }
@@ -2920,56 +1953,26 @@ export default function CallPage() {
             }
           }
           
-          // ENHANCED: Use master mixed audio track for consistent experience
+          // SIMPLIFIED: Add system audio as separate tracks (let WebRTC handle mixing on receiver side)
           if (localStreamRef.current && localSystemAudioStreamRef.current) {
-            console.log(`🎵 Setting up audio for ${remote} using master mixed track...`)
+            console.log(`� Setting up combined audio for ${remote}...`)
             
-            // Check if we have the master mixed track
-            const masterMixedTrack = localStreamRef.current.getAudioTracks().find(track => 
-              'isMixedAudio' in track && (track as MediaStreamTrack & { isMixedAudio: boolean }).isMixedAudio
-            )
+            // Create a combined audio stream with both microphone and system audio
+            const microphoneTracks = localStreamRef.current.getAudioTracks()
+            const systemTracks = localSystemAudioStreamRef.current.getAudioTracks()
             
-            if (masterMixedTrack) {
-              console.log(`🎵 ✅ Using master mixed audio track for ${remote}`)
-              
+            console.log(`  🎤 Microphone tracks: ${microphoneTracks.length}`)
+            console.log(`  🔊 System audio tracks: ${systemTracks.length}`)
+            
+            if (microphoneTracks.length > 0 && systemTracks.length > 0) {
               // Get existing audio sender to replace the track
               const existingAudioSender = pc.getSenders().find(sender => 
                 sender.track && sender.track.kind === 'audio'
               )
               
               if (existingAudioSender) {
-                // Replace with master mixed track
-                try {
-                  await existingAudioSender.replaceTrack(masterMixedTrack)
-                  console.log(`🎵 ✅ Replaced audio track with master mixed audio for ${remote}`)
-                } catch (error) {
-                  console.error(`🎵 ❌ Failed to replace with master mixed audio for ${remote}:`, error)
-                }
-              } else {
-                // Add master mixed track if no existing sender
-                if (!pc.getSenders().some(sender => sender.track === masterMixedTrack)) {
-                  pc.addTrack(masterMixedTrack, localStreamRef.current)
-                  console.log(`🎵 ✅ Added master mixed audio track for ${remote}`)
-                }
-              }
-            } else {
-              // Fallback to individual mixing (shouldn't happen with master track approach)
-              console.log(`🎵 ⚠️ No master mixed track found, falling back to individual mixing for ${remote}`)
-              
-              const microphoneTracks = localStreamRef.current.getAudioTracks()
-              const systemTracks = localSystemAudioStreamRef.current.getAudioTracks()
-              
-              console.log(`  🎤 Microphone tracks: ${microphoneTracks.length}`)
-              console.log(`  🔊 System audio tracks: ${systemTracks.length}`)
-              
-              // Get existing audio sender to replace the track
-              const existingAudioSender = pc.getSenders().find(sender => 
-                sender.track && sender.track.kind === 'audio'
-              )
-              
-              if (existingAudioSender && microphoneTracks.length > 0 && systemTracks.length > 0) {
-                // Create individual mixed audio track as fallback
-                console.log(`🎵 Creating individual audio mix for ${remote}...`)
+                // We need to create a mixed audio track for simultaneous operation
+                console.log(`🎵 Creating audio mix for simultaneous microphone + system audio...`)
                 
                 try {
                   // Create an audio context for mixing with proper settings
@@ -2986,8 +1989,8 @@ export default function CallPage() {
                   
                   const mixedOutput = audioContext.createGain()
                   
-                  // Create sources for both audio streams - need to use original streams for individual mixing
-                  const microphoneSource = audioContext.createMediaStreamSource(new MediaStream(microphoneTracks))
+                  // Create sources for both audio streams
+                  const microphoneSource = audioContext.createMediaStreamSource(localStreamRef.current)
                   const systemSource = audioContext.createMediaStreamSource(localSystemAudioStreamRef.current)
                   
                   // Set balanced gain levels (slightly lower to prevent clipping)
@@ -3010,22 +2013,28 @@ export default function CallPage() {
                   if (mixedTrack) {
                     // Mark the mixed track appropriately
                     Object.defineProperty(mixedTrack, 'label', {
-                      value: 'Mixed Audio (Microphone + System) - Individual',
+                      value: 'Mixed Audio (Microphone + System)',
+                      writable: false
+                    })
+                    
+                    // Mark it as containing system audio for identification
+                    Object.defineProperty(mixedTrack, 'containsSystemAudio', {
+                      value: true,
                       writable: false
                     })
                     
                     // Replace the existing audio track with the mixed one
                     await existingAudioSender.replaceTrack(mixedTrack)
-                    console.log(`🎵 ✅ Replaced audio track with individual mixed audio for ${remote}`)
+                    console.log(`🎵 ✅ Replaced audio track with mixed audio for ${remote} (mic: 70%, system: 80%)`)
                     
                     // Store audio context reference for cleanup later
                     mixedAudioContextsRef.current.set(remote, audioContext)
                   } else {
-                    console.warn(`🎵 ❌ Failed to get individual mixed audio track for ${remote}`)
+                    console.warn(`🎵 ❌ Failed to get mixed audio track for ${remote}`)
                     await audioContext.close()
                   }
                 } catch (error) {
-                  console.error(`🎵 ❌ Failed to create individual mixed audio for ${remote}:`, error)
+                  console.error(`🎵 ❌ Failed to create mixed audio for ${remote}:`, error)
                   // Fallback: add both tracks separately
                   systemTracks.forEach(track => {
                     if (!pc.getSenders().some(sender => sender.track?.id === track.id)) {
@@ -3038,40 +2047,34 @@ export default function CallPage() {
                 // No existing audio sender, add both microphone and system audio tracks
                 console.log(`🎵 Adding separate microphone and system audio tracks for ${remote}`)
                 
-                microphoneTracks.forEach((track: MediaStreamTrack) => {
+                microphoneTracks.forEach(track => {
                   if (!pc.getSenders().some(sender => sender.track?.id === track.id)) {
-                    pc.addTrack(track, new MediaStream([track])) // Create individual stream for each track
+                    pc.addTrack(track, localStreamRef.current!)
                     console.log(`🎤 ✅ Added microphone audio track for ${remote}`)
                   }
                 })
                 
-                systemTracks.forEach((track: MediaStreamTrack) => {
+                systemTracks.forEach(track => {
                   if (!pc.getSenders().some(sender => sender.track?.id === track.id)) {
                     pc.addTrack(track, localSystemAudioStreamRef.current!)
                     console.log(`🔊 ✅ Added system audio track for ${remote}`)
                   }
                 })
               }
-            }
-          } else if (localStreamRef.current) {
-            // Only microphone available
-            const microphoneTracks = localStreamRef.current.getAudioTracks()
-            if (microphoneTracks.length > 0) {
+            } else if (microphoneTracks.length > 0) {
+              // Only microphone, ensure it's preserved
               console.log(`🎤 Preserving microphone-only audio for ${remote}`)
-              microphoneTracks.forEach((track: MediaStreamTrack) => {
+              microphoneTracks.forEach(track => {
                 const existingSender = pc.getSenders().find(sender => sender.track?.id === track.id)
                 if (!existingSender) {
                   pc.addTrack(track, localStreamRef.current!)
                   console.log(`🎤 ✅ Added microphone audio track for ${remote}`)
                 }
               })
-            }
-          } else if (localSystemAudioStreamRef.current) {
-            // Only system audio available
-            const systemTracks = localSystemAudioStreamRef.current.getAudioTracks()
-            if (systemTracks.length > 0) {
+            } else if (systemTracks.length > 0) {
+              // Only system audio
               console.log(`🔊 Adding system-audio-only for ${remote}`)
-              systemTracks.forEach((track: MediaStreamTrack) => {
+              systemTracks.forEach(track => {
                 const existingSender = pc.getSenders().find(sender => sender.track?.id === track.id)
                 if (!existingSender) {
                   pc.addTrack(track, localSystemAudioStreamRef.current!)
@@ -3214,8 +2217,6 @@ export default function CallPage() {
       return canvasStream
     }
   }
-
-
 
   // Create arbitrary video track when no camera access
   const createArbitraryVideoTrack = (): MediaStream => {
