@@ -79,7 +79,8 @@ export default function CallPage() {
   const [isMirrored, setIsMirrored] = useState(true) // Default to mirrored for front camera
 
   const analyserRef = useRef<AnalyserNode | null>(null)
-  const localAudioContextRef = useRef<AudioContext | null>(null)  // For each participant, create refs for audio, video, and screen
+  const localAudioContextRef = useRef<AudioContext | null>(null)
+  const mixedAudioContextsRef = useRef<Map<string, AudioContext>>(new Map())  // For each participant, create refs for audio, video, and screen
   const remoteAudioRefs = useRef<Record<string, React.RefObject<HTMLAudioElement | null>>>({})
   const remoteVideoRefs = useRef<Record<string, React.RefObject<HTMLVideoElement | null>>>({})
   const remoteScreenRefs = useRef<Record<string, React.RefObject<HTMLVideoElement | null>>>({})
@@ -728,7 +729,11 @@ export default function CallPage() {
       console.log('Received track:', track.kind, track.label, 'from', remote)
       
       if (track.kind === 'audio') {
-        // Distinguish between microphone and system audio based on track label or custom property
+        // Check if this is a mixed audio track (contains both mic and system audio)
+        const isMixedAudio = track.label.toLowerCase().includes('mixed audio') ||
+                           track.label.toLowerCase().includes('microphone + system')
+        
+        // Distinguish between microphone, system audio, and mixed audio
         const isSystemAudio = ('isSystemAudio' in track && (track as { isSystemAudio: boolean }).isSystemAudio) ||
                              track.label.toLowerCase().includes('system audio') ||
                              track.label.toLowerCase().includes('screen') ||
@@ -740,12 +745,18 @@ export default function CallPage() {
           trackLabel: track.label,
           hasSystemAudioProperty: 'isSystemAudio' in track,
           isSystemAudioValue: ('isSystemAudio' in track) ? (track as { isSystemAudio: boolean }).isSystemAudio : undefined,
+          isMixedAudio: isMixedAudio,
           isSystemAudio: isSystemAudio,
           remote: remote
         })
         
-        if (isSystemAudio) {
-          console.log('✅ Setting as system audio for', remote, 'label:', track.label)
+        if (isMixedAudio) {
+          console.log('🎵 Setting as mixed audio (mic + system) for', remote, 'label:', track.label)
+          // Mixed audio goes to the main audio stream and gets duplicated to system audio for compatibility
+          setRemoteStreams(prev => ({ ...prev, [remote]: stream }))
+          setRemoteSystemAudioStreams(prev => ({ ...prev, [remote]: stream }))
+        } else if (isSystemAudio) {
+          console.log('🔊 Setting as system audio for', remote, 'label:', track.label)
           setRemoteSystemAudioStreams(prev => ({ ...prev, [remote]: stream }))
         } else {
           console.log('🎤 Setting as microphone audio for', remote, 'label:', track.label)
@@ -1114,7 +1125,17 @@ export default function CallPage() {
           if (peerConnections.current[left]) {
             peerConnections.current[left].close()
             delete peerConnections.current[left]
-          }          setRemoteStreams(prev => {
+          }
+          
+          // Clean up mixed audio context for this peer
+          const audioContext = mixedAudioContextsRef.current.get(left)
+          if (audioContext) {
+            console.log(`🎵 Closing mixed audio context for departed peer ${left}`)
+            audioContext.close().catch(console.warn)
+            mixedAudioContextsRef.current.delete(left)
+          }
+          
+          setRemoteStreams(prev => {
             const copy = { ...prev }
             delete copy[left]
             return copy
@@ -1211,6 +1232,14 @@ export default function CallPage() {
       wsRef.current.close()
       wsRef.current = null
     }
+    
+    // Clean up mixed audio contexts
+    mixedAudioContextsRef.current.forEach((audioContext, peerId) => {
+      console.log(`🎵 Closing mixed audio context for ${peerId}`)
+      audioContext.close().catch(console.warn)
+    })
+    mixedAudioContextsRef.current.clear()
+    
       // Reset state
     setJoined(false)
     setConnectionSequenceComplete(false)
@@ -1946,17 +1975,35 @@ export default function CallPage() {
                 console.log(`🎵 Creating audio mix for simultaneous microphone + system audio...`)
                 
                 try {
-                  // Create an audio context for mixing
-                  const audioContext = new AudioContext()
+                  // Create an audio context for mixing with proper settings
+                  const audioContext = new AudioContext({
+                    sampleRate: 48000, // High quality sample rate
+                    latencyHint: 'interactive'
+                  })
+                  
+                  // Ensure audio context is resumed (required by some browsers)
+                  if (audioContext.state === 'suspended') {
+                    await audioContext.resume()
+                    console.log('🎵 Audio context resumed')
+                  }
+                  
                   const mixedOutput = audioContext.createGain()
                   
                   // Create sources for both audio streams
                   const microphoneSource = audioContext.createMediaStreamSource(localStreamRef.current)
                   const systemSource = audioContext.createMediaStreamSource(localSystemAudioStreamRef.current)
                   
-                  // Connect both sources to the output with balanced levels
-                  microphoneSource.connect(mixedOutput)
-                  systemSource.connect(mixedOutput)
+                  // Set balanced gain levels (slightly lower to prevent clipping)
+                  const micGain = audioContext.createGain()
+                  const systemGain = audioContext.createGain()
+                  micGain.gain.setValueAtTime(0.7, audioContext.currentTime) // 70% microphone
+                  systemGain.gain.setValueAtTime(0.8, audioContext.currentTime) // 80% system audio
+                  
+                  // Connect sources through gain nodes to the output
+                  microphoneSource.connect(micGain)
+                  systemSource.connect(systemGain)
+                  micGain.connect(mixedOutput)
+                  systemGain.connect(mixedOutput)
                   
                   // Create a destination and get the mixed stream
                   const destination = audioContext.createMediaStreamDestination()
@@ -1970,12 +2017,24 @@ export default function CallPage() {
                       writable: false
                     })
                     
+                    // Mark it as containing system audio for identification
+                    Object.defineProperty(mixedTrack, 'containsSystemAudio', {
+                      value: true,
+                      writable: false
+                    })
+                    
                     // Replace the existing audio track with the mixed one
                     await existingAudioSender.replaceTrack(mixedTrack)
-                    console.log(`� ✅ Replaced audio track with mixed audio for ${remote}`)
+                    console.log(`🎵 ✅ Replaced audio track with mixed audio for ${remote} (mic: 70%, system: 80%)`)
+                    
+                    // Store audio context reference for cleanup later
+                    mixedAudioContextsRef.current.set(remote, audioContext)
+                  } else {
+                    console.warn(`🎵 ❌ Failed to get mixed audio track for ${remote}`)
+                    await audioContext.close()
                   }
                 } catch (error) {
-                  console.error(`� ❌ Failed to create mixed audio for ${remote}:`, error)
+                  console.error(`🎵 ❌ Failed to create mixed audio for ${remote}:`, error)
                   // Fallback: add both tracks separately
                   systemTracks.forEach(track => {
                     if (!pc.getSenders().some(sender => sender.track?.id === track.id)) {
