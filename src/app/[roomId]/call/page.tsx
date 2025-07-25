@@ -1049,33 +1049,23 @@ export default function CallPage() {
     const pc = new RTCPeerConnection(ICE_CONFIG)
     peerConnections.current[remote] = pc
     
-    console.log(`🔗 ⚡ Creating ROBUST peer connection for ${remote} with health monitoring`)
-    
-    // ROBUST CONNECTION: Add connection state monitoring
+    // Simplified connection monitoring for better performance
     setConnectionHealth(prev => ({ ...prev, [remote]: 'connecting' }))
     
-    // Set up aggressive connection timeout with multiple checkpoints
+    // Set up connection timeout
     const timeout = setTimeout(() => {
-      console.log(`🔗 ⏰ TIMEOUT: ${remote} failed to connect within 10 seconds`)
       if (pc.connectionState !== 'connected') {
-        console.log(`🔗 � TIMEOUT RECOVERY: Marking ${remote} as failed for immediate recreation`)
         setConnectionHealth(prev => ({ ...prev, [remote]: 'failed' }))
       }
-    }, 30000) // Longer timeout - 30 seconds to allow proper connection establishment
+    }, 30000)
     
     connectionTimeouts.current[remote] = timeout
     
-    // Remove aggressive quick check to give connections time to establish properly
-    
-    // Enhanced connection state monitoring with ICE state tracking
+    // Minimal connection state monitoring
     pc.onconnectionstatechange = () => {
-      console.log(`🔗 📊 Connection state changed for ${remote}: ${pc.connectionState}`)
-      
       switch (pc.connectionState) {
         case 'connected':
           setConnectionHealth(prev => ({ ...prev, [remote]: 'connected' }))
-          console.log(`🔗 ✅ ${remote} CONNECTED successfully!`)
-          // Clear timeout on successful connection
           if (connectionTimeouts.current[remote]) {
             clearTimeout(connectionTimeouts.current[remote])
             delete connectionTimeouts.current[remote]
@@ -1083,49 +1073,15 @@ export default function CallPage() {
           break
         case 'failed':
           setConnectionHealth(prev => ({ ...prev, [remote]: 'failed' }))
-          console.log(`🔗 ❌ ${remote} CONNECTION FAILED - will trigger immediate recovery`)
           break
         case 'disconnected':
           setConnectionHealth(prev => ({ ...prev, [remote]: 'disconnected' }))
-          console.log(`🔗 ⚠️ ${remote} DISCONNECTED - will attempt reconnection`)
           break
         case 'connecting':
-          setConnectionHealth(prev => ({ ...prev, [remote]: 'connecting' }))
-          console.log(`🔗 🔄 ${remote} is connecting...`)
-          break
         case 'new':
           setConnectionHealth(prev => ({ ...prev, [remote]: 'connecting' }))
-          console.log(`🔗 🆕 ${remote} connection initialized`)
           break
       }
-    }
-    
-    // CRITICAL: Also monitor ICE connection state for early failure detection
-    pc.oniceconnectionstatechange = () => {
-      console.log(`🔗 🧊 ICE state changed for ${remote}: ${pc.iceConnectionState}`)
-      
-      switch (pc.iceConnectionState) {
-        case 'failed':
-          console.log(`🔗 🚨 ICE FAILED for ${remote} - connection will not work`)
-          setConnectionHealth(prev => ({ ...prev, [remote]: 'failed' }))
-          break
-        case 'disconnected':
-          console.log(`🔗 ⚠️ ICE DISCONNECTED for ${remote} - connection lost`)
-          setConnectionHealth(prev => ({ ...prev, [remote]: 'disconnected' }))
-          break
-        case 'connected':
-        case 'completed':
-          console.log(`🔗 ✅ ICE ${pc.iceConnectionState.toUpperCase()} for ${remote}`)
-          break
-        case 'checking':
-          console.log(`🔗 🔍 ICE checking connectivity for ${remote}`)
-          break
-      }
-    }
-    
-    // Monitor ICE gathering state for debugging
-    pc.onicegatheringstatechange = () => {
-      console.log(`🔗 📡 ICE gathering state for ${remote}: ${pc.iceGatheringState}`)
     }
     
     pc.onicecandidate = (e) => {
@@ -1409,110 +1365,53 @@ export default function CallPage() {
     return pc
   }, [roomId, currentUser, screenSharing, videoEnabled]) // Dependencies for useCallback
 
-// Join call room with UNIVERSAL CONNECTION PROTOCOL
+// Join call room with OPTIMIZED CONNECTION PROTOCOL
   const joinCall = async () => {
     setConnecting(true)
     setConnectionSequenceProgress(0)
     setError("")
-    console.log('🚀 Starting UNIVERSAL CONNECTION PROTOCOL...')
+    console.log('🚀 Starting optimized connection...')
     
-    // STEP 1: ALWAYS create persistent arbitrary tracks as foundation for ALL users
-    console.log('🚀 📦 Creating universal track foundation for reliable connections...')
-    setConnectionSequenceProgress(10)
-    
-    // Create reliable arbitrary foundation FIRST
-    console.log('🚀 🔧 Creating persistent arbitrary audio foundation')
-    const arbitraryAudioStream = createArbitraryAudioTrack()
-    localStreamRef.current = arbitraryAudioStream
+    // STEP 1: Create foundation tracks efficiently
     setConnectionSequenceProgress(20)
     
-    console.log('🚀 🔧 Creating persistent arbitrary video foundation')  
-    const arbitraryVideoStream = createArbitraryVideoTrack()
-    localVideoStreamRef.current = arbitraryVideoStream
-    setConnectionSequenceProgress(30)
-    
-    // Set both as enabled for UI consistency during connection establishment
-    setVideoEnabled(true)
-    setMuted(true) // Start muted since we have arbitrary audio
-    
-    // STEP 2: Attempt to upgrade to real microphone (but keep arbitrary as backup)
-    console.log('🚀 🎤 Attempting to upgrade to real microphone...')
-    setConnectionSequenceProgress(40)
+    // Create arbitrary foundation ONLY if needed
+    let foundationAudioStream: MediaStream
     try {
-      const realAudioStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false })
-      
-      // SUCCESS: Replace arbitrary audio with real audio
-      console.log('🚀 ✅ Microphone access granted - upgrading foundation')
-      setConnectionSequenceProgress(60)
-      
-      // Stop arbitrary audio tracks
-      if (localStreamRef.current) {
-        localStreamRef.current.getTracks().forEach(track => track.stop())
-      }
-      
-      // Set real audio stream
-      localStreamRef.current = realAudioStream
-      if (localAudioRef.current) {
-        localAudioRef.current.srcObject = realAudioStream
-      }
-      
-      // Ensure audio tracks are enabled
-      realAudioStream.getAudioTracks().forEach(track => {
-        track.enabled = true
-        console.log('🚀 🎤 Real audio track enabled:', track.label, track.enabled)
-      })
-      
-      // Start unmuted since we have real microphone
+      // Try to get real microphone first (much faster than creating arbitrary track)
+      foundationAudioStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+      localStreamRef.current = foundationAudioStream
       setMuted(false)
-      console.log('🚀 ✅ Successfully upgraded to real microphone')
-      
-    } catch (err) {
-      console.log('🚀 📦 Microphone upgrade failed, keeping arbitrary audio foundation:', err)
-      setConnectionSequenceProgress(60)
-      
-      // Keep arbitrary audio as foundation
-      if (localAudioRef.current && localStreamRef.current) {
-        localAudioRef.current.srcObject = localStreamRef.current
-      }
-      
-      // Keep arbitrary audio tracks enabled for WebRTC
-      localStreamRef.current.getAudioTracks().forEach(track => {
-        track.enabled = true
-        console.log('🚀 📦 Arbitrary audio track kept enabled for WebRTC:', track.label)
-      })
-      
-      // Stay muted since we only have arbitrary audio
+      console.log('🚀 ✅ Real microphone acquired immediately')
+    } catch {
+      // Fallback to arbitrary audio only if microphone fails
+      foundationAudioStream = createArbitraryAudioTrack()
+      localStreamRef.current = foundationAudioStream
       setMuted(true)
-      setError("Microphone access denied. You can still hear others. Click unmute to grant microphone permission.")
+      setError("Microphone access denied. You can still hear others. Click unmute to grant permission.")
+      console.log('🚀 📦 Using arbitrary audio fallback')
     }
     
-    // STEP 3: Keep arbitrary video longer for reliable connections
-    console.log('🚀 📹 Setting up video foundation with extended persistence')
-    setConnectionSequenceProgress(70)
-    setTimeout(() => {
-      // After connections are established, disable video UI but keep arbitrary tracks
-      if (localVideoStreamRef.current) {
-        const hasArbitraryTrack = localVideoStreamRef.current.getTracks().some(track => 
-          'isArbitraryTrack' in track && (track as { isArbitraryTrack: boolean }).isArbitraryTrack
-        )
-        
-        if (hasArbitraryTrack) {
-          console.log('🚀 📦 Keeping arbitrary video foundation for connection stability')
-          // Keep arbitrary tracks but disable UI
-        }
-      }
-      setVideoEnabled(false)
-      // Mark connection sequence as complete so video controls become available
-      setConnectionSequenceComplete(true)
-      setConnectionSequenceProgress(100)
-      console.log('🚀 ✅ Video UI disabled but foundation maintained - connection sequence complete')
-    }, 10000) // Extended timeout for better connectivity
+    if (localAudioRef.current) {
+      localAudioRef.current.srcObject = foundationAudioStream
+    }
+    
+    // Create minimal arbitrary video foundation (no animation during startup)
+    const arbitraryVideoStream = createArbitraryVideoTrack()
+    localVideoStreamRef.current = arbitraryVideoStream
+    
+    // Always start with video disabled for faster startup
+    setVideoEnabled(false)
+    setConnectionSequenceProgress(60)
+    
+    // Mark connection sequence as complete immediately
+    setConnectionSequenceComplete(true)
     
     // Always join as a normal participant (never as listener)
     setActualIsListener(false)
-    console.log('🚀 ✅ Universal track foundation established - connecting to signaling...')
     setConnectionSequenceProgress(80)
-      // Connect to signaling
+    
+    // Connect to signaling immediately after foundation is ready
     const ws = new WebSocket(SIGNALING_SERVER_URL)
     wsRef.current = ws
     
@@ -1520,7 +1419,8 @@ export default function CallPage() {
       ws.send(JSON.stringify({ type: "call-join", roomId, username: currentUser, isListener: false }))
       setJoined(true)
       setConnecting(false)
-      setConnectionSequenceProgress(90)
+      setConnectionSequenceProgress(100)
+      console.log('🚀 ✅ Connected successfully!')
     }
     ws.onmessage = async (event) => {
       const msg = JSON.parse(event.data)
@@ -1528,136 +1428,29 @@ export default function CallPage() {
           const newPeer = msg.username
           if (newPeer === currentUser) return
           
-          console.log(`🔗 🚀 LATE JOINER DETECTED: ${newPeer} - establishing ULTRA-ROBUST connection with ALL current tracks`)
-          
           // Add to participants list
           setParticipants(prev => new Set([...prev, newPeer]))
           
           let pc = peerConnections.current[newPeer]
           if (!pc) {
-            console.log(`🔗 ⚡ Creating ULTRA-ROBUST peer connection for late joiner ${newPeer}`)
-            // The createPeerConnection function will automatically add all current tracks
-            // including screen sharing and system audio based on current state
+            // Create peer connection with current tracks
             pc = createPeerConnection(newPeer)
-            
-            console.log(`🔗 ✅ Initial connection created for ${newPeer} with ${pc.getSenders().length} senders`)
           }
           
-          // CRITICAL: Ensure COMPLETE media state synchronization for late joiners
-          console.log(`🔗 🔄 LATE JOINER MEDIA SYNC: Ensuring ${newPeer} receives ALL current media`)
+          // Simplified sync for better startup performance
+          // Only run full sync if we have complex media state
+          const hasComplexMedia = screenSharing || (localSystemAudioStreamRef.current && localStreamRef.current)
           
-          // INTELLIGENT SYNC: Only run sync if we don't already have optimal master mixed track setup
-          const hasScreenSharingWithAudio = screenSharing && localSystemAudioStreamRef.current && localStreamRef.current
-          
-          if (hasScreenSharingWithAudio) {
-            // Check if we already have master mixed track properly set up
-            const streamWithMixedTrack = localStreamRef.current as MediaStream & { masterMixedTrack?: MediaStreamTrack }
-            const storedMasterMixedTrack = streamWithMixedTrack.masterMixedTrack
-            const inStreamMasterMixedTrack = localStreamRef.current?.getAudioTracks().find(track => 
-              'isMixedAudio' in track && (track as MediaStreamTrack & { isMixedAudio: boolean }).isMixedAudio
-            )
-            const hasMasterMixedTrack = (storedMasterMixedTrack && storedMasterMixedTrack.readyState === 'live') || inStreamMasterMixedTrack
-            
-            // Check if the peer connection already has the master mixed track
-            const alreadyHasMasterMixed = pc.getSenders().some(sender => 
-              sender.track && 
-              'isMixedAudio' in sender.track && 
-              (sender.track as MediaStreamTrack & { isMixedAudio: boolean }).isMixedAudio
-            )
-            
-            console.log(`🔗 🔍 SYNC DECISION for ${newPeer}:`, {
-              hasScreenSharingWithAudio: true,
-              hasMasterMixedTrack: !!hasMasterMixedTrack,
-              alreadyHasMasterMixed,
-              willSkipSync: !!(hasMasterMixedTrack && alreadyHasMasterMixed),
-              masterTrackLabel: hasMasterMixedTrack ? (storedMasterMixedTrack || inStreamMasterMixedTrack)?.label : 'none'
-            })
-            
-            if (hasMasterMixedTrack && alreadyHasMasterMixed) {
-              console.log(`🔗 ✅ SYNC SKIPPED: ${newPeer} already has optimal master mixed track - no sync needed`)
-              console.log(`🔗 🎵 ${newPeer} will continue receiving both microphone and system audio in single optimized track`)
-            } else {
-              console.log(`🔗 ⚠️ SYNC NEEDED: ${newPeer} missing master mixed track - running sync`)
-              // Force synchronization after a brief delay to allow connection to initialize
-              setTimeout(async () => {
-                try {
-                  await synchronizeAllMediaTracks(newPeer)
-                  console.log(`🔗 ✅ Late joiner ${newPeer} synchronized with ALL current media`)
-                } catch (error) {
-                  console.error(`🔗 ❌ Failed to synchronize media for late joiner ${newPeer}:`, error)
-                }
-              }, 200)
-            }
-          } else {
-            console.log(`🔗 📝 STANDARD SYNC: No screen sharing with audio - running normal sync for ${newPeer}`)
-            // Force synchronization after a brief delay to allow connection to initialize
+          if (hasComplexMedia) {
+            // Only sync complex media if needed
             setTimeout(async () => {
               try {
                 await synchronizeAllMediaTracks(newPeer)
-                console.log(`🔗 ✅ Late joiner ${newPeer} synchronized with ALL current media`)
               } catch (error) {
-                console.error(`🔗 ❌ Failed to synchronize media for late joiner ${newPeer}:`, error)
+                console.error(`Failed to synchronize media for ${newPeer}:`, error)
               }
-            }, 200)
+            }, 100) // Reduced delay for faster startup
           }
-          
-          // COMPREHENSIVE DEBUGGING: Log all current media state
-          const currentAudioTracks = localStreamRef.current?.getTracks() || []
-          const currentVideoTracks = localVideoStreamRef.current?.getTracks() || []
-          const currentScreenTracks = localScreenStreamRef.current?.getTracks() || []
-          const currentSystemAudioTracks = localSystemAudioStreamRef.current?.getTracks() || []
-          
-          console.log(`🔗 📊 COMPLETE media state for late joiner ${newPeer}:`, {
-            audio: {
-              count: currentAudioTracks.length,
-              tracks: currentAudioTracks.map(t => ({label: t.label, enabled: t.enabled, kind: t.kind}))
-            },
-            video: {
-              count: currentVideoTracks.length,
-              enabled: videoEnabled,
-              tracks: currentVideoTracks.map(t => ({label: t.label, enabled: t.enabled, kind: t.kind}))
-            },
-            screenShare: {
-              count: currentScreenTracks.length,
-              active: screenSharing,
-              tracks: currentScreenTracks.map(t => ({label: t.label, enabled: t.enabled, kind: t.kind}))
-            },
-            systemAudio: {
-              count: currentSystemAudioTracks.length,
-              tracks: currentSystemAudioTracks.map(t => ({label: t.label, enabled: t.enabled, kind: t.kind}))
-            },
-            currentSenders: pc.getSenders().length,
-            states: {
-              screenSharing,
-              videoEnabled,
-              muted
-            }
-          })
-          if (!pc) {
-            console.log(`🔗 Creating new ROBUST peer connection for ${newPeer}`)
-            // The createPeerConnection function will automatically add all current tracks
-            // including screen sharing and system audio based on current state
-            pc = createPeerConnection(newPeer)
-            
-            console.log(`� ✅ Peer connection created for ${newPeer} with ${pc.getSenders().length} senders (including any active screen sharing)`)
-          }
-          
-          // ROBUST CONNECTION: Log all current media state for debugging
-          const audioTracks = localStreamRef.current?.getTracks() || []
-          const videoTracks = localVideoStreamRef.current?.getTracks() || []
-          const screenTracks = localScreenStreamRef.current?.getTracks() || []
-          const systemAudioTracks = localSystemAudioStreamRef.current?.getTracks() || []
-          
-          console.log(`🔗 Current media state for new peer ${newPeer}:`, {
-            audio: audioTracks.length,
-            video: videoTracks.length,
-            screen: screenTracks.length,
-            systemAudio: systemAudioTracks.length,
-            screenSharing: screenSharing,
-            videoEnabled: videoEnabled,
-            muted: muted,
-            senders: pc.getSenders().length
-          })
           
           // Perfect negotiation with GUARANTEED connection establishment
           const isImpolite = currentUser > newPeer
@@ -3148,23 +2941,21 @@ export default function CallPage() {
         setError('Screen sharing access denied or not supported')
       }
     }
-  }// Create arbitrary audio track when no microphone access
+  }// Create arbitrary audio track when no microphone access - OPTIMIZED for startup speed
   const createArbitraryAudioTrack = (): MediaStream => {
-    console.log('🔧 Creating ROBUST arbitrary audio track for WebRTC connection')
-    
     try {
-      // Create audio context and generate inaudible but WebRTC-detectable audio
+      // Create audio context with minimal processing for speed
       const audioContext = new (window.AudioContext || window.webkitAudioContext)()
       const oscillator = audioContext.createOscillator()
       const gainNode = audioContext.createGain()
       
-      // Create extremely quiet audio (just enough for WebRTC to consider it "active")
-      oscillator.frequency.setValueAtTime(440, audioContext.currentTime) // 440 Hz tone
-      gainNode.gain.setValueAtTime(0.00001, audioContext.currentTime) // Virtually inaudible but detectable by WebRTC
+      // Create extremely quiet audio for WebRTC detection
+      oscillator.frequency.setValueAtTime(440, audioContext.currentTime)
+      gainNode.gain.setValueAtTime(0.00001, audioContext.currentTime) // Virtually inaudible
       
       oscillator.connect(gainNode)
       
-      // Create MediaStreamDestination to get a MediaStream
+      // Create MediaStreamDestination
       const destination = audioContext.createMediaStreamDestination()
       gainNode.connect(destination)
       
@@ -3175,98 +2966,66 @@ export default function CallPage() {
       const audioTrack = stream.getAudioTracks()[0]
       
       if (audioTrack) {
-        // Set track properties to make it identifiable and persistent
+        // Set track properties
         Object.defineProperty(audioTrack, 'label', {
-          value: 'Persistent Arbitrary Audio',
+          value: 'Optimized Arbitrary Audio',
           writable: false
         })
         
-        // Mark as arbitrary track for identification
         Object.defineProperty(audioTrack, 'isArbitraryTrack', {
           value: true,
           writable: false
         })
-        
-        console.log('🔧 ✅ Robust arbitrary audio track created (virtually inaudible):', {
-          label: audioTrack.label,
-          kind: audioTrack.kind,
-          enabled: audioTrack.enabled,
-          readyState: audioTrack.readyState,
-          id: audioTrack.id,
-          isArbitrary: true,
-          gainLevel: 0.00001
-        })
-      } else {
-        console.warn('🔧 ❌ Failed to create audio track from arbitrary stream')
       }
       
       return stream
     } catch (error) {
       console.error('🔧 ❌ Error creating arbitrary audio track:', error)
       
-      // Fallback: create a minimal media stream
+      // Fallback: create minimal media stream
       const canvas = document.createElement('canvas')
       canvas.width = 1
       canvas.height = 1
       const canvasStream = canvas.captureStream(1)
       
-      console.log('🔧 📦 Created fallback canvas stream as audio substitute')
       return canvasStream
     }
   }
 
 
 
-  // Create arbitrary video track when no camera access
+  // Create arbitrary video track when no camera access - OPTIMIZED for startup speed
   const createArbitraryVideoTrack = (): MediaStream => {
-    console.log('🔧 Creating ROBUST arbitrary video track for WebRTC connection')
-    
     try {
-      // Create a canvas with decent dimensions for better WebRTC compatibility
+      // Create a minimal canvas for faster startup
       const canvas = document.createElement('canvas')
       canvas.width = 320
       canvas.height = 240
       
       const ctx = canvas.getContext('2d')
       if (ctx) {
-        // Create animated content to keep track "active"
-        let frame = 0
+        // Create static content instead of animation for faster startup
+        ctx.fillStyle = '#1a1a1a'
+        ctx.fillRect(0, 0, canvas.width, canvas.height)
         
-        const animate = () => {
-          // Clear canvas
-          ctx.fillStyle = '#1a1a1a'
-          ctx.fillRect(0, 0, canvas.width, canvas.height)
-          
-          // Add subtle animation (moving dot) to keep track active
-          const x = 50 + Math.sin(frame * 0.1) * 20
-          const y = 50 + Math.cos(frame * 0.1) * 20
-          
-          ctx.fillStyle = '#333333'
-          ctx.beginPath()
-          ctx.arc(x, y, 5, 0, 2 * Math.PI)
-          ctx.fill()
-          
-          // Add identification text
-          ctx.fillStyle = '#444444'
-          ctx.font = '12px Arial'
-          ctx.fillText('WebRTC Ready', 10, canvas.height - 10)
-          
-          frame++
-        }
+        // Add minimal visual content
+        ctx.fillStyle = '#333'
+        ctx.fillRect(canvas.width/2 - 50, canvas.height/2 - 25, 100, 50)
         
-        // Start animation loop
-        setInterval(animate, 100) // 10 FPS animation
-        animate() // Initial frame
+        ctx.fillStyle = '#666'
+        ctx.font = '16px Arial'
+        ctx.textAlign = 'center'
+        ctx.fillText('Video Off', canvas.width/2, canvas.height/2 + 5)
       }
       
-      // Capture stream from canvas (10 FPS for active but low bandwidth)
-      const stream = canvas.captureStream(10)
+      // Capture stream from canvas (low frame rate for efficiency)
+      const stream = canvas.captureStream(1) // 1 FPS for minimal bandwidth
       const videoTrack = stream.getVideoTracks()[0]
       
       if (videoTrack) {
-        // Set track properties to make it identifiable and persistent
+        // Set track properties to make it identifiable
         Object.defineProperty(videoTrack, 'label', {
-          value: 'Persistent Arbitrary Video',
+          value: 'Optimized Arbitrary Video',
           writable: false
         })
         
@@ -3275,35 +3034,22 @@ export default function CallPage() {
           value: true,
           writable: false
         })
-        
-        console.log('🔧 ✅ Robust arbitrary video track created:', {
-          label: videoTrack.label,
-          kind: videoTrack.kind,
-          enabled: videoTrack.enabled,
-          readyState: videoTrack.readyState,
-          id: videoTrack.id,
-          isArbitrary: true
-        })
-      } else {
-        console.warn('🔧 ❌ Failed to create video track from arbitrary stream')
       }
       
       return stream
     } catch (error) {
       console.error('🔧 ❌ Error creating arbitrary video track:', error)
       
-      // Fallback: try to create a minimal canvas stream
+      // Fallback: create minimal canvas stream
       try {
         const canvas = document.createElement('canvas')
         canvas.width = 320
         canvas.height = 240
         const fallbackStream = canvas.captureStream(1)
         
-        console.log('🔧 📦 Created minimal fallback canvas stream for video')
         return fallbackStream
       } catch (fallbackError) {
         console.error('🔧 ❌ Error creating fallback video track:', fallbackError)
-        // Return empty MediaStream as last resort
         return new MediaStream()
       }
     }
