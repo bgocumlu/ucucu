@@ -2909,7 +2909,7 @@ export default function CallPage() {
                         autoPlay
                         playsInline
                         muted
-                        className="w-full h-full object-cover rounded"
+                        className="w-full h-full object-contain rounded bg-gray-900"
                         style={{ transform: isMirrored ? 'scaleX(-1)' : 'none' }}
                       />
                       
@@ -3042,7 +3042,7 @@ export default function CallPage() {
                               ref={remoteVideoRefs.current[peer]}
                               autoPlay
                               playsInline
-                              className="w-full h-full object-cover rounded"
+                              className="w-full h-full object-contain rounded bg-gray-900"
                             />
                           ) : hasScreenShare ? (
                             <video
