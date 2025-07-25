@@ -923,6 +923,9 @@ export default function CallPage() {
       setMuted(false)
       console.log('🚀 ✅ Successfully upgraded to real microphone')
       
+      // Optimized: Skip ahead in progress since we have real microphone
+      setConnectionSequenceProgress(75)
+      
     } catch (err) {
       console.log('🚀 📦 Microphone upgrade failed, keeping arbitrary audio foundation:', err)
       setConnectionSequenceProgress(60)
@@ -943,9 +946,11 @@ export default function CallPage() {
       setError("Microphone access denied. You can still hear others. Click unmute to grant microphone permission.")
     }
     
-    // STEP 3: Keep arbitrary video longer for reliable connections
-    console.log('🚀 📹 Setting up video foundation with extended persistence')
+    // STEP 3: Setup video foundation with optimized timing
+    console.log('🚀 📹 Setting up video foundation with optimized timing')
     setConnectionSequenceProgress(70)
+    
+    // Optimized: Complete setup much faster while maintaining functionality
     setTimeout(() => {
       // After connections are established, disable video UI but keep arbitrary tracks
       if (localVideoStreamRef.current) {
@@ -963,7 +968,7 @@ export default function CallPage() {
       setConnectionSequenceComplete(true)
       setConnectionSequenceProgress(100)
       console.log('🚀 ✅ Video UI disabled but foundation maintained - connection sequence complete')
-    }, 10000) // Extended timeout for better connectivity
+    }, 2000) // Optimized: Reduced from 10s to 2s for faster setup
     
     // Always join as a normal participant (never as listener)
     setActualIsListener(false)
@@ -978,6 +983,24 @@ export default function CallPage() {
       setJoined(true)
       setConnecting(false)
       setConnectionSequenceProgress(90)
+      
+      // Optimized: Complete the sequence faster once WebSocket is connected
+      setTimeout(() => {
+        if (!connectionSequenceComplete) {
+          setConnectionSequenceComplete(true)
+          setConnectionSequenceProgress(100)
+          console.log('🚀 ⚡ Connection sequence completed early - WebSocket ready')
+        }
+      }, 1000) // Complete setup 1 second after WebSocket opens
+      
+      // Fallback: Complete sequence after 3 seconds even if no peers join (solo call)
+      setTimeout(() => {
+        if (!connectionSequenceComplete) {
+          setConnectionSequenceComplete(true)
+          setConnectionSequenceProgress(100)
+          console.log('🚀 ⚡ Connection sequence completed - solo call ready')
+        }
+      }, 3000)
     }
     ws.onmessage = async (event) => {
       const msg = JSON.parse(event.data)
@@ -994,6 +1017,13 @@ export default function CallPage() {
           if (!pc) {
             console.log(`🔗 Creating new ROBUST peer connection for ${newPeer}`)
             pc = createPeerConnection(newPeer)
+          }
+          
+          // Optimized: Complete connection sequence when first peer joins
+          if (!connectionSequenceComplete) {
+            setConnectionSequenceComplete(true)
+            setConnectionSequenceProgress(100)
+            console.log('🚀 ⚡ Connection sequence completed early - first peer detected')
           }
           
           // ROBUST CONNECTION: Always check for ANY tracks (including arbitrary)
@@ -1031,7 +1061,7 @@ export default function CallPage() {
                   console.error(`🔗 ❌ Error creating offer for new peer ${newPeer}:`, error)
                 }
               }
-            }, 100) // Small delay to prevent race conditions
+            }, 50) // Optimized: Reduced from 100ms to 50ms for faster negotiation
           } else {
             console.log(`🔗 ${currentUser} is POLITE - waiting for offer from ${newPeer}`)
             // If we're the polite peer but no offer comes, create one anyway after a longer delay
@@ -1046,7 +1076,7 @@ export default function CallPage() {
                   console.error('Error creating backup offer:', error)
                 }
               }
-            }, 500) // Longer delay for backup offer
+            }, 300) // Optimized: Reduced from 500ms to 300ms for faster backup negotiation
           }
           break
         }case "call-offer": {
