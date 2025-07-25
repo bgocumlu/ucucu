@@ -549,43 +549,42 @@ export default function CallPage() {
     // ROBUST CONNECTION: Add connection state monitoring
     setConnectionHealth(prev => ({ ...prev, [remote]: 'connecting' }))
     
-    // Set up connection timeout
+    // Set up aggressive connection timeout with multiple checkpoints
     const timeout = setTimeout(() => {
-      console.log(`🔗 ⏰ Connection timeout for ${remote} - attempting recovery`)
+      console.log(`🔗 ⏰ TIMEOUT: ${remote} failed to connect within 10 seconds`)
       if (pc.connectionState !== 'connected') {
-        console.log(`🔗 🔄 Triggering connection recovery for ${remote}`)
-        // Trigger renegotiation attempt
-        setTimeout(async () => {
-          if (pc.signalingState === 'stable') {
-            try {
-              const offer = await pc.createOffer()
-              await pc.setLocalDescription(offer)
-              if (wsRef.current) {
-                wsRef.current.send(JSON.stringify({ 
-                  type: "call-offer", 
-                  roomId, 
-                  from: currentUser, 
-                  to: remote, 
-                  payload: pc.localDescription 
-                }))
-              }
-            } catch (error) {
-              console.error(`🔗 ❌ Recovery attempt failed for ${remote}:`, error)
-            }
-          }
-        }, 1000)
+        console.log(`🔗 � TIMEOUT RECOVERY: Marking ${remote} as failed for immediate recreation`)
+        setConnectionHealth(prev => ({ ...prev, [remote]: 'failed' }))
       }
-    }, 15000) // 15 second timeout
+    }, 10000) // Shorter timeout - 10 seconds instead of 15
     
     connectionTimeouts.current[remote] = timeout
     
-    // Enhanced connection state monitoring
+    // Additional quick check for stuck "new" state
+    const quickCheck = setTimeout(() => {
+      if (pc.connectionState === 'new') {
+        console.log(`🔗 ⚡ QUICK CHECK: ${remote} still in 'new' state after 3 seconds - may be stuck`)
+        // Don't fail yet, but warn
+        console.log(`🔗 📊 Connection details for ${remote}:`, {
+          connectionState: pc.connectionState,
+          iceConnectionState: pc.iceConnectionState,
+          iceGatheringState: pc.iceGatheringState,
+          signalingState: pc.signalingState
+        })
+      }
+    }, 3000)
+    
+    // Store quick check timeout for cleanup
+    setTimeout(() => clearTimeout(quickCheck), 11000)
+    
+    // Enhanced connection state monitoring with ICE state tracking
     pc.onconnectionstatechange = () => {
       console.log(`🔗 📊 Connection state changed for ${remote}: ${pc.connectionState}`)
       
       switch (pc.connectionState) {
         case 'connected':
           setConnectionHealth(prev => ({ ...prev, [remote]: 'connected' }))
+          console.log(`🔗 ✅ ${remote} CONNECTED successfully!`)
           // Clear timeout on successful connection
           if (connectionTimeouts.current[remote]) {
             clearTimeout(connectionTimeouts.current[remote])
@@ -593,15 +592,50 @@ export default function CallPage() {
           }
           break
         case 'failed':
+          setConnectionHealth(prev => ({ ...prev, [remote]: 'failed' }))
+          console.log(`🔗 ❌ ${remote} CONNECTION FAILED - will trigger immediate recovery`)
+          break
         case 'disconnected':
-          setConnectionHealth(prev => ({ ...prev, [remote]: pc.connectionState as 'failed' | 'disconnected' }))
-          console.log(`🔗 ⚠️ Connection ${pc.connectionState} for ${remote} - may need recovery`)
+          setConnectionHealth(prev => ({ ...prev, [remote]: 'disconnected' }))
+          console.log(`🔗 ⚠️ ${remote} DISCONNECTED - will attempt reconnection`)
           break
         case 'connecting':
+          setConnectionHealth(prev => ({ ...prev, [remote]: 'connecting' }))
+          console.log(`🔗 🔄 ${remote} is connecting...`)
+          break
         case 'new':
           setConnectionHealth(prev => ({ ...prev, [remote]: 'connecting' }))
+          console.log(`🔗 🆕 ${remote} connection initialized`)
           break
       }
+    }
+    
+    // CRITICAL: Also monitor ICE connection state for early failure detection
+    pc.oniceconnectionstatechange = () => {
+      console.log(`🔗 🧊 ICE state changed for ${remote}: ${pc.iceConnectionState}`)
+      
+      switch (pc.iceConnectionState) {
+        case 'failed':
+          console.log(`🔗 🚨 ICE FAILED for ${remote} - connection will not work`)
+          setConnectionHealth(prev => ({ ...prev, [remote]: 'failed' }))
+          break
+        case 'disconnected':
+          console.log(`🔗 ⚠️ ICE DISCONNECTED for ${remote} - connection lost`)
+          setConnectionHealth(prev => ({ ...prev, [remote]: 'disconnected' }))
+          break
+        case 'connected':
+        case 'completed':
+          console.log(`🔗 ✅ ICE ${pc.iceConnectionState.toUpperCase()} for ${remote}`)
+          break
+        case 'checking':
+          console.log(`🔗 🔍 ICE checking connectivity for ${remote}`)
+          break
+      }
+    }
+    
+    // Monitor ICE gathering state for debugging
+    pc.onicegatheringstatechange = () => {
+      console.log(`🔗 📡 ICE gathering state for ${remote}: ${pc.iceGatheringState}`)
     }
     
     pc.onicecandidate = (e) => {
@@ -1147,7 +1181,7 @@ export default function CallPage() {
     }
   }, [roomId])
 
-  // 🔗 ROBUST CONNECTION: Enhanced aggressive health monitoring and auto-recovery system
+  // 🔗 ULTRA-ROBUST CONNECTION: Immediate fail detection and aggressive recovery system
   useEffect(() => {
     const healthMonitor = setInterval(() => {
       console.log('🔗 🔍 Health monitor checking connections:', Object.keys(connectionHealth))
@@ -1166,89 +1200,106 @@ export default function CallPage() {
         }
         
         const actualState = pc.connectionState
-        console.log(`🔗 📊 ${peerId}: health=${health}, actual=${actualState}`)
+        const iceState = pc.iceConnectionState
+        console.log(`🔗 📊 ${peerId}: health=${health}, connection=${actualState}, ice=${iceState}`)
         
-        // Update health state to match actual connection state
-        if (health !== actualState) {
-          const validState = ['connecting', 'connected', 'failed', 'disconnected'].includes(actualState) 
-            ? actualState as 'connecting' | 'connected' | 'failed' | 'disconnected'
-            : 'failed'
-          setConnectionHealth(prev => ({ ...prev, [peerId]: validState }))
-        }
+        // CRITICAL: Detect stuck connections immediately
+        const isStuck = (
+          (actualState === 'new' && health === 'connecting') || // Stuck in new state too long
+          (actualState === 'new' && health === 'failed') || // Previously failed, still stuck
+          (actualState === 'connecting' && iceState === 'failed') || // ICE failed
+          (actualState === 'disconnected') || // Connection lost
+          (actualState === 'failed') // Connection completely failed
+        )
         
-        // Aggressive recovery for failed/disconnected connections
-        if (actualState === 'failed' || actualState === 'disconnected' || 
-            (actualState === 'connecting' && health === 'connecting')) {
+        if (isStuck) {
+          console.log(`🔗 � IMMEDIATE RECOVERY: ${peerId} is stuck/failed (connection=${actualState}, ice=${iceState}, health=${health})`)
           
-          console.log(`🔗 🚑 AGGRESSIVE recovery triggered for ${peerId} (actual: ${actualState}, health: ${health})`)
+          // AGGRESSIVE IMMEDIATE RECOVERY - NO DELAYS
+          setConnectionHealth(prev => ({ ...prev, [peerId]: 'failed' }))
           
-          // Immediate recovery attempt - don't wait
+          // Close and completely recreate connection immediately
           setTimeout(async () => {
             try {
-              // For completely failed connections, recreate the entire peer connection
-              if (actualState === 'failed') {
-                console.log(`🔗 🔄 RECREATING failed peer connection for ${peerId}`)
-                
-                // Close and remove old connection
-                pc.close()
+              console.log(`🔗 🔥 FORCE RECREATING connection for ${peerId}`)
+              
+              // 1. Completely close old connection
+              if (peerConnections.current[peerId]) {
+                peerConnections.current[peerId].close()
                 delete peerConnections.current[peerId]
-                
-                // Create new connection with tracks
-                const newPc = createPeerConnection(peerId)
-                
-                // Send new offer
-                const offer = await newPc.createOffer()
-                await newPc.setLocalDescription(offer)
-                
-                if (wsRef.current) {
-                  wsRef.current.send(JSON.stringify({
-                    type: "call-offer",
-                    roomId,
-                    from: currentUser,
-                    to: peerId,
-                    payload: newPc.localDescription
-                  }))
-                }
-                
-                console.log(`🔗 ✅ New peer connection created for ${peerId}`)
-                
-              } else if (pc.signalingState === 'stable') {
-                // For disconnected or stuck connecting, try ICE restart
-                console.log(`🔗 🔄 ICE restart for ${peerId}`)
-                const offer = await pc.createOffer({ iceRestart: true })
-                await pc.setLocalDescription(offer)
-                
-                if (wsRef.current) {
-                  wsRef.current.send(JSON.stringify({
-                    type: "call-offer",
-                    roomId,
-                    from: currentUser,
-                    to: peerId,
-                    payload: pc.localDescription
-                  }))
-                }
               }
               
-              setConnectionHealth(prev => ({ ...prev, [peerId]: 'connecting' }))
+              // 2. Clear any existing timeouts
+              if (connectionTimeouts.current[peerId]) {
+                clearTimeout(connectionTimeouts.current[peerId])
+                delete connectionTimeouts.current[peerId]
+              }
+              
+              // 3. Wait a moment for cleanup
+              await new Promise(resolve => setTimeout(resolve, 100))
+              
+              // 4. Create completely fresh connection
+              console.log(`🔗 ✨ Creating FRESH peer connection for ${peerId}`)
+              const newPc = createPeerConnection(peerId)
+              
+              // 5. Force immediate offer with ICE restart
+              console.log(`🔗 🚀 Sending FRESH offer to ${peerId}`)
+              const offer = await newPc.createOffer({ iceRestart: true })
+              await newPc.setLocalDescription(offer)
+              
+              if (wsRef.current) {
+                wsRef.current.send(JSON.stringify({
+                  type: "call-offer",
+                  roomId,
+                  from: currentUser,
+                  to: peerId,
+                  payload: newPc.localDescription
+                }))
+              }
+              
+              console.log(`🔗 ✅ FRESH connection initiated for ${peerId}`)
+              
+              // 6. Set short timeout for this new connection
+              const quickTimeout = setTimeout(() => {
+                if (newPc.connectionState === 'new' || newPc.connectionState === 'connecting') {
+                  console.log(`🔗 ⚡ Quick retry for ${peerId} - still not connected`)
+                  setConnectionHealth(prev => ({ ...prev, [peerId]: 'failed' }))
+                }
+              }, 3000) // Much shorter timeout for quick retry
+              
+              connectionTimeouts.current[peerId] = quickTimeout
               
             } catch (error) {
-              console.error(`🔗 ❌ Aggressive recovery failed for ${peerId}:`, error)
-              
-              // Last resort: mark for complete recreation on next cycle
-              setConnectionHealth(prev => ({ ...prev, [peerId]: 'failed' }))
+              console.error(`🔗 ❌ FORCE RECREATION failed for ${peerId}:`, error)
+              // Try again in a moment
+              setTimeout(() => {
+                setConnectionHealth(prev => ({ ...prev, [peerId]: 'failed' }))
+              }, 1000)
             }
-          }, 1000) // Faster response - 1 second
+          }, 100) // IMMEDIATE - no delay
+          
+        } else {
+          // Update health state to match actual state for non-stuck connections
+          if (health !== actualState) {
+            const validState = ['connecting', 'connected', 'failed', 'disconnected'].includes(actualState) 
+              ? actualState as 'connecting' | 'connected' | 'failed' | 'disconnected'
+              : 'connecting'
+            
+            console.log(`🔗 📝 Updating health for ${peerId}: ${health} → ${validState}`)
+            setConnectionHealth(prev => ({ ...prev, [peerId]: validState }))
+          }
         }
       })
       
       // Also check for peers that should have connections but don't
       Array.from(participants).forEach(peerId => {
         if (peerId !== currentUser && !peerConnections.current[peerId]) {
-          console.log(`🔗 🔧 Missing connection for active participant ${peerId}, creating...`)
+          console.log(`🔗 🔧 Missing connection for active participant ${peerId}, creating immediately...`)
           
+          setConnectionHealth(prev => ({ ...prev, [peerId]: 'connecting' }))
           const newPc = createPeerConnection(peerId)
           
-          // Send offer to establish connection
+          // Send offer to establish connection immediately
           setTimeout(async () => {
             try {
               const offer = await newPc.createOffer()
@@ -1263,14 +1314,16 @@ export default function CallPage() {
                   payload: newPc.localDescription
                 }))
               }
+              console.log(`🔗 ✅ Created missing connection for ${peerId}`)
             } catch (error) {
-              console.error(`🔗 ❌ Failed to create offer for missing peer ${peerId}:`, error)
+              console.error(`🔗 ❌ Failed to create missing connection for ${peerId}:`, error)
+              setConnectionHealth(prev => ({ ...prev, [peerId]: 'failed' }))
             }
-          }, 500)
+          }, 100)
         }
       })
       
-    }, 5000) // More frequent checks - every 5 seconds
+    }, 2000) // Much more frequent checks - every 2 seconds for immediate detection
     
     return () => clearInterval(healthMonitor)
   }, [connectionHealth, roomId, currentUser, participants, createPeerConnection])
@@ -2117,24 +2170,42 @@ export default function CallPage() {
     setError("")
     console.log("Manual reconnection initiated...")
     
-    // FIRST: Immediately stop video and screen sharing before anything else
+    // FIRST: Stop ALL media tracks and clean up properly
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach(track => {
+        console.log('Reconnect: Stopping audio track:', track.label)
+        track.stop()
+      })
+      localStreamRef.current = null
+    }
+    
     if (localVideoStreamRef.current) {
-      localVideoStreamRef.current.getTracks().forEach(track => track.stop())
+      localVideoStreamRef.current.getTracks().forEach(track => {
+        console.log('Reconnect: Stopping video track:', track.label)
+        track.stop()
+      })
       localVideoStreamRef.current = null
     }
     setVideoEnabled(false)
     
     if (localScreenStreamRef.current) {
-      localScreenStreamRef.current.getTracks().forEach(track => track.stop())
+      localScreenStreamRef.current.getTracks().forEach(track => {
+        console.log('Reconnect: Stopping screen share track:', track.label)
+        track.stop()
+      })
       localScreenStreamRef.current = null
     }
     setScreenSharing(false)
     
-    console.log("Reconnect: Video and screen sharing stopped immediately")
+    // Clear audio element source
+    if (localAudioRef.current) {
+      localAudioRef.current.srcObject = null
+    }
+    
+    console.log("Reconnect: All media tracks stopped and cleaned up")
     
     try {
       // Store only muted state to restore after reconnection
-      // Video and screen sharing are already disabled above
       const wasMuted = muted
       
       // Close all existing peer connections
@@ -2148,7 +2219,7 @@ export default function CallPage() {
       setRemoteStreams({})
       setRemoteVideoStreams({})
       setRemoteScreenStreams({})
-        // Reset expanded participants
+      // Reset expanded participants
       setExpandedParticipants(new Set())
       setLocalPreviewExpanded(false)
       
@@ -2167,6 +2238,7 @@ export default function CallPage() {
       // Always create an audio stream - either real microphone or arbitrary track
       if (!wasMuted) {
         try {
+          // Request microphone permission again
           newLocalStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false })
           localStreamRef.current = newLocalStream
           if (localAudioRef.current) {
@@ -2177,6 +2249,7 @@ export default function CallPage() {
             console.log('Reconnect: Real audio track enabled:', track.label)
           })
           setMuted(false)
+          console.log('Reconnect: Microphone access granted successfully')
         } catch (err) {
           console.warn("Reconnect: Mic access denied, creating arbitrary audio track:", err)
           // Create arbitrary audio track to establish WebRTC connection
@@ -2471,6 +2544,36 @@ export default function CallPage() {
                 <span className="sm:inline">{reconnecting ? 'Reconnecting...' : 'Reconnect'}</span>
               </Button>
             )}
+            
+            {/* Fix Button - only show when there are connection issues */}
+            {joined && Object.values(connectionHealth).some(health => health === 'failed' || health === 'disconnected') && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  console.log('🔧 MANUAL CONNECTION FIX TRIGGERED')
+                  console.log('🔧 Current connection states:')
+                  Object.entries(peerConnections.current).forEach(([peerId, pc]) => {
+                    console.log(`  ${peerId}: connection=${pc.connectionState}, ice=${pc.iceConnectionState}, signaling=${pc.signalingState}`)
+                  })
+                  console.log('🔧 Health states:', connectionHealth)
+                  
+                  // Force all problematic connections to be marked as failed for immediate recreation
+                  Object.entries(connectionHealth).forEach(([peerId, health]) => {
+                    if (health === 'failed' || health === 'disconnected' || peerConnections.current[peerId]?.connectionState === 'new') {
+                      console.log(`🔧 Forcing fix for ${peerId} (health: ${health})`)
+                      setConnectionHealth(prev => ({ ...prev, [peerId]: 'failed' }))
+                    }
+                  })
+                }}
+                className="flex items-center gap-1 bg-yellow-50 border-yellow-200 text-yellow-700 hover:bg-yellow-100"
+                title="Fix connection issues immediately"
+              >
+                🔧
+                <span className="hidden sm:inline">Fix</span>
+              </Button>
+            )}
+            
             <NotificationBell roomId={roomId} username={currentUser} />
           </div>
         </div>
@@ -2775,14 +2878,22 @@ export default function CallPage() {
                             isExpanded ? 'text-sm sm:text-base' : 'text-xs sm:text-sm'
                           }`}>
                             {peer}
-                            {/* Connection Health Indicator */}
-                            <span className={`ml-2 inline-block w-2 h-2 rounded-full ${
-                              connectionHealth[peer] === 'connected' ? 'bg-green-500' :
-                              connectionHealth[peer] === 'connecting' ? 'bg-yellow-500 animate-pulse' :
-                              connectionHealth[peer] === 'failed' ? 'bg-red-500' :
-                              connectionHealth[peer] === 'disconnected' ? 'bg-orange-500' :
-                              'bg-gray-400'
-                            }`} title={`Connection: ${connectionHealth[peer] || 'unknown'}`}></span>
+                            {/* Enhanced Connection Health Indicator with detailed feedback */}
+                            <span className={`ml-2 inline-flex items-center gap-1`}>
+                              <span className={`inline-block w-2 h-2 rounded-full ${
+                                connectionHealth[peer] === 'connected' ? 'bg-green-500' :
+                                connectionHealth[peer] === 'connecting' ? 'bg-yellow-500 animate-pulse' :
+                                connectionHealth[peer] === 'failed' ? 'bg-red-500 animate-bounce' :
+                                connectionHealth[peer] === 'disconnected' ? 'bg-orange-500' :
+                                'bg-gray-400'
+                              }`} title={`Connection: ${connectionHealth[peer] || 'unknown'}`}></span>
+                              {/* Show state text for failed/problematic connections */}
+                              {(connectionHealth[peer] === 'failed' || connectionHealth[peer] === 'disconnected') && (
+                                <span className="text-xs text-red-600 font-medium">
+                                  {connectionHealth[peer] === 'failed' ? 'Reconnecting...' : 'Lost'}
+                                </span>
+                              )}
+                            </span>
                           </div>
                           
                           <div className="flex items-center gap-1">
