@@ -1113,116 +1113,14 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
         ws.send(JSON.stringify({
           type: 'allNotificationStatus',
           subscriptions: deviceSubscriptions
-        }));
-        
-      } else if (msg.type === 'clearAllPushSubscriptions') {
+        }));} else if (msg.type === 'clearAllPushSubscriptions') {
         // Clear all push subscriptions (when VAPID keys change)
         console.log('[NOTIFICATIONS] Received request to clear all push subscriptions due to VAPID key change');
         clearAllPushSubscriptions();
         ws.send(JSON.stringify({
           type: 'pushSubscriptionsCleared',
           success: true
-        }));
-      
-      // --- BEGIN: Robust WebRTC System Message Handlers ---
-      } else if (msg.type === 'media-state') {
-        const { roomId: mediaRoomId, username: mediaUsername, mediaState } = msg;
-        console.log(`[WEBRTC] Broadcasting media state from ${mediaUsername} in room ${mediaRoomId}:`, mediaState);
-        
-        // Validate that user is in the room
-        if (!rooms[mediaRoomId] || !rooms[mediaRoomId].users.has(mediaUsername)) {
-          console.log(`[SECURITY] User ${mediaUsername} attempted to broadcast media state to room ${mediaRoomId} without being a participant`);
-          ws.send(JSON.stringify({ 
-            type: 'error', 
-            error: 'You must join the room before broadcasting media state.',
-            redirect: `/${mediaRoomId}`,
-            action: 'rejoin'
-          }));
-          return;
-        }
-        
-        // Broadcast media state to all other participants in the room
-        await broadcastToRoom(mediaRoomId, 'media-state', { 
-          username: mediaUsername, 
-          mediaState,
-          timestamp: Date.now()
-        }, undefined);
-        
-      } else if (msg.type === 'request-media-state') {
-        const { roomId: requestRoomId, username: requestUsername, targetUser } = msg;
-        console.log(`[WEBRTC] Media state request from ${requestUsername} for ${targetUser || 'all users'} in room ${requestRoomId}`);
-        
-        // Validate that user is in the room
-        if (!rooms[requestRoomId] || !rooms[requestRoomId].users.has(requestUsername)) {
-          console.log(`[SECURITY] User ${requestUsername} attempted to request media state in room ${requestRoomId} without being a participant`);
-          ws.send(JSON.stringify({ 
-            type: 'error', 
-            error: 'You must join the room before requesting media state.',
-            redirect: `/${requestRoomId}`,
-            action: 'rejoin'
-          }));
-          return;
-        }
-        
-        if (targetUser) {
-          // Request media state from specific user
-          if (rooms[requestRoomId].users.has(targetUser)) {
-            await broadcastToRoom(requestRoomId, 'request-media-state', { 
-              requesterId: requestUsername,
-              timestamp: Date.now()
-            }, targetUser);
-          } else {
-            console.log(`[WEBRTC] Target user ${targetUser} not found in room ${requestRoomId}`);
-          }
-        } else {
-          // Request media state from all users in the room
-          await broadcastToRoom(requestRoomId, 'request-media-state', { 
-            requesterId: requestUsername,
-            timestamp: Date.now()
-          }, undefined);
-        }
-        
-      } else if (msg.type === 'request-resync') {
-        const { roomId: resyncRoomId, username: resyncUsername, targetPeerId, reason } = msg;
-        console.log(`[WEBRTC] Resync request from ${resyncUsername} for peer ${targetPeerId} in room ${resyncRoomId}, reason: ${reason}`);
-        
-        // Validate that user is in the room
-        if (!rooms[resyncRoomId] || !rooms[resyncRoomId].users.has(resyncUsername)) {
-          console.log(`[SECURITY] User ${resyncUsername} attempted to request resync in room ${resyncRoomId} without being a participant`);
-          ws.send(JSON.stringify({ 
-            type: 'error', 
-            error: 'You must join the room before requesting resync.',
-            redirect: `/${resyncRoomId}`,
-            action: 'rejoin'
-          }));
-          return;
-        }
-        
-        // Validate that target peer exists in room
-        if (!rooms[resyncRoomId].users.has(targetPeerId)) {
-          console.log(`[WEBRTC] Target peer ${targetPeerId} not found in room ${resyncRoomId} for resync request`);
-          ws.send(JSON.stringify({
-            type: 'error',
-            error: `Target peer ${targetPeerId} not found in room`
-          }));
-          return;
-        }
-        
-        // Forward resync request to target peer
-        await broadcastToRoom(resyncRoomId, 'request-resync', { 
-          requesterId: resyncUsername,
-          reason: reason || 'connection-issue',
-          timestamp: Date.now()
-        }, targetPeerId);
-        
-        // Send confirmation to requester
-        ws.send(JSON.stringify({
-          type: 'resync-requested',
-          targetPeerId,
-          reason: reason || 'connection-issue',
-          success: true
-        }));
-      // --- END: Robust WebRTC System Message Handlers ---      } else if (msg.type === 'fileReceived') {
+        }));      } else if (msg.type === 'fileReceived') {
         const { roomId, username, fileName, senderId, timestamp } = msg;
         console.log(`[ws-server] File delivery confirmed: ${fileName} received by ${username} from ${senderId} in room ${roomId}`);
         
