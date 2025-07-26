@@ -944,7 +944,7 @@ export default function CallPage() {
     }
     
     // STEP 3: Keep arbitrary video longer for reliable connections
-    console.log('🚀 📹 Setting up video foundation with extended persistence')
+    console.log('🚀 📹 Setting up video foundation with optimized persistence')
     setConnectionSequenceProgress(70)
     setTimeout(() => {
       // After connections are established, disable video UI but keep arbitrary tracks
@@ -963,7 +963,7 @@ export default function CallPage() {
       setConnectionSequenceComplete(true)
       setConnectionSequenceProgress(100)
       console.log('🚀 ✅ Video UI disabled but foundation maintained - connection sequence complete')
-    }, 10000) // Extended timeout for better connectivity
+    }, 3000) // Optimized timeout for faster setup while maintaining connectivity
     
     // Always join as a normal participant (never as listener)
     setActualIsListener(false)
