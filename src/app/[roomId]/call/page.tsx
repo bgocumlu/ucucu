@@ -1,6 +1,6 @@
 "use client"
 
-import React, { useEffect, useRef, useState } from "react"
+import React, { useEffect, useRef, useState, useCallback } from "react"
 import { useParams, useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import { ArrowLeft, Phone, Mic, MicOff, Volume2, Video, VideoOff, Monitor, MonitorOff, RotateCcw, FlipHorizontal, RefreshCw, Maximize } from "lucide-react"
@@ -69,8 +69,19 @@ export default function CallPage() {
   // Add state for camera mirror functionality
   const [isMirrored, setIsMirrored] = useState(true) // Default to mirrored for front camera
 
+  // NEW: Robust connection management state
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const [connectionHealth, setConnectionHealth] = useState<Record<string, 'connecting' | 'connected' | 'failed' | 'recovering'>>({})
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const [mediaStates, setMediaStates] = useState<Record<string, { audio: boolean, video: boolean, screen: boolean }>>({})
+  const [expectedTracks, setExpectedTracks] = useState<Record<string, Set<string>>>({}); // Track what we expect to receive
+  const [receivedTracks, setReceivedTracks] = useState<Record<string, Set<string>>>({}); // Track what we actually received
+  
   const analyserRef = useRef<AnalyserNode | null>(null)
-  const localAudioContextRef = useRef<AudioContext | null>(null)  // For each participant, create refs for audio, video, and screen
+  const localAudioContextRef = useRef<AudioContext | null>(null)
+  const healthCheckInterval = useRef<NodeJS.Timeout | null>(null)
+  const trackVerificationTimeout = useRef<Record<string, NodeJS.Timeout>>({})
+  const renegotiationQueue = useRef<Record<string, boolean>>({}) // Prevent overlapping renegotiations  // For each participant, create refs for audio, video, and screen
   const remoteAudioRefs = useRef<Record<string, React.RefObject<HTMLAudioElement | null>>>({})
   const remoteVideoRefs = useRef<Record<string, React.RefObject<HTMLVideoElement | null>>>({})
   const remoteScreenRefs = useRef<Record<string, React.RefObject<HTMLVideoElement | null>>>({})
@@ -222,7 +233,171 @@ export default function CallPage() {
       peerIds.forEach(peer => {
         if (audioContexts[peer]) audioContexts[peer].close()
       })
-    }  }, [remoteStreams])  // Handle mute/unmute without stopping tracks to maintain WebRTC connections
+    }  }, [remoteStreams])
+
+  // --- ROBUST MEDIA STATE SYNCHRONIZATION SYSTEM ---
+  
+  // Broadcast current media state to all participants
+  const broadcastMediaState = () => {
+    if (!wsRef.current || !joined) return
+    
+    const currentState = {
+      audio: localStreamRef.current?.getAudioTracks().some(t => t.enabled && t.readyState === 'live') || false,
+      video: localVideoStreamRef.current?.getVideoTracks().some(t => t.enabled && t.readyState === 'live') || false,
+      screen: localScreenStreamRef.current?.getVideoTracks().some(t => t.enabled && t.readyState === 'live') || false
+    }
+    
+    wsRef.current.send(JSON.stringify({
+      type: "media-state",
+      roomId,
+      from: currentUser,
+      mediaState: currentState
+    }))
+    
+    console.log('Broadcasting media state:', currentState)
+  }
+
+  // Force track synchronization for a specific peer
+  const synchronizeTracksWithPeer = async (peerId: string, force: boolean = false) => {
+    const pc = peerConnections.current[peerId]
+    if (!pc || renegotiationQueue.current[peerId]) return
+    
+    console.log(`Synchronizing tracks with ${peerId}, force=${force}`)
+    renegotiationQueue.current[peerId] = true
+    
+    try {
+      // Ensure all our current tracks are added to this peer connection
+      const allLocalTracks: MediaStreamTrack[] = []
+      
+      if (localStreamRef.current) {
+        allLocalTracks.push(...localStreamRef.current.getTracks())
+      }
+      if (localVideoStreamRef.current && videoEnabled) {
+        allLocalTracks.push(...localVideoStreamRef.current.getTracks())
+      }
+      if (localScreenStreamRef.current && screenSharing) {
+        allLocalTracks.push(...localScreenStreamRef.current.getTracks())
+      }
+      
+      // Add any missing tracks
+      allLocalTracks.forEach(track => {
+        const senderExists = pc.getSenders().some(sender => sender.track === track)
+        if (!senderExists) {
+          const stream = track.kind === 'audio' ? localStreamRef.current :
+                        track.label.toLowerCase().includes('screen') ? localScreenStreamRef.current :
+                        localVideoStreamRef.current
+          if (stream) {
+            pc.addTrack(track, stream)
+            console.log(`Added missing ${track.kind} track to ${peerId}: ${track.label}`)
+          }
+        }
+      })
+      
+      // Create and send offer if we have tracks or if forced
+      if (allLocalTracks.length > 0 || force) {
+        const offer = await pc.createOffer()
+        await pc.setLocalDescription(offer)
+        
+        if (wsRef.current) {
+          wsRef.current.send(JSON.stringify({
+            type: "call-offer",
+            roomId,
+            from: currentUser,
+            to: peerId,
+            payload: pc.localDescription
+          }))
+        }
+        
+        console.log(`Sent synchronization offer to ${peerId} with ${allLocalTracks.length} tracks`)
+      }
+      
+    } catch (error) {
+      console.error(`Error synchronizing tracks with ${peerId}:`, error)
+      // Try to recover by recreating the connection
+      await recreatePeerConnection(peerId)
+    } finally {
+      // Clear the queue after a delay to allow for renegotiation completion
+      setTimeout(() => {
+        delete renegotiationQueue.current[peerId]
+      }, 3000)
+    }
+  }
+  
+  // Verify that we received expected tracks from a peer
+  const verifyReceivedTracks = (peerId: string) => {
+    const expected = expectedTracks[peerId] || new Set()
+    const received = receivedTracks[peerId] || new Set()
+    
+    const missing = Array.from(expected).filter(trackType => !received.has(trackType))
+    
+    if (missing.length > 0) {
+      console.warn(`Missing tracks from ${peerId}:`, missing)
+      setConnectionHealth(prev => ({ ...prev, [peerId]: 'failed' }))
+      
+      // Clear verification timeout for this peer
+      if (trackVerificationTimeout.current[peerId]) {
+        clearTimeout(trackVerificationTimeout.current[peerId])
+      }
+      
+      // Request track resynchronization after a delay
+      trackVerificationTimeout.current[peerId] = setTimeout(() => {
+        console.log(`Requesting track resync from ${peerId} due to missing tracks`)
+        if (wsRef.current) {
+          wsRef.current.send(JSON.stringify({
+            type: "request-resync",
+            roomId,
+            from: currentUser,
+            to: peerId
+          }))
+        }
+      }, 2000)
+    } else {
+      console.log(`All expected tracks received from ${peerId}`)
+      setConnectionHealth(prev => ({ ...prev, [peerId]: 'connected' }))
+    }
+  }
+  
+  // Start periodic connection health monitoring
+  const startHealthMonitoring = useCallback(() => {
+    if (healthCheckInterval.current) return
+    
+    healthCheckInterval.current = setInterval(() => {
+      if (!joined) return
+      
+      Object.keys(peerConnections.current).forEach(peerId => {
+        const pc = peerConnections.current[peerId]
+        if (!pc) return
+        
+        // Check connection state
+        if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+          console.warn(`Connection to ${peerId} is ${pc.connectionState}, attempting recovery`)
+          setConnectionHealth(prev => ({ ...prev, [peerId]: 'recovering' }))
+          recreatePeerConnection(peerId)
+        }
+        
+        // Verify tracks are still flowing
+        verifyReceivedTracks(peerId)
+      })
+      
+      // Broadcast our current media state periodically
+      broadcastMediaState()
+      
+    }, 5000) // Check every 5 seconds
+  }, [joined]) // eslint-disable-line react-hooks/exhaustive-deps
+  
+  // Stop health monitoring
+  const stopHealthMonitoring = useCallback(() => {
+    if (healthCheckInterval.current) {
+      clearInterval(healthCheckInterval.current)
+      healthCheckInterval.current = null
+    }
+    
+    // Clear all verification timeouts
+    Object.values(trackVerificationTimeout.current).forEach(timeout => {
+      clearTimeout(timeout)
+    })
+    trackVerificationTimeout.current = {}
+  }, [])  // Handle mute/unmute without stopping tracks to maintain WebRTC connections
   const handleMute = async () => {
     if (!muted) {
       // Muting - disable audio tracks without stopping them
@@ -233,6 +408,9 @@ export default function CallPage() {
           console.log('Audio track muted:', track.label, track.enabled)
         })
       }
+      
+      // Broadcast updated media state
+      setTimeout(() => broadcastMediaState(), 500)
     } else {
       // Unmuting
       if (localStreamRef.current) {
@@ -316,6 +494,9 @@ export default function CallPage() {
             setMuted(false)
             setError("")
             console.log('Successfully replaced arbitrary track with real microphone')
+            
+            // Broadcast updated media state
+            setTimeout(() => broadcastMediaState(), 500)
           } catch (error) {
             console.warn('Failed to get real microphone access:', error)
             // Show more helpful error message based on the error type
@@ -350,6 +531,9 @@ export default function CallPage() {
           })
           setMuted(false)
           setError("")
+          
+          // Broadcast updated media state
+          setTimeout(() => broadcastMediaState(), 500)
         }
       } else {
         // If no stream, request permission and create new stream
@@ -495,9 +679,32 @@ export default function CallPage() {
     const pc = new RTCPeerConnection(ICE_CONFIG)
     peerConnections.current[remote] = pc
     
+    // Initialize connection tracking
+    setConnectionHealth(prev => ({ ...prev, [remote]: 'connecting' }))
+    setReceivedTracks(prev => ({ ...prev, [remote]: new Set() }))
+    
     pc.onicecandidate = (e) => {
       if (e.candidate && wsRef.current) {
         wsRef.current.send(JSON.stringify({ type: "call-ice", roomId, from: currentUser, to: remote, payload: e.candidate }))
+      }
+    }
+    
+    pc.onconnectionstatechange = () => {
+      console.log(`Connection state for ${remote}: ${pc.connectionState}`)
+      
+      if (pc.connectionState === 'connected') {
+        setConnectionHealth(prev => ({ ...prev, [remote]: 'connected' }))
+        console.log(`Successfully connected to ${remote}`)
+      } else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+        console.warn(`Connection to ${remote} failed/disconnected, will attempt recovery`)
+        setConnectionHealth(prev => ({ ...prev, [remote]: 'failed' }))
+        
+        // Attempt automatic recovery after a short delay
+        setTimeout(() => {
+          if (peerConnections.current[remote] === pc) { // Only if this connection is still current
+            recreatePeerConnection(remote)
+          }
+        }, 2000)
       }
     }
     
@@ -507,11 +714,19 @@ export default function CallPage() {
       
       console.log('Received track:', track.kind, track.label, 'from', remote)
       
+      // Update received tracks tracking
+      const trackType = track.kind === 'audio' ? 'audio' : 
+                      track.label.toLowerCase().includes('screen') ? 'screen' : 'video'
+      
+      setReceivedTracks(prev => ({
+        ...prev,
+        [remote]: new Set([...Array.from(prev[remote] || new Set()), trackType])
+      }))
+      
       if (track.kind === 'audio') {
         setRemoteStreams(prev => ({ ...prev, [remote]: stream }))
       } else if (track.kind === 'video') {
         // Check track label or use track settings to determine if it's screen share
-        // Screen share tracks typically have labels containing 'screen' or have specific constraints
         const isScreenShare = track.label.toLowerCase().includes('screen') || 
                              track.label.toLowerCase().includes('monitor') ||
                              track.label.toLowerCase().includes('display') ||
@@ -525,12 +740,15 @@ export default function CallPage() {
           setRemoteVideoStreams(prev => ({ ...prev, [remote]: stream }))
         }
       }
+      
+      // Verify we have all expected tracks after a short delay
+      setTimeout(() => verifyReceivedTracks(remote), 1000)
     }
     
-    // --- ADD: Always add local tracks to new peer connection if available ---
+    // --- ROBUST TRACK ADDITION: Always add all available local tracks ---
     console.log(`Creating peer connection for ${remote}. Adding tracks:`)
     
-    // Add audio tracks if available (not just when not a listener)
+    // Always add audio tracks (real or arbitrary) for universal compatibility
     if (localStreamRef.current) {
       console.log(`- Adding ${localStreamRef.current.getTracks().length} audio tracks`)
       localStreamRef.current.getTracks().forEach(track => {
@@ -542,21 +760,23 @@ export default function CallPage() {
     }
     
     // Add video tracks if enabled
-    if (localVideoStreamRef.current) {
+    if (localVideoStreamRef.current && videoEnabled) {
       console.log(`- Adding ${localVideoStreamRef.current.getTracks().length} video tracks`)
       localVideoStreamRef.current.getTracks().forEach(track => {
         if (!pc.getSenders().some(sender => sender.track === track)) {
           pc.addTrack(track, localVideoStreamRef.current!)
+          console.log(`  - Added video track: ${track.label}`)
         }
       })
     }
     
     // Add screen tracks if enabled
-    if (localScreenStreamRef.current) {
+    if (localScreenStreamRef.current && screenSharing) {
       console.log(`- Adding ${localScreenStreamRef.current.getTracks().length} screen share tracks`)
       localScreenStreamRef.current.getTracks().forEach(track => {
         if (!pc.getSenders().some(sender => sender.track === track)) {
           pc.addTrack(track, localScreenStreamRef.current!)
+          console.log(`  - Added screen track: ${track.label}`)
         }
       })
     }
@@ -571,65 +791,63 @@ export default function CallPage() {
     setConnecting(true)
     setError("")
     let localStream: MediaStream | null = null
-    let localVideoStream: MediaStream | null = null
     
-    // Always try to get microphone permission
+    console.log('=== ROBUST CALL JOIN INITIATED ===')
+    
+    // STEP 1: ALWAYS establish audio connection (real or arbitrary)
     try {
-      localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+      console.log('Attempting to get real microphone access...')
+      localStream = await navigator.mediaDevices.getUserMedia({ 
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          sampleRate: 48000, // High quality audio
+        }, 
+        video: false 
+      })
+      
       localStreamRef.current = localStream
       if (localAudioRef.current) {
         localAudioRef.current.srcObject = localStream
       }
+      
       // Ensure audio tracks are enabled
       localStream.getAudioTracks().forEach(track => {
         track.enabled = true
-        console.log('Audio track enabled:', track.label, track.enabled)
+        console.log('✓ Real microphone track enabled:', track.label, track.enabled)
       })
-      // Start unmuted if permission granted
+      
       setMuted(false)
+      console.log('✓ Real microphone access granted - starting unmuted')
+      
     } catch (err) {
-      console.warn("Mic access denied, creating arbitrary audio track:", err)
-      // Create arbitrary audio track to establish WebRTC connection
+      console.warn('Real microphone access denied, creating arbitrary audio track for WebRTC compatibility:', err)
+      
+      // Create arbitrary audio track for universal WebRTC connection establishment
       localStream = createArbitraryAudioTrack()
       localStreamRef.current = localStream
       if (localAudioRef.current) {
         localAudioRef.current.srcObject = localStream
       }
-      // Keep the arbitrary audio track enabled for WebRTC connection establishment
-      // but set the UI state to muted so user knows they need to grant permission
-      setMuted(true) // Set UI state to muted
+      
+      // Keep arbitrary track enabled for WebRTC but set UI as muted
       localStream.getAudioTracks().forEach(track => {
-        track.enabled = true // Keep track enabled for WebRTC
-        console.log('Join: Arbitrary audio track created and enabled for WebRTC:', track.label)
+        track.enabled = true // Essential for WebRTC connection establishment
+        console.log('✓ Arbitrary audio track enabled for WebRTC:', track.label)
       })
+      
+      setMuted(true) // UI state muted since no real mic access
       setError("Microphone access denied. You can still hear others. Click unmute to grant microphone permission.")
+      console.log('✓ Arbitrary audio track created - WebRTC compatible mode')
     }
     
-    // Always use arbitrary video track at startup for WebRTC connection establishment
-    console.log('Creating arbitrary video track for WebRTC establishment (no camera access requested)')
-    localVideoStream = createArbitraryVideoTrack()
-    localVideoStreamRef.current = localVideoStream
-    console.log('Join: Arbitrary video track created for WebRTC establishment')
-    // Set video enabled temporarily for connection establishment
-    setVideoEnabled(true)
-    
-    // Disable the arbitrary video track after brief moment
-    setTimeout(() => {
-      if (localVideoStreamRef.current) {
-        localVideoStreamRef.current.getTracks().forEach(track => {
-          if (track.label === 'Arbitrary Video Track') {
-            track.stop()
-          }
-        })
-        localVideoStreamRef.current = null
-      }
-      setVideoEnabled(false)
-      console.log('Temporary arbitrary video track stopped after connection establishment')
-    }, 2000)
-    
-    // Always join as a normal participant (never as listener)
+    // STEP 2: Always join as a normal participant for full bidirectional capabilities
     setActualIsListener(false)
-      // Connect to signaling
+    console.log('✓ Joining as full participant (not listener)')
+    
+    // STEP 3: Connect to signaling server with robust error handling
+    console.log('✓ Connecting to WebSocket signaling server...')
     const ws = new WebSocket(SIGNALING_SERVER_URL)
     wsRef.current = ws
     
@@ -637,6 +855,12 @@ export default function CallPage() {
       ws.send(JSON.stringify({ type: "call-join", roomId, username: currentUser, isListener: false }))
       setJoined(true)
       setConnecting(false)
+      
+      // Start health monitoring once connected
+      startHealthMonitoring()
+      
+      // Broadcast initial media state
+      setTimeout(() => broadcastMediaState(), 1000)
     }
     ws.onmessage = async (event) => {
       const msg = JSON.parse(event.data)
@@ -644,41 +868,35 @@ export default function CallPage() {
           const newPeer = msg.username
           if (newPeer === currentUser) return
           
+          console.log(`New peer joined: ${newPeer}`)
+          
           // Add to participants list
           setParticipants(prev => new Set([...prev, newPeer]))
+          
+          // Initialize expected tracks for this peer (we'll update this based on their media state)
+          setExpectedTracks(prev => ({ ...prev, [newPeer]: new Set() }))
           
           let pc = peerConnections.current[newPeer]
           if (!pc) {
             pc = createPeerConnection(newPeer)
           }
           
-          // Check if we have any media to share (audio, video, or screen) - check actual streams not state
-          const hasAudio = localStreamRef.current && localStreamRef.current.getTracks().length > 0
-          const hasVideo = localVideoStreamRef.current && localVideoStreamRef.current.getTracks().length > 0
-          const hasScreenShare = localScreenStreamRef.current && localScreenStreamRef.current.getTracks().length > 0
-          const hasAnyMedia = hasAudio || hasVideo || hasScreenShare
+          // ROBUST APPROACH: Always synchronize tracks immediately for new peers
+          // This ensures late joiners get all current media from existing participants
+          setTimeout(() => {
+            synchronizeTracksWithPeer(newPeer, true) // Force synchronization
+          }, 500) // Small delay to let connection establish
           
-          // Perfect negotiation: Only create offer if we're the impolite peer (larger username)
-          // OR if we have media and the other peer doesn't initiate quickly
-          const isImpolite = currentUser > newPeer
-          const shouldCreateOffer = !actualIsListener && isImpolite && hasAnyMedia
-          
-          if (shouldCreateOffer) {
-            // Add a small delay to let the polite peer potentially start negotiation first
-            setTimeout(async () => {
-              // Check if negotiation hasn't started yet
-              if (pc && pc.signalingState === 'stable') {
-                try {
-                  console.log(`Creating offer for new peer ${newPeer}. Media: audio=${hasAudio}, video=${hasVideo}, screen=${hasScreenShare}`)
-                  const offer = await pc.createOffer()
-                  await pc.setLocalDescription(offer)
-                  ws.send(JSON.stringify({ type: "call-offer", roomId, from: currentUser, to: newPeer, payload: pc.localDescription }))
-                } catch (error) {
-                  console.error('Error creating offer for new peer:', error)
-                }
-              }
-            }, 100) // Small delay to prevent race conditions
+          // Request the new peer's current media state
+          if (wsRef.current) {
+            wsRef.current.send(JSON.stringify({
+              type: "request-media-state",
+              roomId,
+              from: currentUser,
+              to: newPeer
+            }))
           }
+          
           break
         }case "call-offer": {
           const from = msg.from
@@ -746,6 +964,8 @@ export default function CallPage() {
         }        case "call-peer-left": {
           const left = msg.username
           
+          console.log(`Peer left: ${left} - cleaning up connection tracking`)
+          
           // Remove from participants list
           setParticipants(prev => {
             const newSet = new Set(prev)
@@ -756,7 +976,37 @@ export default function CallPage() {
           if (peerConnections.current[left]) {
             peerConnections.current[left].close()
             delete peerConnections.current[left]
-          }          setRemoteStreams(prev => {
+          }
+          
+          // Clean up robust connection tracking
+          setConnectionHealth(prev => {
+            const copy = { ...prev }
+            delete copy[left]
+            return copy
+          })
+          setMediaStates(prev => {
+            const copy = { ...prev }
+            delete copy[left]
+            return copy
+          })
+          setExpectedTracks(prev => {
+            const copy = { ...prev }
+            delete copy[left]
+            return copy
+          })
+          setReceivedTracks(prev => {
+            const copy = { ...prev }
+            delete copy[left]
+            return copy
+          })
+          
+          // Clear any pending timeouts for this peer
+          if (trackVerificationTimeout.current[left]) {
+            clearTimeout(trackVerificationTimeout.current[left])
+            delete trackVerificationTimeout.current[left]
+          }
+          
+          setRemoteStreams(prev => {
             const copy = { ...prev }
             delete copy[left]
             return copy
@@ -780,6 +1030,49 @@ export default function CallPage() {
           
           break
         }
+        
+        // NEW: Handle media state broadcasts
+        case "media-state": {
+          const from = msg.from
+          const mediaState = msg.mediaState
+          
+          console.log(`Received media state from ${from}:`, mediaState)
+          
+          // Update our expectations for this peer
+          const expectedTrackTypes = new Set<string>()
+          if (mediaState.audio) expectedTrackTypes.add('audio')
+          if (mediaState.video) expectedTrackTypes.add('video')
+          if (mediaState.screen) expectedTrackTypes.add('screen')
+          
+          setExpectedTracks(prev => ({ ...prev, [from]: expectedTrackTypes }))
+          setMediaStates(prev => ({ ...prev, [from]: mediaState }))
+          
+          // Verify we have the tracks we should have
+          setTimeout(() => verifyReceivedTracks(from), 1000)
+          
+          break
+        }
+        
+        // NEW: Handle media state requests
+        case "request-media-state": {
+          // Someone is asking for our current media state
+          broadcastMediaState()
+          break
+        }
+        
+        // NEW: Handle resync requests
+        case "request-resync": {
+          const from = msg.from
+          console.log(`Received resync request from ${from}`)
+          
+          // Force resynchronization with this peer
+          setTimeout(() => {
+            synchronizeTracksWithPeer(from, true)
+          }, 500)
+          
+          break
+        }
+        
         case "error": {
           console.error('Call WebSocket error:', msg.message)
           setError(msg.message || "An error occurred")
@@ -794,10 +1087,18 @@ export default function CallPage() {
         }
       }
     }
-    ws.onclose = () => setJoined(false)
+    ws.onclose = () => {
+      setJoined(false)
+      stopHealthMonitoring()
+    }
     ws.onerror = () => setError("WebSocket error")
   }  // Leave call room
   const leaveCall = () => {
+    console.log('=== LEAVING CALL - CLEANUP INITIATED ===')
+    
+    // Stop health monitoring first
+    stopHealthMonitoring()
+    
     // Send leave message to server
     if (wsRef.current && currentUser) {
       wsRef.current.send(JSON.stringify({ type: "call-peer-left", roomId, username: currentUser }))
@@ -830,20 +1131,30 @@ export default function CallPage() {
       wsRef.current.close()
       wsRef.current = null
     }
-      // Reset state
+      
+    // Reset all state including robust connection tracking
     setJoined(false)
     setRemoteStreams({})
     setRemoteVideoStreams({})
     setRemoteScreenStreams({})
-    setParticipants(new Set()) // Clear participants list
+    setParticipants(new Set())
     setVideoEnabled(false)    
     setScreenSharing(false)
-    setExpandedParticipants(new Set()) // Clear all expanded participants
-    setLocalPreviewExpanded(false) // Collapse local preview
+    setExpandedParticipants(new Set())
+    setLocalPreviewExpanded(false)
     setError("")
     
+    // Clear robust system state
+    setConnectionHealth({})
+    setMediaStates({})
+    setExpectedTracks({})
+    setReceivedTracks({})
+    
+    console.log('✓ Call cleanup completed')
+    
     // Navigate back to chat
-    router.push(`/${encodeURIComponent(roomId)}/chat`)  }
+    router.push(`/${encodeURIComponent(roomId)}/chat`)
+  }
 // Add local tracks to all peer connections when available
   useEffect(() => {
     if (actualIsListener) return
@@ -878,6 +1189,20 @@ export default function CallPage() {
       }
     })
   }, [joined, actualIsListener, videoEnabled, screenSharing, muted]) // Added muted as dependency
+  
+  // Monitor connection health and track synchronization
+  useEffect(() => {
+    if (joined) {
+      console.log('=== ROBUST MONITORING SYSTEM ACTIVATED ===')
+      startHealthMonitoring()
+    }
+    
+    return () => {
+      if (!joined) {
+        stopHealthMonitoring()
+      }
+    }
+  }, [joined, startHealthMonitoring, stopHealthMonitoring])
 
   // Clean up on leave
   useEffect(() => {
@@ -1078,6 +1403,9 @@ export default function CallPage() {
       // Wait for all renegotiations to complete
       await Promise.allSettled(renegotiationPromises)
       setVideoEnabled(false)
+      
+      // Broadcast updated media state
+      setTimeout(() => broadcastMediaState(), 500)
     } else {      // Turn on video
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ 
@@ -1157,6 +1485,9 @@ export default function CallPage() {
         // Wait for all renegotiations to complete in parallel
         await Promise.allSettled(renegotiationPromises)
         setVideoEnabled(true)
+        
+        // Broadcast updated media state
+        setTimeout(() => broadcastMediaState(), 500)
       } catch (error) {
         console.error('Error accessing camera:', error)
         setError('Camera access denied')
@@ -1204,6 +1535,9 @@ export default function CallPage() {
       // Wait for all renegotiations to complete
       await Promise.allSettled(renegotiationPromises)
       setScreenSharing(false)
+      
+      // Broadcast updated media state
+      setTimeout(() => broadcastMediaState(), 500)
     } else {
       // Turn on screen sharing
       try {        
@@ -1323,6 +1657,9 @@ export default function CallPage() {
           await Promise.allSettled(cleanupPromises)
         })
           setScreenSharing(true)
+          
+          // Broadcast updated media state
+          setTimeout(() => broadcastMediaState(), 500)
       } catch (error) {
         console.error('Error accessing screen:', error)
         setError('Screen sharing access denied or not supported')
