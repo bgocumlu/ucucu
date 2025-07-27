@@ -106,12 +106,14 @@ interface FileDeliveryTracker {
   confirmedRecipients: Set<string>;
   message: { [key: string]: unknown };
   broadcastTime: number;
+  retryCount: number; // Track how many times we've retried
+  lastRetryTime: number; // Track when we last attempted a retry
 }
 
 const fileDeliveryTracking: Map<string, FileDeliveryTracker> = new Map();
 
 // Clean up old file delivery tracking entries (older than 30 seconds)
-setInterval(() => {
+setInterval(async () => {
   const now = Date.now();
   const CLEANUP_THRESHOLD = 30000; // 30 seconds
   const REBROADCAST_THRESHOLD = 5000; // 5 seconds
@@ -131,79 +133,157 @@ setInterval(() => {
   for (const [key, tracker] of fileDeliveryTracking.entries()) {
     const age = now - tracker.broadcastTime;
     
+    // Immediately clean up files that were sent to empty rooms (no expected recipients)
+    if (tracker.expectedRecipients.size === 0) {
+      console.log(`[FILE-DELIVERY-CLEANUP] Removing tracking for ${tracker.filename} sent to empty room (0 expected recipients)`);
+      fileDeliveryTracking.delete(key);
+      continue;
+    }
+    
     // Check if file needs rebroadcast (some recipients haven't confirmed)
     if (age > REBROADCAST_THRESHOLD && age < CLEANUP_THRESHOLD) {
-      // Get current users in the room (excluding the sender)
-      const currentRoomUsers = rooms[tracker.roomId] ? 
-        Array.from(rooms[tracker.roomId].users).filter(user => user !== tracker.senderId) : [];
+      // Check retry limits - max 5 retries with exponential backoff
+      const MAX_RETRIES = 5;
+      const RETRY_BACKOFF = 2000; // 2 seconds base delay
+      const timeSinceLastRetry = now - tracker.lastRetryTime;
+      const requiredDelay = RETRY_BACKOFF * Math.pow(2, tracker.retryCount); // Exponential backoff
       
-      // Only consider recipients who are still in the room
-      const activeExpectedRecipients = Array.from(tracker.expectedRecipients).filter(
-        user => currentRoomUsers.includes(user)
-      );
+      if (tracker.retryCount >= MAX_RETRIES) {
+        console.warn(`[FILE-DELIVERY-ABANDON] ❌ ${tracker.filename} exceeded max retries (${MAX_RETRIES}) - abandoning delivery`);
+        
+        // Notify the sender that delivery failed
+        const deliveryFailure = {
+          type: 'fileDeliveryFailed',
+          fileName: tracker.filename,
+          timestamp: Date.now(),
+          originalTimestamp: tracker.timestamp,
+          reason: 'Max retries exceeded',
+          unconfirmedRecipients: Array.from(tracker.expectedRecipients).filter(
+            user => !tracker.confirmedRecipients.has(user)
+          )
+        };
+        
+        // Send failure notification to the original sender
+        await broadcastToRoom(tracker.roomId, 'fileDeliveryFailed', deliveryFailure, tracker.senderId);
+        
+        fileDeliveryTracking.delete(key);
+        continue;
+      }
       
-      // Find unconfirmed recipients who are still in the room
-      const unconfirmedRecipients = activeExpectedRecipients.filter(
+      if (timeSinceLastRetry < requiredDelay) {
+        // Not time to retry yet due to backoff
+        continue;
+      }
+      
+      // Find unconfirmed recipients from the ORIGINAL expected list (frozen at send time)
+      // Do NOT include users who joined after the file was sent
+      const unconfirmedRecipients = Array.from(tracker.expectedRecipients).filter(
         user => !tracker.confirmedRecipients.has(user)
       );
       
+      // Only try to deliver to unconfirmed recipients who are still connected
       if (unconfirmedRecipients.length > 0) {
-        console.log(`[FILE-DELIVERY-RETRY] Rebroadcasting ${tracker.filename} to ${unconfirmedRecipients.length} unconfirmed recipients who are still in room: ${unconfirmedRecipients.join(', ')}`);
+        // Get current users in the room to verify they're still connected
+        const currentRoomUsers = rooms[tracker.roomId] ? 
+          Array.from(rooms[tracker.roomId].users) : [];
         
-        // Only send to specific unconfirmed recipients instead of broadcasting to entire room
-        // This prevents sending files to users who joined after the file was originally sent
-        const clients = Array.from(wss.clients).filter((client) => {
-          const c = client as WebSocket & { joinedRoom?: string; joinedUser?: string };
-          return c.joinedRoom === tracker.roomId && 
-                 c.joinedUser && 
-                 unconfirmedRecipients.includes(c.joinedUser) && 
-                 c.readyState === WebSocket.OPEN;
-        });
+        // Only include unconfirmed recipients who are still in the room
+        const stillConnectedUnconfirmed = unconfirmedRecipients.filter(
+          user => currentRoomUsers.includes(user)
+        );
         
-        let successCount = 0;
-        for (const client of clients) {
-          try {
-            client.send(JSON.stringify({ type: 'newMessage', message: tracker.message }));
-            successCount++;
-          } catch (error) {
-            console.error(`[FILE-DELIVERY-RETRY] Error sending ${tracker.filename} to specific client:`, error);
+        if (stillConnectedUnconfirmed.length > 0) {
+          console.log(`[FILE-DELIVERY-RETRY] Attempt ${tracker.retryCount + 1}/${MAX_RETRIES}: Rebroadcasting ${tracker.filename} to ${stillConnectedUnconfirmed.length} original unconfirmed recipients: ${stillConnectedUnconfirmed.join(', ')}`);
+          
+          // Only send to specific unconfirmed recipients from original list
+          const clients = Array.from(wss.clients).filter((client) => {
+            const c = client as WebSocket & { joinedRoom?: string; joinedUser?: string };
+            return c.joinedRoom === tracker.roomId && 
+                   c.joinedUser && 
+                   stillConnectedUnconfirmed.includes(c.joinedUser) && 
+                   c.readyState === WebSocket.OPEN;
+          });
+          
+          if (clients.length === 0) {
+            console.warn(`[FILE-DELIVERY-RETRY] No connected clients found for ${tracker.filename} - marking as failed`);
+            fileDeliveryTracking.delete(key);
+            continue;
           }
-        }
-        
-        console.log(`[FILE-DELIVERY-RETRY] Sent ${tracker.filename} to ${successCount}/${clients.length} specific unconfirmed recipients`);
-        
-        // Update broadcast time to prevent constant rebroadcasts
-        tracker.broadcastTime = now;
-      } else {
-        // All expected recipients who are still in the room have confirmed
-        if (activeExpectedRecipients.length === 0) {
-          console.log(`[FILE-DELIVERY] All original recipients of ${tracker.filename} have left the room - cleaning up tracking`);
+          
+          let successCount = 0;
+          for (const client of clients) {
+            try {
+              client.send(JSON.stringify({ type: 'newMessage', message: tracker.message }));
+              successCount++;
+            } catch (error) {
+              console.error(`[FILE-DELIVERY-RETRY] Error sending ${tracker.filename} to specific client:`, error);
+            }
+          }
+          
+          console.log(`[FILE-DELIVERY-RETRY] Sent ${tracker.filename} to ${successCount}/${clients.length} original unconfirmed recipients`);
+          
+          // Update retry tracking
+          tracker.retryCount++;
+          tracker.lastRetryTime = now;
+          tracker.broadcastTime = now; // Update to prevent constant checking
+          
+          if (successCount === 0) {
+            console.warn(`[FILE-DELIVERY-RETRY] Failed to send ${tracker.filename} to any clients - will retry later`);
+          }
+        } else {
+          // All original expected recipients have either confirmed or left
+          console.log(`[FILE-DELIVERY] All original recipients of ${tracker.filename} have confirmed or left - cleaning up tracking`);
           fileDeliveryTracking.delete(key);
           continue;
         }
+      } else {
+        // All original expected recipients have confirmed
+        console.log(`[FILE-DELIVERY] All original recipients of ${tracker.filename} have confirmed - cleaning up tracking`);
+        
+        // Notify sender of successful delivery to all recipients
+        const deliverySuccess = {
+          type: 'fileDeliverySuccess',
+          fileName: tracker.filename,
+          timestamp: Date.now(),
+          originalTimestamp: tracker.timestamp,
+          confirmedRecipients: Array.from(tracker.confirmedRecipients),
+          totalRecipients: tracker.expectedRecipients.size
+        };
+        
+        // Send success notification to the original sender
+        await broadcastToRoom(tracker.roomId, 'fileDeliverySuccess', deliverySuccess, tracker.senderId);
+        
+        fileDeliveryTracking.delete(key);
+        continue;
       }
     }
     
     // Clean up old entries
     if (age > CLEANUP_THRESHOLD) {
-      // Get current users in the room (excluding the sender)
-      const currentRoomUsers = rooms[tracker.roomId] ? 
-        Array.from(rooms[tracker.roomId].users).filter(user => user !== tracker.senderId) : [];
-      
-      // Only count unconfirmed recipients who were still in the room
-      const activeExpectedRecipients = Array.from(tracker.expectedRecipients).filter(
-        user => currentRoomUsers.includes(user)
-      );
-      
-      const unconfirmedCount = activeExpectedRecipients.filter(
+      // Count unconfirmed recipients from the ORIGINAL expected list only
+      const unconfirmedCount = Array.from(tracker.expectedRecipients).filter(
         user => !tracker.confirmedRecipients.has(user)
       ).length;
       
       if (unconfirmedCount > 0) {
-        const unconfirmedUsers = activeExpectedRecipients.filter(
+        const unconfirmedUsers = Array.from(tracker.expectedRecipients).filter(
           user => !tracker.confirmedRecipients.has(user)
         );
-        console.warn(`[FILE-DELIVERY-TIMEOUT] ⚠️ ${tracker.filename} from ${tracker.senderId}: ${unconfirmedCount} recipients who were still in room never confirmed delivery: ${unconfirmedUsers.join(', ')}`);
+        console.warn(`[FILE-DELIVERY-TIMEOUT] ⚠️ ${tracker.filename} from ${tracker.senderId}: ${unconfirmedCount} original recipients never confirmed delivery: ${unconfirmedUsers.join(', ')}`);
+        
+        // Notify sender that some recipients never confirmed delivery
+        const deliveryTimeout = {
+          type: 'fileDeliveryTimeout',
+          fileName: tracker.filename,
+          timestamp: Date.now(),
+          originalTimestamp: tracker.timestamp,
+          unconfirmedRecipients: unconfirmedUsers,
+          confirmedRecipients: Array.from(tracker.confirmedRecipients),
+          reason: 'Delivery timeout - some recipients never confirmed'
+        };
+        
+        // Send timeout notification to the original sender
+        await broadcastToRoom(tracker.roomId, 'fileDeliveryTimeout', deliveryTimeout, tracker.senderId);
       }
       
       console.log(`[FILE-DELIVERY-CLEANUP] Removing tracking for ${tracker.filename} (age: ${Math.round(age / 1000)}s)`);
@@ -698,7 +778,21 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
 
   ws.on('message', async (data: WebSocket.RawData) => {
     try {
-      const msg = JSON.parse(data.toString());      if (msg.type === 'getRooms') {
+      const msg = JSON.parse(data.toString());
+      
+      // Debug logging for all incoming messages
+      console.log(`[ws-server] 🔵 Received message type: ${msg.type}`, {
+        type: msg.type,
+        roomId: msg.roomId,
+        username: msg.username,
+        ...(msg.type === 'fileReceived' ? {
+          fileName: msg.fileName,
+          senderId: msg.senderId,
+          timestamp: msg.timestamp
+        } : {})
+      });
+      
+      if (msg.type === 'getRooms') {
         console.log('[WebSocket Server] getRooms request - Current rooms:', Object.keys(rooms))
         console.log('[WebSocket Server] Global room exists:', !!rooms['global'])
         
@@ -1020,6 +1114,8 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
           }          console.log('[ws-server] Broadcasting file message to room:', roomId);
           
           // Track expected recipients for delivery confirmation
+          // IMPORTANT: Only track users who are CURRENTLY in the room when file is sent
+          // Don't add late joiners to file delivery tracking
           const expectedRecipients = new Set<string>();
           if (rooms[roomId]) {
             for (const user of rooms[roomId].users) {
@@ -1029,20 +1125,22 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
             }
           }
           
-          // Start tracking file delivery
+          console.log(`[FILE-DELIVERY-TRACK] Tracking ${fileName} for ${expectedRecipients.size} current recipients: ${Array.from(expectedRecipients).join(', ')}`);
+          
+          // Start tracking file delivery - this list is FROZEN and won't include late joiners
           const trackingKey = `${fileName}-${timestamp}-${username}`;
           fileDeliveryTracking.set(trackingKey, {
             roomId,
             filename: fileName,
             senderId: username,
             timestamp,
-            expectedRecipients: new Set(expectedRecipients),
+            expectedRecipients: new Set(expectedRecipients), // Frozen at time of sending
             confirmedRecipients: new Set(),
             message,
-            broadcastTime: Date.now()
+            broadcastTime: Date.now(),
+            retryCount: 0,
+            lastRetryTime: Date.now()
           });
-          
-          console.log(`[FILE-DELIVERY-TRACK] Tracking ${fileName} for ${expectedRecipients.size} recipients: ${Array.from(expectedRecipients).join(', ')}`);
           
           const broadcastSuccess = await broadcastToRoom(roomId, 'newMessage', { message });
           console.log(`[ws-server] Broadcast result for ${fileName}: ${broadcastSuccess ? 'SUCCESS' : 'FAILED'}`);
@@ -1192,29 +1290,44 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
           success: true
         }));      } else if (msg.type === 'fileReceived') {
         const { roomId, username, fileName, senderId, timestamp } = msg;
-        console.log(`[ws-server] File delivery confirmed: ${fileName} received by ${username} from ${senderId} in room ${roomId}`);
+        console.log(`[FILE-DELIVERY] ✅ File confirmation received: ${senderId} → ${username}: ${fileName}`);
+        console.log(`[FILE-DELIVERY-DEBUG] Confirmation details:`, {
+          roomId,
+          username,
+          fileName,
+          senderId,
+          timestamp,
+          originalTimestamp: timestamp
+        });
         
         // Validate that the receiver is actually in the room
         if (rooms[roomId] && rooms[roomId].users.has(username)) {
-          // Log the successful delivery confirmation
-          console.log(`[FILE-DELIVERY] ✅ ${senderId} → ${username}: ${fileName} (confirmed at ${new Date(timestamp).toISOString()})`);
-          
           // Update delivery tracking
           const trackingKey = `${fileName}-${timestamp}-${senderId}`;
+          console.log(`[FILE-DELIVERY-DEBUG] Looking for tracking key: "${trackingKey}"`);
+          console.log(`[FILE-DELIVERY-DEBUG] Available tracking keys:`, Array.from(fileDeliveryTracking.keys()));
+          
           const tracker = fileDeliveryTracking.get(trackingKey);
           
           if (tracker && tracker.expectedRecipients.has(username)) {
             tracker.confirmedRecipients.add(username);
-            console.log(`[FILE-DELIVERY-TRACK] ${fileName}: ${tracker.confirmedRecipients.size}/${tracker.expectedRecipients.size} confirmations received`);
+            console.log(`[FILE-DELIVERY-TRACK] ✅ ${fileName}: ${tracker.confirmedRecipients.size}/${tracker.expectedRecipients.size} confirmations received`);
             
             // Check if all recipients have confirmed
             if (tracker.confirmedRecipients.size >= tracker.expectedRecipients.size) {
               console.log(`[FILE-DELIVERY-TRACK] ✅ ${fileName} fully delivered to all ${tracker.expectedRecipients.size} recipients`);
-              // Optionally clean up the tracker immediately since delivery is complete
               fileDeliveryTracking.delete(trackingKey);
             }
           } else if (!tracker) {
-            console.log(`[FILE-DELIVERY-TRACK] ⚠️ No tracking found for ${fileName}-${timestamp}-${senderId} (may have expired)`);
+            console.warn(`[FILE-DELIVERY-TRACK] ⚠️ No tracking found for key "${trackingKey}"`);
+            console.log(`[FILE-DELIVERY-TRACK] Available trackers:`);
+            for (const [key, t] of fileDeliveryTracking.entries()) {
+              console.log(`  - "${key}": sender=${t.senderId}, filename=${t.filename}, timestamp=${t.timestamp}, expected=[${Array.from(t.expectedRecipients).join(',')}], confirmed=[${Array.from(t.confirmedRecipients).join(',')}]`);
+            }
+          } else {
+            console.warn(`[FILE-DELIVERY-TRACK] ⚠️ ${username} not in expected recipients for ${fileName}`);
+            console.log(`[FILE-DELIVERY-TRACK] Expected recipients: [${Array.from(tracker.expectedRecipients).join(', ')}]`);
+            console.log(`[FILE-DELIVERY-TRACK] Confirmed recipients: [${Array.from(tracker.confirmedRecipients).join(', ')}]`);
           }
           
           // Send confirmation back to the original sender if they're still connected

@@ -144,14 +144,16 @@ export default function ChatPage() {
             },
           ]);
             // Send confirmation that file was received
-          send({
+          const confirmationMessage = {
             type: "fileReceived",
             roomId,
             fileName: msg.fileName,
             senderId: msg.username,
             username: currentUser,
             timestamp: msg.timestamp
-          });
+          };
+          console.log('[CHAT] Sending file received confirmation:', confirmationMessage);
+          send(confirmationMessage);
         }
       } else if (msg.type === "file") {
         // Only add if it's not from current user (we already added optimistically)
@@ -171,14 +173,16 @@ export default function ChatPage() {
           ]);
           
           // Send confirmation that file was received
-          send({
+          const confirmationMessage = {
             type: "fileReceived",
             roomId,
             fileName: msg.fileName,
             senderId: msg.username,
             username: currentUser,
             timestamp: msg.timestamp
-          });
+          };
+          console.log('[CHAT] Sending file received confirmation:', confirmationMessage);
+          send(confirmationMessage);
         }
       } else {
         // Handle regular text messages (including AI messages)

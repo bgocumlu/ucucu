@@ -60,6 +60,28 @@ export const WebSocketProvider = ({ children }: { children: React.ReactNode }) =
             notificationService.handleBackendSubscriptionUpdate(msg);
             return;
           }
+          
+          // Handle file delivery status messages
+          if (msg.type === 'fileDeliverySuccess' || msg.type === 'fileDeliveryFailed' || msg.type === 'fileDeliveryTimeout') {
+            console.log('[WebSocketProvider] Received file delivery status:', msg);
+            
+            // Show user-friendly notification based on delivery status
+            if (typeof window !== 'undefined') {
+              if (msg.type === 'fileDeliverySuccess') {
+                // You could show a subtle success indicator
+                console.log(`✅ File "${msg.fileName}" delivered to all ${msg.totalRecipients} recipients`);
+              } else if (msg.type === 'fileDeliveryFailed') {
+                const unconfirmed = msg.unconfirmedRecipients?.join(', ') || 'some recipients';
+                alert(`❌ File delivery failed: "${msg.fileName}" could not be delivered to ${unconfirmed}. Please try sending the file again.`);
+              } else if (msg.type === 'fileDeliveryTimeout') {
+                const unconfirmed = msg.unconfirmedRecipients?.join(', ') || 'some recipients';
+                alert(`⚠️ File delivery timeout: "${msg.fileName}" may not have been received by ${unconfirmed}. You may want to check with them or resend the file.`);
+              }
+            }
+            
+            // Don't set this as lastMessage since it's a status notification
+            return;
+          }
             // Handle push notifications
           if (msg.type === 'pushNotification') {
             console.log('[WebSocketProvider] Received push notification:', msg);
@@ -113,18 +135,40 @@ export const WebSocketProvider = ({ children }: { children: React.ReactNode }) =
   const send = useCallback((msg: WSMessage) => {
     if (wsRef.current && wsRef.current.readyState === 1) {
       console.log('[WebSocketProvider] Sending message:', msg)
+      // Special logging for file confirmations
+      if (msg.type === 'fileReceived') {
+        console.log('[WebSocketProvider] 🔴 SENDING FILE CONFIRMATION:', {
+          type: msg.type,
+          fileName: msg.fileName,
+          senderId: msg.senderId,
+          username: msg.username,
+          timestamp: msg.timestamp,
+          roomId: msg.roomId
+        });
+      }
       wsRef.current.send(JSON.stringify(msg));
     } else {
       console.warn('[WebSocketProvider] WebSocket not ready, current state:', wsRef.current?.readyState);
+      
+      // Special warning for file confirmations
+      if (msg.type === 'fileReceived') {
+        console.error('[WebSocketProvider] 🔴 FAILED TO SEND FILE CONFIRMATION - WebSocket not ready:', msg);
+      }
       
       // Simple retry after a short delay if WebSocket is connecting (state 0)
       if (wsRef.current?.readyState === 0) {
         setTimeout(() => {
           if (wsRef.current && wsRef.current.readyState === 1) {
             console.log('[WebSocketProvider] Retrying message after connection:', msg);
+            if (msg.type === 'fileReceived') {
+              console.log('[WebSocketProvider] 🔴 RETRYING FILE CONFIRMATION:', msg);
+            }
             wsRef.current.send(JSON.stringify(msg));
           } else {
             console.warn('[WebSocketProvider] Failed to send after retry, WebSocket state:', wsRef.current?.readyState);
+            if (msg.type === 'fileReceived') {
+              console.error('[WebSocketProvider] 🔴 FAILED TO RETRY FILE CONFIRMATION:', msg);
+            }
           }
         }, 1000);
       }
