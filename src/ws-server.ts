@@ -133,33 +133,77 @@ setInterval(() => {
     
     // Check if file needs rebroadcast (some recipients haven't confirmed)
     if (age > REBROADCAST_THRESHOLD && age < CLEANUP_THRESHOLD) {
-      const unconfirmedRecipients = Array.from(tracker.expectedRecipients).filter(
+      // Get current users in the room (excluding the sender)
+      const currentRoomUsers = rooms[tracker.roomId] ? 
+        Array.from(rooms[tracker.roomId].users).filter(user => user !== tracker.senderId) : [];
+      
+      // Only consider recipients who are still in the room
+      const activeExpectedRecipients = Array.from(tracker.expectedRecipients).filter(
+        user => currentRoomUsers.includes(user)
+      );
+      
+      // Find unconfirmed recipients who are still in the room
+      const unconfirmedRecipients = activeExpectedRecipients.filter(
         user => !tracker.confirmedRecipients.has(user)
       );
       
       if (unconfirmedRecipients.length > 0) {
-        console.log(`[FILE-DELIVERY-RETRY] Rebroadcasting ${tracker.filename} to ${unconfirmedRecipients.length} unconfirmed recipients: ${unconfirmedRecipients.join(', ')}`);
+        console.log(`[FILE-DELIVERY-RETRY] Rebroadcasting ${tracker.filename} to ${unconfirmedRecipients.length} unconfirmed recipients who are still in room: ${unconfirmedRecipients.join(', ')}`);
         
-        // Rebroadcast the file
-        broadcastToRoom(tracker.roomId, 'newMessage', { message: tracker.message }).then(success => {
-          console.log(`[FILE-DELIVERY-RETRY] Rebroadcast result for ${tracker.filename}: ${success ? 'SUCCESS' : 'FAILED'}`);
-        }).catch(error => {
-          console.error(`[FILE-DELIVERY-RETRY] Error rebroadcasting ${tracker.filename}:`, error);
+        // Only send to specific unconfirmed recipients instead of broadcasting to entire room
+        // This prevents sending files to users who joined after the file was originally sent
+        const clients = Array.from(wss.clients).filter((client) => {
+          const c = client as WebSocket & { joinedRoom?: string; joinedUser?: string };
+          return c.joinedRoom === tracker.roomId && 
+                 c.joinedUser && 
+                 unconfirmedRecipients.includes(c.joinedUser) && 
+                 c.readyState === WebSocket.OPEN;
         });
+        
+        let successCount = 0;
+        for (const client of clients) {
+          try {
+            client.send(JSON.stringify({ type: 'newMessage', message: tracker.message }));
+            successCount++;
+          } catch (error) {
+            console.error(`[FILE-DELIVERY-RETRY] Error sending ${tracker.filename} to specific client:`, error);
+          }
+        }
+        
+        console.log(`[FILE-DELIVERY-RETRY] Sent ${tracker.filename} to ${successCount}/${clients.length} specific unconfirmed recipients`);
         
         // Update broadcast time to prevent constant rebroadcasts
         tracker.broadcastTime = now;
+      } else {
+        // All expected recipients who are still in the room have confirmed
+        if (activeExpectedRecipients.length === 0) {
+          console.log(`[FILE-DELIVERY] All original recipients of ${tracker.filename} have left the room - cleaning up tracking`);
+          fileDeliveryTracking.delete(key);
+          continue;
+        }
       }
     }
     
     // Clean up old entries
     if (age > CLEANUP_THRESHOLD) {
-      const unconfirmedCount = tracker.expectedRecipients.size - tracker.confirmedRecipients.size;
+      // Get current users in the room (excluding the sender)
+      const currentRoomUsers = rooms[tracker.roomId] ? 
+        Array.from(rooms[tracker.roomId].users).filter(user => user !== tracker.senderId) : [];
+      
+      // Only count unconfirmed recipients who were still in the room
+      const activeExpectedRecipients = Array.from(tracker.expectedRecipients).filter(
+        user => currentRoomUsers.includes(user)
+      );
+      
+      const unconfirmedCount = activeExpectedRecipients.filter(
+        user => !tracker.confirmedRecipients.has(user)
+      ).length;
+      
       if (unconfirmedCount > 0) {
-        const unconfirmedUsers = Array.from(tracker.expectedRecipients).filter(
+        const unconfirmedUsers = activeExpectedRecipients.filter(
           user => !tracker.confirmedRecipients.has(user)
         );
-        console.warn(`[FILE-DELIVERY-TIMEOUT] ⚠️ ${tracker.filename} from ${tracker.senderId}: ${unconfirmedCount} recipients never confirmed delivery: ${unconfirmedUsers.join(', ')}`);
+        console.warn(`[FILE-DELIVERY-TIMEOUT] ⚠️ ${tracker.filename} from ${tracker.senderId}: ${unconfirmedCount} recipients who were still in room never confirmed delivery: ${unconfirmedUsers.join(', ')}`);
       }
       
       console.log(`[FILE-DELIVERY-CLEANUP] Removing tracking for ${tracker.filename} (age: ${Math.round(age / 1000)}s)`);
@@ -170,6 +214,29 @@ setInterval(() => {
 
 // Memory-only storage - no file persistence
 // Subscriptions will be lost on server restart, which is desired behavior
+
+// Helper function to clean up file delivery tracking when users leave rooms
+function cleanupFileDeliveryForUser(username: string, roomId: string): void {
+  let cleanedCount = 0;
+  
+  for (const [key, tracker] of fileDeliveryTracking.entries()) {
+    if (tracker.roomId === roomId && tracker.expectedRecipients.has(username)) {
+      // Remove the user from expected recipients since they left
+      tracker.expectedRecipients.delete(username);
+      cleanedCount++;
+      
+      // If all expected recipients have left, remove the tracking entirely
+      if (tracker.expectedRecipients.size === 0) {
+        console.log(`[FILE-DELIVERY-CLEANUP] All recipients left room for ${tracker.filename} - removing tracking`);
+        fileDeliveryTracking.delete(key);
+      }
+    }
+  }
+  
+  if (cleanedCount > 0) {
+    console.log(`[FILE-DELIVERY-CLEANUP] Cleaned up ${cleanedCount} file delivery expectations for ${username} leaving room ${roomId}`);
+  }
+}
 
 // Notification management functions
 function addNotificationSubscription(roomId: string, username: string, deviceId: string, interval: number, pushSubscription?: WebPushSubscription): void {
@@ -420,6 +487,9 @@ setInterval(() => {
         room.users.delete(ghostUser);
         totalGhostParticipants++;
         console.log(`[ROOM_CLEANUP][SERVER:${PORT}] Removed ghost participant: ${ghostUser} from room ${roomId}`);
+        
+        // Clean up file delivery tracking for ghost user
+        cleanupFileDeliveryForUser(ghostUser, roomId);
       }
     }
     
@@ -1167,6 +1237,9 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
           // Remove user from room
           rooms[roomId].users.delete(username);
           
+          // Clean up file delivery tracking for this user
+          cleanupFileDeliveryForUser(username, roomId);
+          
           // Send leave notification message (system message, only to clients in the room)
           const leaveMsg = { username: '', text: `${username} left the chat.`, timestamp: Date.now(), system: true };
           const usersArr = Array.from(rooms[roomId].users);
@@ -1298,6 +1371,9 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
   ws.on('close', async () => {
     if (typeof joinedRoom === 'string' && joinedUser && joinedRoom in rooms && rooms[joinedRoom]) {
       rooms[joinedRoom].users.delete(joinedUser);
+      
+      // Clean up file delivery tracking for this user
+      cleanupFileDeliveryForUser(joinedUser, joinedRoom);
       
       // Clean up WebRTC call connections for this user
       for (const [callRoomId, peers] of Object.entries(callRooms)) {
