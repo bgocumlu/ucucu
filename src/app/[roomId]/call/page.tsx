@@ -59,6 +59,103 @@ export default function CallPage() {
   const localScreenStreamRef = useRef<MediaStream | null>(null)
   const localSystemAudioStreamRef = useRef<MediaStream | null>(null)
   const peerConnections = useRef<Record<string, RTCPeerConnection>>({})
+  // Negotiation state per peer for perfect negotiation pattern
+  const negotiationStateRef = useRef<Record<string, { isMakingOffer: boolean; ignoreOffer: boolean; polite: boolean }>>({})
+  // Negotiation control (coalescing & rate limiting)
+  const negotiationControlRef = useRef<Record<string, { lastOfferAt: number; timer: number | null; pendingIceRestart: boolean; reasons: Set<string> }>>({})
+
+  // Unified signaling sender ensuring username consistency
+  interface CallSignal {
+    type: string
+    roomId?: string
+    username?: string
+    from?: string
+    to?: string
+  payload?: RTCSessionDescriptionInit | RTCIceCandidateInit | null
+    [k: string]: unknown
+  }
+  const sendCallSignal = useCallback((message: CallSignal) => {
+    if (!wsRef.current) return
+    if (!message.roomId) message.roomId = roomId
+    // Ensure identity metadata for all call-* messages
+    if (message.type?.startsWith('call-')) {
+      if (!('username' in message)) message.username = currentUser
+      if (!('from' in message)) message.from = currentUser
+    }
+    try { wsRef.current.send(JSON.stringify(message)) } catch { /* ignore */ }
+  }, [currentUser, roomId])
+
+  // Central helper to send an offer safely with glare handling
+  const createAndSendOffer = useCallback(async (peerId: string, pc: RTCPeerConnection, reason: string, iceRestart: boolean = false) => {
+    const ctrl = (negotiationControlRef.current[peerId] ||= { lastOfferAt: 0, timer: null, pendingIceRestart: false, reasons: new Set() })
+    const now = Date.now()
+    const MIN_INTERVAL = 700 // ms between actual offers
+    // Rate limit: if too soon since last offer, schedule instead
+    if (now - ctrl.lastOfferAt < MIN_INTERVAL && pc.signalingState !== 'have-local-offer') {
+      // queue
+      ctrl.reasons.add(reason)
+      if (iceRestart) ctrl.pendingIceRestart = true
+      if (!ctrl.timer) {
+        const delay = MIN_INTERVAL - (now - ctrl.lastOfferAt) + 25
+        ctrl.timer = window.setTimeout(() => {
+          ctrl.timer = null
+          // Re-run with aggregated reasons
+          const aggReason = Array.from(ctrl.reasons).join(',') || 'coalesced'
+          const doIceRestart = ctrl.pendingIceRestart
+          ctrl.reasons.clear()
+          ctrl.pendingIceRestart = false
+          createAndSendOffer(peerId, pc, aggReason, doIceRestart)
+        }, delay)
+      }
+      return
+    }
+    try {
+      if (!negotiationStateRef.current[peerId]) return
+      const state = negotiationStateRef.current[peerId]
+      state.isMakingOffer = true
+      console.log(`📡 Creating offer (${reason}) to ${peerId}${iceRestart ? ' with ICE restart' : ''}`)
+      const offer = await pc.createOffer(iceRestart ? { iceRestart: true } : undefined)
+      if (pc.signalingState !== 'closed') {
+        await pc.setLocalDescription(offer)
+        ctrl.lastOfferAt = Date.now()
+        sendCallSignal({
+          type: 'call-offer',
+          roomId,
+          to: peerId,
+          payload: pc.localDescription
+        })
+      }
+    } catch (err) {
+      console.warn(`⚠️ Offer creation failed for ${peerId}:`, err)
+    } finally {
+      if (negotiationStateRef.current[peerId]) {
+        negotiationStateRef.current[peerId].isMakingOffer = false
+      }
+    }
+  }, [roomId, sendCallSignal])
+
+  // Coalesced negotiation scheduler (short debounce to group multiple triggers within 120ms)
+  const scheduleNegotiation = useCallback((peerId: string, pc: RTCPeerConnection, reason: string, iceRestart = false) => {
+    const ctrl = (negotiationControlRef.current[peerId] ||= { lastOfferAt: 0, timer: null, pendingIceRestart: false, reasons: new Set() })
+    ctrl.reasons.add(reason)
+    if (iceRestart) ctrl.pendingIceRestart = true
+    if (ctrl.timer) {
+      return // already scheduled
+    }
+    ctrl.timer = window.setTimeout(() => {
+      ctrl.timer = null
+      const aggReason = Array.from(ctrl.reasons).join(',') || 'debounced'
+      const doIceRestart = ctrl.pendingIceRestart
+      ctrl.reasons.clear()
+      ctrl.pendingIceRestart = false
+      if (pc.signalingState === 'stable') {
+        createAndSendOffer(peerId, pc, aggReason, doIceRestart)
+      } else {
+        // If not stable, try again shortly
+        scheduleNegotiation(peerId, pc, 'wait-stable-' + aggReason, doIceRestart)
+      }
+    }, 120) // debounce window
+  }, [createAndSendOffer])
   const [muted, setMuted] = useState(false)
   const [videoEnabled, setVideoEnabled] = useState(false)
   const [screenSharing, setScreenSharing] = useState(false)
@@ -67,6 +164,83 @@ export default function CallPage() {
   const [peerMuted, setPeerMuted] = useState<Record<string, boolean>>({}) // <--- NEW: track muted state for each remote peer
   const [speakingPeers, setSpeakingPeers] = useState<Record<string, boolean>>({})
   const [localSpeaking, setLocalSpeaking] = useState(false)
+  // Network quality stats per peer
+  const [remoteNetworkStats, setRemoteNetworkStats] = useState<Record<string, { rttMs: number; lossPct: number; quality: 'excellent' | 'good' | 'fair' | 'poor' | 'bad' }>>({})
+  const [debugStats, setDebugStats] = useState(false)
+
+  // ===== CAPABILITIES & DATA CHANNEL MANAGEMENT (ensure declared after dependent state) =====
+  const dataChannelsRef = useRef<Record<string, RTCDataChannel>>({})
+  const [remoteCapabilities, setRemoteCapabilities] = useState<Record<string, { mic: boolean; camera: boolean; screen: boolean; systemAudio: boolean }>>({})
+  const lastIceRestartRef = useRef<Record<string, number>>({})
+
+  const updateRemoteCapabilities = useCallback((peerId: string, caps: Partial<{ mic: boolean; camera: boolean; screen: boolean; systemAudio: boolean }>) => {
+    setRemoteCapabilities(prev => {
+      const existing = prev[peerId] || { mic: false, camera: false, screen: false, systemAudio: false }
+      return { ...prev, [peerId]: { ...existing, ...caps } }
+    })
+  }, [setRemoteCapabilities])
+
+  const getLocalCapabilities = useCallback(() => {
+    const hasRealMic = !!localStreamRef.current?.getAudioTracks().some(t => !("isArbitraryTrack" in t)) && !muted
+    const hasCamera = !!localVideoStreamRef.current?.getVideoTracks().length && videoEnabled
+    const hasScreen = !!localScreenStreamRef.current?.getVideoTracks().length && screenSharing
+    const hasSystem = !!localSystemAudioStreamRef.current?.getAudioTracks().length && screenSharing
+    return { mic: hasRealMic, camera: hasCamera, screen: hasScreen, systemAudio: hasSystem }
+  }, [muted, videoEnabled, screenSharing])
+
+  const broadcastCapabilities = useCallback(() => {
+    const caps = getLocalCapabilities()
+    Object.values(dataChannelsRef.current).forEach(dc => {
+      if (dc.readyState === 'open') {
+        try { dc.send(JSON.stringify({ type: 'caps', payload: caps })) } catch {}
+      }
+    })
+  }, [getLocalCapabilities])
+
+  // Periodic network stats collection (RTT / packet loss) feeding remoteNetworkStats
+  useEffect(() => {
+    if (!joined) return
+    const interval = setInterval(async () => {
+      for (const [peerId, pc] of Object.entries(peerConnections.current)) {
+        if (pc.signalingState === 'closed') continue
+        try {
+          const stats = await pc.getStats()
+          interface CandidatePairLike { currentRoundTripTime?: number; roundTripTime?: number; state?: string; nominated?: boolean }
+          const candidatePairs: CandidatePairLike[] = []
+          let totalPackets = 0
+          let lostPackets = 0
+          stats.forEach(report => {
+            if (report.type === 'candidate-pair') {
+              const cp = report as unknown as CandidatePairLike
+              if (cp.state === 'succeeded' && cp.nominated) candidatePairs.push(cp)
+            }
+            if (report.type === 'remote-inbound-rtp' || report.type === 'inbound-rtp') {
+              const r = report as unknown as { kind?: string; packetsReceived?: number; packetsLost?: number }
+              if ((r.kind === 'audio' || r.kind === 'video') && typeof r.packetsReceived === 'number' && typeof r.packetsLost === 'number') {
+                totalPackets += r.packetsReceived + r.packetsLost
+                lostPackets += r.packetsLost
+              }
+            }
+          })
+          let rtt = 0
+            if (candidatePairs.length) {
+              rtt = candidatePairs.reduce((min, p) => Math.min(min, (p.currentRoundTripTime ?? p.roundTripTime ?? Infinity)), Infinity)
+            }
+          const lossRatio = totalPackets > 200 ? lostPackets / totalPackets : 0
+          const rttMs = (rtt || 0) * 1000
+          let quality: 'excellent' | 'good' | 'fair' | 'poor' | 'bad' = 'excellent'
+          if (lossRatio > 0.2 || rttMs > 1500) quality = 'bad'
+          else if (lossRatio > 0.1 || rttMs > 800) quality = 'poor'
+          else if (lossRatio > 0.05 || rttMs > 400) quality = 'fair'
+          else if (lossRatio > 0.02 || rttMs > 250) quality = 'good'
+          setRemoteNetworkStats(prev => ({ ...prev, [peerId]: { rttMs: Math.round(rttMs), lossPct: +(lossRatio * 100).toFixed(1), quality } }))
+        } catch {
+          /* ignore */
+        }
+      }
+    }, 5000)
+    return () => clearInterval(interval)
+  }, [joined])
   
   // ROBUST CONNECTION: Add connection health monitoring
   const [connectionHealth, setConnectionHealth] = useState<Record<string, 'connecting' | 'connected' | 'failed' | 'disconnected'>>({})
@@ -258,7 +432,14 @@ export default function CallPage() {
           datas[peer] = new Uint8Array(analysers[peer].fftSize)
           const src = audioContexts[peer].createMediaStreamSource(stream)
           src.connect(analysers[peer])
-        }        analysers[peer].getByteTimeDomainData(datas[peer])
+        }
+        // Collect audio samples for RMS calculation
+        if (analysers[peer]) {
+          // TS lib mismatch workaround: getByteTimeDomainData expects Uint8Array; our buffer is standard Uint8Array.
+          // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+          // @ts-ignore
+          analysers[peer].getByteTimeDomainData(datas[peer])
+        }
         const rms = Math.sqrt(datas[peer].reduce((sum, v) => sum + Math.pow(v - 128, 2), 0) / datas[peer].length)
         newSpeaking[peer] = rms > 4
       })
@@ -475,11 +656,57 @@ export default function CallPage() {
     setCurrentUser(username)
   }, [roomId, router])  // Perfect negotiation implementation to handle SSL transport role conflicts
   async function safeSetRemoteDescription(pc: RTCPeerConnection, desc: RTCSessionDescriptionInit, isPolite: boolean = false) {
-    console.log(`Setting remote description: ${desc.type}, signaling state: ${pc.signalingState}, isPolite: ${isPolite}`)
+    // Track last answer time to suppress immediate renegotiation loops
+    const answerLoopGuard = (window as unknown as { __lastRemoteAnswerAt?: number })
+    if (desc.type === 'answer') {
+      answerLoopGuard.__lastRemoteAnswerAt = Date.now()
+    }
+    // Throttled / deduplicated logging & duplicate SDP guard
+    if (pc.remoteDescription && pc.remoteDescription.type === desc.type && pc.remoteDescription.sdp === desc.sdp) {
+      return 'ignored'
+    }
+
+    interface RTCLogCache { [k: string]: { last: number; suppressed: number } }
+    const win = window as unknown as { __rtcLogCache?: RTCLogCache }
+    if (!win.__rtcLogCache) win.__rtcLogCache = {}
+    const cache = win.__rtcLogCache
+    const key = `setRemote:${desc.type}:${isPolite}`
+    const now = Date.now()
+    const entry = cache[key] || { last: 0, suppressed: 0 }
+    const elapsed = now - entry.last
+    if (elapsed < 2000) {
+      // Suppress burst; count suppressed
+      entry.suppressed += 1
+      cache[key] = entry
+    } else {
+      if (entry.suppressed > 0) {
+        console.log(`Setting remote description: ${desc.type} (polite=${isPolite}) +${entry.suppressed} suppressed repeats`)
+        entry.suppressed = 0
+      } else {
+        console.log(`Setting remote description: ${desc.type}, signaling state: ${pc.signalingState}, isPolite: ${isPolite}`)
+      }
+      entry.last = now
+      cache[key] = entry
+    }
     
     try {
       await pc.setRemoteDescription(new RTCSessionDescription(desc));
-      console.log(`Successfully set remote ${desc.type}`)
+      // Success log throttled similarly
+      const skey = `setRemoteSuccess:${desc.type}`
+      const sentry = cache[skey] || { last: 0, suppressed: 0 }
+      const selapsed = now - sentry.last
+      if (selapsed < 2000) {
+        sentry.suppressed += 1
+      } else {
+        if (sentry.suppressed > 0) {
+          console.log(`Successfully set remote ${desc.type} (+${sentry.suppressed} suppressed)`)
+          sentry.suppressed = 0
+        } else {
+          console.log(`Successfully set remote ${desc.type}`)
+        }
+        sentry.last = Date.now()
+      }
+      cache[skey] = sentry
       return 'success'
     } catch (e: unknown) {
       const error = e as Error;
@@ -621,6 +848,13 @@ export default function CallPage() {
   const createPeerConnection = useCallback((remote: string) => {
     const pc = new RTCPeerConnection(ICE_CONFIG)
     peerConnections.current[remote] = pc
+
+    // Initialize negotiation state (lexicographic smaller username is polite)
+    negotiationStateRef.current[remote] = {
+      isMakingOffer: false,
+      ignoreOffer: false,
+      polite: currentUser < remote
+    }
     
     console.log(`🔗 ⚡ Creating ROBUST peer connection for ${remote} with health monitoring`)
     
@@ -696,6 +930,10 @@ export default function CallPage() {
         case 'failed':
           console.log(`🔗 🚨 ICE FAILED for ${remote} - connection will not work`)
           setConnectionHealth(prev => ({ ...prev, [remote]: 'failed' }))
+          // Attempt ICE restart automatically
+          if (pc.signalingState === 'stable') {
+            createAndSendOffer(remote, pc, 'ice-restart', true)
+          }
           break
         case 'disconnected':
           console.log(`🔗 ⚠️ ICE DISCONNECTED for ${remote} - connection lost`)
@@ -717,9 +955,27 @@ export default function CallPage() {
     }
     
     pc.onicecandidate = (e) => {
-      if (e.candidate && wsRef.current) {
-        wsRef.current.send(JSON.stringify({ type: "call-ice", roomId, from: currentUser, to: remote, payload: e.candidate }))
+      // Ignore null candidate events (end-of-candidates) for now or optionally send a marker
+      if (!e.candidate) return
+      if (!remote) {
+        console.warn('⚠️ ICE candidate event with undefined remote peer id; suppressing send.')
+        return
       }
+      const payload = (e.candidate as unknown as { toJSON?: () => RTCIceCandidateInit }).toJSON ? (e.candidate as unknown as { toJSON: () => RTCIceCandidateInit }).toJSON() : (e.candidate as unknown as RTCIceCandidateInit)
+      if (!payload.candidate) return // safety
+      sendCallSignal({ type: 'call-ice', to: remote, payload })
+    }
+
+    // Automatic negotiation handler (fires after track add/replace)
+    pc.onnegotiationneeded = () => {
+      // Suppress churn right after setting a remote answer (<500ms)
+      const lastAns = (window as unknown as { __lastRemoteAnswerAt?: number }).__lastRemoteAnswerAt || 0
+      if (Date.now() - lastAns < 500) {
+        return
+      }
+      if (negotiationStateRef.current[remote]?.isMakingOffer) return
+      if (pc.signalingState !== 'stable') return
+      scheduleNegotiation(remote, pc, 'onnegotiationneeded')
     }
     
     pc.ontrack = (e) => {
@@ -863,8 +1119,60 @@ export default function CallPage() {
     
     console.log(`🔗 ✅ ROBUST peer connection for ${remote} created with ${pc.getSenders().length} senders in strict order`)
     
+    // DATA CHANNEL (capabilities / control). Only one side (lexicographically smaller username) creates channel
+    if (currentUser < remote) {
+      try {
+        const dc = pc.createDataChannel('control')
+        dataChannelsRef.current[remote] = dc
+        console.log(`📡 Created data channel to ${remote}`)
+        dc.onopen = () => {
+          console.log(`📡 Data channel open with ${remote}`)
+          // Send initial capabilities snapshot
+          const caps = getLocalCapabilities()
+            try { dc.send(JSON.stringify({ type: 'caps', payload: caps })) } catch {}
+        }
+        dc.onmessage = (e) => {
+          try {
+            const msg = JSON.parse(e.data)
+            if (msg.type === 'caps') {
+              updateRemoteCapabilities(remote, msg.payload)
+            }
+          } catch (err) {
+            console.warn('Data channel message parse error:', err)
+          }
+        }
+        dc.onclose = () => { console.log(`📡 Data channel closed with ${remote}`); delete dataChannelsRef.current[remote] }
+        dc.onerror = (err) => console.warn('Data channel error', err)
+      } catch (err) {
+        console.warn('Failed to create data channel', err)
+      }
+    }
+    pc.ondatachannel = (event) => {
+      const dc = event.channel
+      dataChannelsRef.current[remote] = dc
+      console.log(`📡 Received data channel from ${remote}`)
+      dc.onopen = () => {
+        console.log(`📡 Data channel open (rx) with ${remote}`)
+        // Respond with our capabilities
+        const caps = getLocalCapabilities()
+        try { dc.send(JSON.stringify({ type: 'caps', payload: caps })) } catch {}
+      }
+      dc.onmessage = (e) => {
+        try {
+          const msg = JSON.parse(e.data)
+          if (msg.type === 'caps') {
+            updateRemoteCapabilities(remote, msg.payload)
+          }
+        } catch (err) {
+          console.warn('Data channel message parse error:', err)
+        }
+      }
+      dc.onclose = () => { console.log(`📡 Data channel closed (rx) with ${remote}`); delete dataChannelsRef.current[remote] }
+      dc.onerror = (err) => console.warn('Data channel error', err)
+    }
+    
     return pc
-  }, [roomId, currentUser]) // Dependencies for useCallback
+  }, [currentUser, createAndSendOffer, getLocalCapabilities, updateRemoteCapabilities, scheduleNegotiation, sendCallSignal])
 
 // Join call room with UNIVERSAL CONNECTION PROTOCOL
   const joinCall = async () => {
@@ -994,6 +1302,8 @@ export default function CallPage() {
           if (!pc) {
             console.log(`🔗 Creating new ROBUST peer connection for ${newPeer}`)
             pc = createPeerConnection(newPeer)
+            // Initialize remote capabilities placeholder
+            updateRemoteCapabilities(newPeer, {})
           }
           
           // ROBUST CONNECTION: Always check for ANY tracks (including arbitrary)
@@ -1013,40 +1323,25 @@ export default function CallPage() {
           })
           
           // Perfect negotiation with GUARANTEED connection establishment
-          const isImpolite = currentUser > newPeer
-          const shouldCreateOffer = !actualIsListener && isImpolite
-          
-          if (shouldCreateOffer) {
-            console.log(`🔗 ${currentUser} is IMPOLITE - will create offer for ${newPeer}`)
-            // Add a small delay to let the polite peer potentially start negotiation first
-            setTimeout(async () => {
-              // Check if negotiation hasn't started yet
-              if (pc && pc.signalingState === 'stable') {
-                try {
-                  console.log(`🔗 ✅ Creating ROBUST offer for new peer ${newPeer}`)
-                  const offer = await pc.createOffer()
-                  await pc.setLocalDescription(offer)
-                  ws.send(JSON.stringify({ type: "call-offer", roomId, from: currentUser, to: newPeer, payload: pc.localDescription }))
-                } catch (error) {
-                  console.error(`🔗 ❌ Error creating offer for new peer ${newPeer}:`, error)
-                }
+          const polite = currentUser < newPeer
+          if (negotiationStateRef.current[newPeer]) {
+            negotiationStateRef.current[newPeer].polite = polite
+          }
+          // Impolite side proactively offers; polite waits briefly
+          if (!polite) {
+            setTimeout(() => {
+              if (peerConnections.current[newPeer]?.signalingState === 'stable') {
+                createAndSendOffer(newPeer, peerConnections.current[newPeer], 'new-peer-impolite')
               }
-            }, 100) // Small delay to prevent race conditions
+            }, 50)
           } else {
-            console.log(`🔗 ${currentUser} is POLITE - waiting for offer from ${newPeer}`)
-            // If we're the polite peer but no offer comes, create one anyway after a longer delay
-            setTimeout(async () => {
-              if (pc && pc.signalingState === 'stable') {
-                try {
-                  console.log(`🔗 🔄 Polite peer ${currentUser} creating BACKUP offer for ${newPeer} to ensure connection`)
-                  const offer = await pc.createOffer()
-                  await pc.setLocalDescription(offer)
-                  ws.send(JSON.stringify({ type: "call-offer", roomId, from: currentUser, to: newPeer, payload: pc.localDescription }))
-                } catch (error) {
-                  console.error('Error creating backup offer:', error)
-                }
+            // Backup in case we never get an offer (peer crashed before sending)
+            setTimeout(() => {
+              if (peerConnections.current[newPeer]?.signalingState === 'stable' && !negotiationStateRef.current[newPeer]?.isMakingOffer) {
+                console.log(`🔗 ⏱️ Backup offer (polite) for ${newPeer}`)
+                createAndSendOffer(newPeer, peerConnections.current[newPeer], 'new-peer-backup')
               }
-            }, 500) // Longer delay for backup offer
+            }, 800)
           }
           break
         }case "call-offer": {
@@ -1055,33 +1350,45 @@ export default function CallPage() {
           if (!pc) {
             pc = createPeerConnection(from)
           }
-          
-          // Perfect negotiation: determine politeness based on username comparison
-          const isPolite = currentUser < from // Lexicographically smaller username is polite
-          
-          // Use safeSetRemoteDescription with politeness info
-          const result = await safeSetRemoteDescription(pc, msg.payload, isPolite)
+          const negotiation = negotiationStateRef.current[from]
+          if (negotiation) {
+            negotiation.polite = currentUser < from
+            const offerCollision = negotiation.isMakingOffer || pc.signalingState !== 'stable'
+            if (offerCollision) {
+              if (!negotiation.polite) {
+                // Impolite side ignores
+                console.log(`⚔️ Offer collision from ${from}, impolite side ignoring`)
+                return
+              }
+              console.log(`⚔️ Offer collision from ${from}, polite side performing rollback`)
+              try {
+                await pc.setLocalDescription({ type: 'rollback' })
+              } catch {
+                console.warn('Rollback failed; recreating PC')
+                await recreatePeerConnection(from)
+                pc = peerConnections.current[from]
+              }
+            }
+          }
+          const result = await safeSetRemoteDescription(pc, msg.payload, negotiation?.polite)
           if (result === 'recreate') {
-            // Recreate the peer connection and try again
             await recreatePeerConnection(from)
             pc = peerConnections.current[from]
-            if (pc) {
-              await safeSetRemoteDescription(pc, msg.payload, isPolite)
-            }
+            if (pc) await safeSetRemoteDescription(pc, msg.payload, negotiation?.polite)
           } else if (result === 'ignored') {
-            // Offer was ignored due to collision, don't create answer
-            console.log(`Offer from ${from} was ignored due to collision`)
+            console.log(`Offer from ${from} ignored after collision handling`)
             break
           }
-          
-          // Only proceed if we have a valid peer connection and didn't ignore
-          if (pc && pc.signalingState !== 'closed' && result === 'success') {
+          if (pc.signalingState === 'stable') {
+            // Remote description probably not applied; skip
+          }
+          if (pc.signalingState === 'have-remote-offer') {
             try {
               const answer = await pc.createAnswer()
               await pc.setLocalDescription(answer)
-              ws.send(JSON.stringify({ type: "call-answer", roomId, from: currentUser, to: from, payload: pc.localDescription }))
-            } catch (error) {
-              console.error('Error creating answer:', error)
+              sendCallSignal({ type: 'call-answer', to: from, payload: pc.localDescription })
+            } catch (e) {
+              console.error('Answer creation failed:', e)
             }
           }
           break
@@ -1155,6 +1462,12 @@ export default function CallPage() {
             delete copy[left]
             return copy
           })
+          // Cleanup data channel & capability state
+          if (dataChannelsRef.current[left]) {
+            try { dataChannelsRef.current[left].close() } catch {}
+            delete dataChannelsRef.current[left]
+          }
+          setRemoteCapabilities(prev => { const copy = { ...prev }; delete copy[left]; return copy })
             // Reset expanded participant if they left
           setExpandedParticipants(prev => {
             const newSet = new Set(prev)
@@ -1191,12 +1504,15 @@ export default function CallPage() {
   const leaveCall = () => {
     // Send leave message to server
     if (wsRef.current && currentUser) {
-      wsRef.current.send(JSON.stringify({ type: "call-peer-left", roomId, username: currentUser }))
+  sendCallSignal({ type: 'call-peer-left' })
     }
     
     // Close all peer connections
     Object.values(peerConnections.current).forEach(pc => pc.close())
     peerConnections.current = {}
+  // Close data channels
+  Object.values(dataChannelsRef.current).forEach(dc => { try { dc.close() } catch {} })
+  dataChannelsRef.current = {}
     
     // Clean up connection timeouts and health monitoring
     Object.values(connectionTimeouts.current).forEach(timeout => clearTimeout(timeout))
@@ -1248,6 +1564,7 @@ export default function CallPage() {
     setRemoteVideoStreams({})
     setRemoteScreenStreams({})
     setRemoteSystemAudioStreams({})
+  setRemoteCapabilities({})
     setParticipants(new Set()) // Clear participants list
     setVideoEnabled(false)    
     setScreenSharing(false)
@@ -1317,6 +1634,124 @@ export default function CallPage() {
       if (localSystemAudioStreamRef.current) localSystemAudioStreamRef.current.getTracks().forEach(t => t.stop())
     }
   }, [roomId])
+
+  // Broadcast capability changes when local states change
+  useEffect(() => {
+    if (!joined) return
+    broadcastCapabilities()
+  }, [joined, muted, videoEnabled, screenSharing, broadcastCapabilities])
+
+  // Stats-based adaptive ICE restarts & quality monitoring
+  useEffect(() => {
+    if (!joined) return
+    const interval = setInterval(async () => {
+      for (const [peerId, pc] of Object.entries(peerConnections.current)) {
+        if (pc.signalingState === 'closed') continue
+        try {
+          const stats = await pc.getStats()
+          let rtt = 0
+          // Narrow typing for candidate pair reports we care about
+          interface CandidatePairLike { currentRoundTripTime?: number; roundTripTime?: number; state?: string; nominated?: boolean }
+          const candidatePairs: CandidatePairLike[] = []
+          let totalPackets = 0
+            let lostPackets = 0
+          stats.forEach(report => {
+            if (report.type === 'candidate-pair') {
+              const cp = report as unknown as CandidatePairLike
+              if (cp.state === 'succeeded' && cp.nominated) {
+                candidatePairs.push(cp)
+              }
+            }
+            if (report.type === 'remote-inbound-rtp' || report.type === 'inbound-rtp') {
+              const r = report as unknown as { kind?: string; packetsReceived?: number; packetsLost?: number }
+              if ((r.kind === 'audio' || r.kind === 'video') && typeof r.packetsReceived === 'number' && typeof r.packetsLost === 'number') {
+                totalPackets += r.packetsReceived + r.packetsLost
+                lostPackets += r.packetsLost
+              }
+            }
+          })
+          if (candidatePairs.length) {
+            // take best (lowest RTT)
+            rtt = candidatePairs.reduce((min, p) => Math.min(min, (p.currentRoundTripTime ?? p.roundTripTime ?? Infinity)), Infinity)
+          }
+          const lossRatio = totalPackets > 200 ? (lostPackets / totalPackets) : 0 // ignore small samples
+          if ((rtt && rtt > 0.8) || lossRatio > 0.15) {
+            const now = Date.now()
+            const last = lastIceRestartRef.current[peerId] || 0
+            if (now - last > 15000 && pc.signalingState === 'stable') {
+              console.log(`📊 Network degradation detected for ${peerId} (rtt=${(rtt*1000).toFixed(0)}ms loss=${(lossRatio*100).toFixed(1)}%) -> ICE restart`)
+              lastIceRestartRef.current[peerId] = now
+              createAndSendOffer(peerId, pc, 'stats-degraded', true)
+            }
+          }
+        } catch {
+          // ignore stats errors
+        }
+      }
+    }, 5000)
+    return () => clearInterval(interval)
+  }, [joined, createAndSendOffer])
+
+  // Auto track recovery: if real mic/camera track ends unexpectedly, attempt reacquire
+  useEffect(() => {
+    if (!joined) return
+    const micTracks = localStreamRef.current?.getAudioTracks() || []
+    micTracks.forEach(track => {
+      const arbitrary = (track as unknown as { isArbitraryTrack?: boolean }).isArbitraryTrack
+      if (arbitrary) return
+      track.onended = async () => {
+        if (muted) return // user intentionally muted or permission revoked
+        console.log('🎤 Microphone track ended unexpectedly - attempting recovery')
+        try {
+          const newStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+          const newTrack = newStream.getAudioTracks()[0]
+          if (newTrack) {
+            // Replace locally
+            if (localStreamRef.current) {
+              localStreamRef.current.getAudioTracks().forEach(t => t.stop())
+              localStreamRef.current = new MediaStream([newTrack])
+            }
+            if (localAudioRef.current) localAudioRef.current.srcObject = localStreamRef.current
+            // Replace in each pc
+            Object.entries(peerConnections.current).forEach(([, pc]) => {
+              const sender = pc.getSenders().find(s => s.track && s.track.kind === 'audio')
+              if (sender) { sender.replaceTrack(newTrack).catch(() => {}) }
+            })
+            broadcastCapabilities()
+          }
+        } catch (err) {
+          console.warn('Microphone recovery failed:', err)
+        }
+      }
+    })
+    const camTracks = localVideoStreamRef.current?.getVideoTracks() || []
+    camTracks.forEach(track => {
+      const arbitrary = (track as unknown as { isArbitraryTrack?: boolean }).isArbitraryTrack
+      if (arbitrary) return
+      track.onended = async () => {
+        if (!videoEnabled) return
+        console.log('📹 Camera track ended unexpectedly - attempting recovery')
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: currentCamera }, audio: false })
+          const newTrack = stream.getVideoTracks()[0]
+          if (newTrack) {
+            if (localVideoStreamRef.current) {
+              localVideoStreamRef.current.getVideoTracks().forEach(t => t.stop())
+              localVideoStreamRef.current = new MediaStream([newTrack])
+            }
+            if (localVideoRef.current) localVideoRef.current.srcObject = localVideoStreamRef.current
+            Object.entries(peerConnections.current).forEach(([, pc]) => {
+              const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video' && !s.track.label.toLowerCase().includes('screen'))
+              if (sender) { sender.replaceTrack(newTrack).catch(() => {}) }
+            })
+            broadcastCapabilities()
+          }
+        } catch (err) {
+          console.warn('Camera recovery failed:', err)
+        }
+      }
+    })
+  }, [joined, muted, videoEnabled, currentCamera, broadcastCapabilities])
 
   // 🔗 ULTRA-ROBUST CONNECTION: Immediate fail detection and aggressive recovery system
   useEffect(() => {
@@ -2504,13 +2939,7 @@ export default function CallPage() {
                     console.log(`Reconnect: Creating offer for peer ${newPeer}`)
                     const offer = await pc.createOffer()
                     await pc.setLocalDescription(offer)
-                    ws.send(JSON.stringify({ 
-                      type: "call-offer", 
-                      roomId, 
-                      from: currentUser, 
-                      to: newPeer, 
-                      payload: pc.localDescription 
-                    }))
+                        sendCallSignal({ type: 'call-offer', to: newPeer, payload: pc.localDescription })
                   } catch (error) {
                     console.error('Reconnect: Error creating offer:', error)
                   }
@@ -2546,13 +2975,7 @@ export default function CallPage() {
               try {
                 const answer = await pc.createAnswer()
                 await pc.setLocalDescription(answer)
-                ws.send(JSON.stringify({ 
-                  type: "call-answer", 
-                  roomId, 
-                  from: currentUser, 
-                  to: from, 
-                  payload: pc.localDescription 
-                }))
+                sendCallSignal({ type: 'call-answer', to: from, payload: pc.localDescription })
               } catch (error) {
                 console.error('Reconnect: Error creating answer:', error)
               }
@@ -2804,6 +3227,15 @@ export default function CallPage() {
                   )}
                 </div>
                 <div className="flex items-center gap-2 flex-wrap">{/* Audio Controls */}
+                  <Button
+                    size="sm"
+                    variant={debugStats ? 'default' : 'outline'}
+                    onClick={() => setDebugStats(d => !d)}
+                    className="flex items-center gap-1"
+                    title="Toggle network stats overlay"
+                  >
+                    📊<span className="hidden sm:inline">Stats</span>
+                  </Button>
                   {!actualIsListener && (
                     <Button
                       size="sm"
@@ -3080,6 +3512,23 @@ export default function CallPage() {
                             isExpanded ? 'text-sm sm:text-base' : 'text-xs sm:text-sm'
                           }`}>
                             {peer}
+                            <span className="ml-1 inline-flex gap-1 align-middle">
+                              {remoteCapabilities[peer]?.mic && <Mic className="h-3 w-3 text-green-600" />}
+                              {remoteCapabilities[peer]?.camera && <Video className="h-3 w-3 text-blue-600" />}
+                              {remoteCapabilities[peer]?.screen && <Monitor className="h-3 w-3 text-emerald-600" />}
+                              {remoteCapabilities[peer]?.systemAudio && <Volume2 className="h-3 w-3 text-purple-600" />}
+                              {remoteNetworkStats[peer] && (
+                                <span className={`inline-flex items-center text-[10px] px-1 rounded font-medium border ${
+                                  remoteNetworkStats[peer].quality === 'excellent' ? 'bg-green-100 text-green-700 border-green-300' :
+                                  remoteNetworkStats[peer].quality === 'good' ? 'bg-lime-100 text-lime-700 border-lime-300' :
+                                  remoteNetworkStats[peer].quality === 'fair' ? 'bg-yellow-100 text-yellow-700 border-yellow-300' :
+                                  remoteNetworkStats[peer].quality === 'poor' ? 'bg-orange-100 text-orange-700 border-orange-300' :
+                                  'bg-red-100 text-red-700 border-red-300'
+                                }`} title={`RTT ${remoteNetworkStats[peer].rttMs}ms • Loss ${remoteNetworkStats[peer].lossPct}%`}>
+                                  {remoteNetworkStats[peer].quality[0].toUpperCase()}
+                                </span>
+                              )}
+                            </span>
                             {/* Enhanced Connection Health Indicator with detailed feedback */}
                             <span className={`ml-2 inline-flex items-center gap-1`}>
                               <span className={`inline-block w-2 h-2 rounded-full ${
@@ -3099,6 +3548,21 @@ export default function CallPage() {
                           </div>
                           
                           <div className="flex items-center gap-1">
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                const pc = peerConnections.current[peer]
+                                if (pc && pc.signalingState === 'stable') {
+                                  createAndSendOffer(peer, pc, 'manual-ice-restart', true)
+                                }
+                              }}
+                              className="p-1 h-6 w-6 sm:h-7 sm:w-7"
+                              title="Manual ICE restart"
+                            >
+                              <RefreshCw className="h-2.5 w-2.5 sm:h-3 sm:w-3" />
+                            </Button>
                             {/* Fullscreen Button */}
                             <Button
                               size="sm"
@@ -3136,6 +3600,13 @@ export default function CallPage() {
                           <Volume2 className="h-2.5 w-2.5 sm:h-3 sm:w-3 mr-1" />
                           <span className="text-xs">Speaking</span>
                         </div>
+                        {debugStats && remoteNetworkStats[peer] && (
+                          <div className="mt-1 text-[10px] text-gray-500 leading-tight">
+                            <div>RTT: {remoteNetworkStats[peer].rttMs}ms</div>
+                            <div>Loss: {remoteNetworkStats[peer].lossPct}%</div>
+                            <div>Q: {remoteNetworkStats[peer].quality}</div>
+                          </div>
+                        )}
                         
                         {/* Hidden audio element */}
                         <audio
