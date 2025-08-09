@@ -60,6 +60,10 @@ function createArbitraryScreenPlaceholderTrack(): MediaStreamTrack {
   const stream = canvas.captureStream(1) // 1 fps minimal overhead
   const track = stream.getVideoTracks()[0] as ArbitraryScreenTrack
   track.isArbitraryScreenTrack = true
+  // Ensure label contains 'screen' so existing screen sender is detected and replaced instead of adding a new m-line.
+  try {
+    Object.defineProperty(track, 'label', { value: 'Screen Placeholder', configurable: false })
+  } catch { /* non-fatal */ }
   return track
 }
 
@@ -80,6 +84,11 @@ export default function CallPage() {
   const [remoteVideoStreams, setRemoteVideoStreams] = useState<Record<string, MediaStream>>({})
   const [remoteScreenStreams, setRemoteScreenStreams] = useState<Record<string, MediaStream>>({})
   const [remoteSystemAudioStreams, setRemoteSystemAudioStreams] = useState<Record<string, MediaStream>>({}) // NEW: separate system audio streams
+  // Mirror remote video/screen streams in refs for immediate synchronous access during ontrack classification
+  const remoteVideoStreamsRef = useRef<Record<string, MediaStream>>({})
+  const remoteScreenStreamsRef = useRef<Record<string, MediaStream>>({})
+  useEffect(() => { remoteVideoStreamsRef.current = remoteVideoStreams }, [remoteVideoStreams])
+  useEffect(() => { remoteScreenStreamsRef.current = remoteScreenStreams }, [remoteScreenStreams])
   const [participants, setParticipants] = useState<Set<string>>(new Set()) // Track all participants
   const localAudioRef = useRef<HTMLAudioElement>(null)
   const localVideoRef = useRef<HTMLVideoElement>(null)
@@ -97,6 +106,8 @@ export default function CallPage() {
   const negotiationStateRef = useRef<Record<string, { isMakingOffer: boolean; ignoreOffer: boolean; polite: boolean }>>({})
   // Negotiation control (coalescing & rate limiting)
   const negotiationControlRef = useRef<Record<string, { lastOfferAt: number; timer: number | null; pendingIceRestart: boolean; reasons: Set<string> }>>({})
+  // Track candidate video streams per peer for post-arrival reconciliation (late join screen detection)
+  const remoteVideoCandidatesRef = useRef<Record<string, Set<string>>>({})
 
   // Unified signaling sender ensuring username consistency
   interface CallSignal {
@@ -1337,7 +1348,8 @@ export default function CallPage() {
     
     pc.ontrack = (e) => {
       const track = e.track
-      const stream = e.streams[0]
+      // Some browsers (or race conditions) may deliver an empty e.streams array; synthesize one.
+      const stream = e.streams && e.streams[0] ? e.streams[0] : new MediaStream([track])
       
       console.log('Received track:', track.kind, track.label, 'from', remote)
       
@@ -1348,7 +1360,9 @@ export default function CallPage() {
             const AC: typeof AudioContext | undefined = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
             const ctx = AC ? new AC() : null
             if (!ctx) throw new Error('AudioContext unsupported')
-            const source = ctx.createMediaStreamSource(stream)
+            // Some browsers may deliver empty e.streams; ensure a proper MediaStream
+            const mediaStreamForAudio = stream instanceof MediaStream ? stream : new MediaStream([track])
+            const source = ctx.createMediaStreamSource(mediaStreamForAudio)
             const analyser = ctx.createAnalyser()
             analyser.fftSize = 256
             source.connect(analyser)
@@ -1392,116 +1406,163 @@ export default function CallPage() {
           setRemoteStreams(prev => ({ ...prev, [remote]: stream }))
         }
       } else if (track.kind === 'video') {
-        // Check track label or use track settings to determine if it's screen share
-        // Screen share tracks typically have labels containing 'screen' or have specific constraints
-        const isScreenShare = track.label.toLowerCase().includes('screen') || 
-                             track.label.toLowerCase().includes('monitor') ||
-                             track.label.toLowerCase().includes('display') ||
-                             track.getSettings().displaySurface === 'monitor'
-        
+        const label = track.label.toLowerCase()
+        const settings = track.getSettings ? track.getSettings() : {}
+        const width = (settings as { width?: number }).width || 0
+        const height = (settings as { height?: number }).height || 0
+        // Primary heuristic (keywords / displaySurface)
+        let keywordHeuristic = label.includes('screen') || label.includes('monitor') || label.includes('display') || (settings as { displaySurface?: string }).displaySurface === 'monitor'
+        if (keywordHeuristic && label.includes('placeholder')) keywordHeuristic = false
+
+        // Fallback heuristic 1: second arriving distinct video stream becomes screen if none assigned yet
+        const existingScreen = remoteScreenStreamsRef.current[remote]
+        const existingCamera = remoteVideoStreamsRef.current[remote]
+        const secondStreamHeuristic = !existingScreen && !!existingCamera && existingCamera.id !== stream.id
+
+        // Fallback heuristic 2: resolution-based (typical screen shares are >= 1280 width or height >= 800)
+        const resolutionHeuristic = !existingScreen && (width >= 1280 || height >= 800)
+
+        // Fallback heuristic 3: transceiver index (best-effort)
+        let indexHeuristic = false
+        try {
+          const allVideo = peerConnections.current[remote]?.getTransceivers().filter(t => t.receiver.track.kind === 'video') || []
+          const second = allVideo[1]
+          indexHeuristic = !!second && second.receiver.track === track && !label.includes('placeholder')
+        } catch {}
+
+        // Fallback heuristic 4: remote capabilities advertise screen
+        const remoteCaps = remoteCapabilities[remote]
+        const capsHeuristic = !!remoteCaps?.screen && !existingScreen
+
+        const isScreenShare = keywordHeuristic || secondStreamHeuristic || resolutionHeuristic || indexHeuristic || capsHeuristic
+        console.log('🔍 Video track classification', {
+          remote,
+            trackLabel: track.label,
+          keywordHeuristic,
+          secondStreamHeuristic,
+          resolutionHeuristic,
+          indexHeuristic,
+          capsHeuristic,
+          width,
+          height,
+          decidedScreen: isScreenShare
+        })
+
         if (isScreenShare) {
-          console.log('Setting as screen share for', remote)
-          setRemoteScreenStreams(prev => ({ ...prev, [remote]: stream }))
+          setRemoteScreenStreams(prev => {
+            const existing = prev[remote]
+            if (existing && existing.id === stream.id) return prev
+            return { ...prev, [remote]: stream }
+          })
         } else {
-          console.log('Setting as video for', remote)
-          setRemoteVideoStreams(prev => ({ ...prev, [remote]: stream }))
+          setRemoteVideoStreams(prev => {
+            const existing = prev[remote]
+            if (existing && existing.id === stream.id) return prev
+            return { ...prev, [remote]: stream }
+          })
+        }
+
+        // Register candidate for reconciliation
+  const set = (remoteVideoCandidatesRef.current[remote] ||= new Set())
+  if (stream && stream.id) set.add(stream.id)
+        // Post-arrival reconciliation: if we have >=2 distinct video streams and no screen decided, pick one
+        setTimeout(() => {
+          const currentScreen = remoteScreenStreamsRef.current[remote]
+          if (currentScreen) return // already have screen
+          const currentVideo = remoteVideoStreamsRef.current[remote]
+          const candidateIds = remoteVideoCandidatesRef.current[remote]
+          if (!candidateIds || candidateIds.size < 2) return
+          // Heuristic: prefer stream with larger resolution; collect latest tracks from DOM refs
+          const allStreams: MediaStream[] = []
+          if (currentVideo) allStreams.push(currentVideo)
+          // Attempt to find second stream via peer connection receivers
+          try {
+            const pc = peerConnections.current[remote]
+            if (pc) {
+              const videoReceivers = pc.getReceivers().filter(r => r.track && r.track.kind === 'video')
+              videoReceivers.forEach(r => {
+                // Build a synthetic stream for measurement if not already captured
+                if (!allStreams.find(s => s.getVideoTracks()[0]?.id === r.track.id)) {
+                  allStreams.push(new MediaStream([r.track]))
+                }
+              })
+            }
+          } catch {}
+          if (allStreams.length < 2) return
+          // Measure resolutions (may be zero early; filter zeros last)
+          interface TrackSettings { width?: number; height?: number }
+          const enriched = allStreams.map(s => {
+            const vt = s.getVideoTracks()[0]
+            if (!vt) return { stream: s, width: 0, height: 0, label: 'unknown' }
+            const st: TrackSettings = vt.getSettings ? vt.getSettings() as TrackSettings : {}
+            return { stream: s, width: st.width || 0, height: st.height || 0, label: vt.label }
+          }).filter(e => e) as { stream: MediaStream; width: number; height: number; label: string }[]
+          enriched.sort((a,b) => (b.width*b.height) - (a.width*a.height))
+          const chosen = enriched.find(e => e.width >= 800 || e.height >= 600) || enriched[0]
+          if (chosen && chosen.stream && chosen.stream.id && chosen.stream.id !== currentVideo?.id) {
+            console.log('🛠️ Reconciliation assigning screen stream for', remote, chosen)
+            setRemoteScreenStreams(prev => ({ ...prev, [remote]: chosen.stream }))
+          }
+        }, 350)
+      }
+    }
+    
+    // --- CONSOLIDATED: Track binding handled via transceivers above; avoid duplicate addTrack (caused InvalidAccessError) ---
+    // We only ensure placeholder foundations exist and bind via existing transceiver senders (replaceTrack), never addTrack here.
+    try {
+      // Ensure arbitrary audio foundation if no real mic track yet
+      const haveRealMic = !!localStreamRef.current?.getAudioTracks().some(t => !('isArbitraryTrack' in t))
+      if (!haveRealMic) {
+        if (!localStreamRef.current || localStreamRef.current.getAudioTracks().length === 0) {
+          const arbitraryAudio = createArbitraryAudioTrack()
+          localStreamRef.current = arbitraryAudio
+        }
+        const micTrack = localStreamRef.current.getAudioTracks()[0]
+        const micSender = pc.getTransceivers().find(t => t.receiver.track.kind === 'audio')?.sender
+        if (micSender && micSender.track !== micTrack) micSender.replaceTrack(micTrack).catch(()=>{})
+      }
+      // Ensure arbitrary camera video foundation if none
+      const haveRealCam = !!localVideoStreamRef.current?.getVideoTracks().some(t => !('isArbitraryTrack' in t))
+      if (!haveRealCam) {
+        if (!localVideoStreamRef.current || localVideoStreamRef.current.getVideoTracks().length === 0) {
+          localVideoStreamRef.current = createArbitraryVideoTrack()
+        }
+        const camTrack = localVideoStreamRef.current.getVideoTracks()[0]
+        const camSender = pc.getTransceivers().filter(t => t.receiver.track.kind === 'video')[0]?.sender
+        if (camSender && camSender.track !== camTrack) camSender.replaceTrack(camTrack).catch(()=>{})
+      }
+      // Screen placeholder already ensured above; if screen sharing active bind real track
+      const realScreenTrack = localScreenStreamRef.current?.getVideoTracks()[0]
+      if (realScreenTrack) {
+        const screenSender = pc.getTransceivers().filter(t => t.receiver.track.kind === 'video')[1]?.sender
+        if (screenSender && screenSender.track !== realScreenTrack) {
+          const existing = screenSender.track as (MediaStreamTrack & { isArbitraryScreenTrack?: boolean }) | null
+          if (existing && existing.isArbitraryScreenTrack) {
+            // Will be replaced below
+          }
+          if (!existing || existing !== realScreenTrack) {
+            screenSender.replaceTrack(realScreenTrack).catch(()=>{})
+          }
         }
       }
+    } catch (e) {
+      console.warn('Post-foundation track binding pass failed (non-fatal):', e)
     }
-    
-    // --- ENHANCED: Always add local tracks to new peer connection with robust arbitrary track foundation ---
-    // CRITICAL: Add tracks in STRICT CONSISTENT ORDER to avoid m-line ordering issues
-    console.log(`🔗 Creating ROBUST peer connection for ${remote}. Adding tracks in strict order:`)
-    
-    // STRICT ORDER: Always maintain the same track order across all negotiations
-    // Order: 1) Audio (mic), 2) System Audio, 3) Video (camera), 4) Screen Share
-    
-    // 1. FOUNDATION: Always ensure we have persistent arbitrary tracks for WebRTC foundation
-    const currentAudioTracks = localStreamRef.current?.getAudioTracks() || []
-    const hasRealAudio = currentAudioTracks.some(track => !('isArbitraryTrack' in track))
-    
-    if (!hasRealAudio) {
-      console.log(`🔗 📦 No real audio detected, ensuring arbitrary audio foundation exists`)
-      if (!localStreamRef.current || currentAudioTracks.length === 0) {
-        console.log(`🔗 🔧 Creating new arbitrary audio foundation`)
-        const arbitraryAudioStream = createArbitraryAudioTrack()
-        localStreamRef.current = arbitraryAudioStream
-      }
-    }
-    
-    const currentVideoTracks = localVideoStreamRef.current?.getVideoTracks() || []
-    const hasRealVideo = currentVideoTracks.some(track => !('isArbitraryTrack' in track))
-    
-    if (!hasRealVideo && (!localVideoStreamRef.current || currentVideoTracks.length === 0)) {
-      console.log(`🔗 🔧 Creating persistent arbitrary video foundation`)
-      const arbitraryVideoStream = createArbitraryVideoTrack()
-      localVideoStreamRef.current = arbitraryVideoStream
-    }
-    
-    // STRICT ORDER IMPLEMENTATION: Add tracks in exact order to maintain m-line consistency
-    
-    // 1. FIRST: Add microphone audio tracks (real or arbitrary) - ALWAYS position 0
-    if (localStreamRef.current) {
-      const audioTracks = localStreamRef.current.getAudioTracks()
-      if (audioTracks.length > 0) {
-        const audioTrack = audioTracks[0] // Use only first audio track to maintain order
-        if (!pc.getSenders().some(sender => sender.track === audioTrack)) {
-          pc.addTrack(audioTrack, localStreamRef.current)
-          const isArbitrary = 'isArbitraryTrack' in audioTrack
-          console.log(`🔗 ✅ [POS 0] Added ${isArbitrary ? 'arbitrary' : 'real'} audio track: ${audioTrack.label}, enabled: ${audioTrack.enabled}`)
-        }
-      }
-    }
-    
-    // 2. SECOND: Add system audio tracks (if available) - ALWAYS position 1
-    if (localSystemAudioStreamRef.current) {
-      const systemAudioTracks = localSystemAudioStreamRef.current.getAudioTracks()
-      if (systemAudioTracks.length > 0) {
-        const systemAudioTrack = systemAudioTracks[0] // Use only first system audio track
-        if (!pc.getSenders().some(sender => sender.track === systemAudioTrack)) {
-          pc.addTrack(systemAudioTrack, localSystemAudioStreamRef.current)
-          console.log(`🔗 ✅ [POS 1] Added system audio track: ${systemAudioTrack.label}, enabled: ${systemAudioTrack.enabled}`)
-        }
-      }
-    }
-    
-    // 3. THIRD: Add video tracks (real or arbitrary) - ALWAYS position 2
-    if (localVideoStreamRef.current) {
-      const videoTracks = localVideoStreamRef.current.getVideoTracks()
-      if (videoTracks.length > 0) {
-        const videoTrack = videoTracks[0] // Use only first video track to maintain order
-        if (!pc.getSenders().some(sender => sender.track === videoTrack)) {
-          pc.addTrack(videoTrack, localVideoStreamRef.current)
-          const isArbitrary = 'isArbitraryTrack' in videoTrack
-          console.log(`🔗 ✅ [POS 2] Added ${isArbitrary ? 'arbitrary' : 'real'} video track: ${videoTrack.label}`)
-        }
-      }
-    }
-    
-    // 4. FOURTH: Add screen share tracks (if available) - ALWAYS position 3
-    if (localScreenStreamRef.current) {
-      const screenTracks = localScreenStreamRef.current.getVideoTracks()
-      if (screenTracks.length > 0) {
-        const screenTrack = screenTracks[0] // Use only first screen track
-        if (!pc.getSenders().some(sender => sender.track === screenTrack)) {
-          pc.addTrack(screenTrack, localScreenStreamRef.current)
-          console.log(`🔗 ✅ [POS 3] Added screen share track: ${screenTrack.label}`)
-        }
-      }
-    }
-    
-    console.log(`🔗 ✅ ROBUST peer connection for ${remote} created with ${pc.getSenders().length} senders in strict order`)
+    console.log(`🔗 ✅ Peer connection for ${remote} ready with ${pc.getSenders().length} senders (transceiver-based)`)
+    try {
+      const videoTx = pc.getTransceivers().filter(t => t.receiver.track.kind === 'video')
+      console.log('🔎 Transceiver snapshot', remote, videoTx.map((t,i) => ({ index: i, mid: t.mid, dir: t.direction, trackId: t.receiver.track.id, label: t.receiver.track.label })))
+    } catch {}
 
     // Force an initial offer if we ended up not scheduling one (e.g., both sides waited politely or
     // late join after tracks already established) to guarantee media flows.
     setTimeout(() => {
       const negotiation = negotiationStateRef.current[remote]
       if (!negotiation) return
-      // If still stable and we have at least one sender with a track, ensure an offer goes out from impolite side
       if (pc.signalingState === 'stable') {
         const hasAnyTrack = pc.getSenders().some(s => s.track)
-        const weArePolite = negotiation.polite
-        if (!weArePolite && hasAnyTrack) {
+        if (hasAnyTrack) {
+          console.log(`🔗 🎯 Forcing initial negotiation for ${remote} (late-join guarantee)`)
           scheduleNegotiation(remote, pc, 'late-join-foundation')
         }
       }
@@ -1560,7 +1621,7 @@ export default function CallPage() {
     }
     
     return pc
-  }, [currentUser, createAndSendOffer, getLocalCapabilities, updateRemoteCapabilities, scheduleNegotiation, sendCallSignal, scheduleReconnection])
+  }, [currentUser, createAndSendOffer, getLocalCapabilities, updateRemoteCapabilities, scheduleNegotiation, sendCallSignal, scheduleReconnection, remoteCapabilities])
 
   // --- ULTRA RELIABILITY WATCHDOG (expects vs actual media) ---
   const reliabilityStateRef = useRef<Record<string, { missingCycles: number }>>({})
@@ -2108,47 +2169,55 @@ export default function CallPage() {
 // Add local tracks to all peer connections when available
   useEffect(() => {
     if (actualIsListener) return
-    
     Object.values(peerConnections.current).forEach(pc => {
-      // Add audio tracks if available
-      if (localStreamRef.current) {
-        localStreamRef.current.getTracks().forEach(track => {
-          if (!pc.getSenders().some(sender => sender.track === track)) {
-            pc.addTrack(track, localStreamRef.current!)
-            console.log(`Added audio track to existing PC: ${track.label}, enabled: ${track.enabled}`)
-          }
-        })
+      const senders = pc.getSenders()
+      // Helper finders by role
+      const micSender = senders.find(s => s.track && s.track.kind === 'audio' && !s.track.label.toLowerCase().includes('system'))
+      const systemSender = senders.find(s => s.track && s.track.kind === 'audio' && s.track.label.toLowerCase().includes('system'))
+      const cameraSender = senders.find(s => (s as TaggedSender).__camera) || senders.find(s => s.track && s.track.kind === 'video' && !s.track.label.toLowerCase().includes('screen') && !(s as TaggedSender).__screen)
+      const screenSender = senders.find(s => (s as TaggedSender).__screen) || senders.filter(s => s.track && s.track.kind === 'video').slice(1,2)[0]
+
+      // Microphone audio
+      const micTrack = localStreamRef.current?.getAudioTracks()[0]
+      if (micTrack) {
+        if (micSender && micSender.track !== micTrack) {
+          micSender.replaceTrack(micTrack).catch(()=>{})
+        } else if (!micSender) {
+          try { pc.addTrack(micTrack, localStreamRef.current!) } catch { /* duplicate safe */ }
+        }
       }
-      
-      // Also add video tracks if enabled
-      if (localVideoStreamRef.current) {
-        localVideoStreamRef.current.getTracks().forEach(track => {
-          if (!pc.getSenders().some(sender => sender.track === track)) {
-            pc.addTrack(track, localVideoStreamRef.current!)
-          }
-        })
+
+      // System audio
+      const sysTrack = localSystemAudioStreamRef.current?.getAudioTracks()[0]
+      if (sysTrack) {
+        if (systemSender && systemSender.track !== sysTrack) {
+          systemSender.replaceTrack(sysTrack).catch(()=>{})
+        } else if (!systemSender) {
+          try { pc.addTrack(sysTrack, localSystemAudioStreamRef.current!) } catch {}
+        }
       }
-      
-      // Also add screen tracks if enabled  
-      if (localScreenStreamRef.current) {
-        localScreenStreamRef.current.getTracks().forEach(track => {
-          if (!pc.getSenders().some(sender => sender.track === track)) {
-            pc.addTrack(track, localScreenStreamRef.current!)
-          }
-        })
+
+      // Camera video
+      const camTrack = localVideoStreamRef.current?.getVideoTracks()[0]
+      if (camTrack) {
+        if (cameraSender && cameraSender.track !== camTrack) {
+          cameraSender.replaceTrack(camTrack).catch(()=>{})
+        } else if (!cameraSender) {
+          try { pc.addTrack(camTrack, localVideoStreamRef.current!) } catch {}
+        }
       }
-      
-      // Also add system audio tracks if enabled
-      if (localSystemAudioStreamRef.current) {
-        localSystemAudioStreamRef.current.getTracks().forEach(track => {
-          if (!pc.getSenders().some(sender => sender.track === track)) {
-            pc.addTrack(track, localSystemAudioStreamRef.current!)
-            console.log(`Added system audio track to existing PC: ${track.label}, enabled: ${track.enabled}`)
-          }
-        })
+
+      // Screen video (real screen track only; skip placeholder logic here)
+      const screenTrack = localScreenStreamRef.current?.getVideoTracks()[0]
+      if (screenTrack) {
+        if (screenSender && screenSender.track !== screenTrack) {
+          screenSender.replaceTrack(screenTrack).catch(()=>{})
+        } else if (!screenSender) {
+          try { pc.addTrack(screenTrack, localScreenStreamRef.current!) } catch {}
+        }
       }
     })
-  }, [joined, actualIsListener, videoEnabled, screenSharing, muted]) // Added muted as dependency
+  }, [joined, actualIsListener, videoEnabled, screenSharing, muted])
 
   // Clean up on leave
   useEffect(() => {
@@ -2867,7 +2936,7 @@ export default function CallPage() {
         
         // Add both screen video and system audio tracks to all peer connections
         console.log('🔄 Starting screen sharing track distribution to all peers...')
-        const renegotiationPromises = Object.entries(peerConnections.current).map(async ([remote, pc]) => {
+  const renegotiationPromises = Object.entries(peerConnections.current).map(async ([remote, pc]) => {
           console.log(`📡 Processing screen sharing for peer: ${remote}`)
           
           const screenTrack = stream.getVideoTracks()[0]
@@ -2883,11 +2952,19 @@ export default function CallPage() {
             )
             
             if (existingScreenSender && existingScreenSender.track) {
-              // Replace existing screen track (avoids renegotiation)
+              // Replace existing screen track (avoids adding new m-line)
               try {
                 await existingScreenSender.replaceTrack(screenTrack)
                 console.log(`Replaced screen track for ${remote}`)
-                return // No renegotiation needed
+                // Even after replaceTrack, force a negotiation once so late joiners who missed earlier offers get current screen direction attributes
+                if (pc.signalingState === 'stable') {
+                  try {
+                    const offer = await pc.createOffer()
+                    await pc.setLocalDescription(offer)
+                    wsRef.current?.send(JSON.stringify({ type: 'call-offer', roomId, from: currentUser, to: remote, payload: pc.localDescription }))
+                  } catch (e) { console.warn('Forced screen replace negotiation failed:', e) }
+                }
+                return
               } catch (error) {
                 console.warn(`Failed to replace screen track for ${remote}, falling back to addTrack:`, error)
               }
