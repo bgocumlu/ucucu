@@ -101,13 +101,15 @@ interface FileDeliveryTracker {
   roomId: string;
   filename: string;
   senderId: string;
-  timestamp: number;
+  timestamp: number; // original client timestamp
+  transferId: string; // NEW stable id
   expectedRecipients: Set<string>;
   confirmedRecipients: Set<string>;
   message: { [key: string]: unknown };
   broadcastTime: number;
-  retryCount: number; // Track how many times we've retried
-  lastRetryTime: number; // Track when we last attempted a retry
+  retryCount: number;
+  lastRetryTime: number;
+  status?: 'pending' | 'retrying' | 'failed' | 'complete';
 }
 
 const fileDeliveryTracking: Map<string, FileDeliveryTracker> = new Map();
@@ -142,120 +144,67 @@ setInterval(async () => {
     
     // Check if file needs rebroadcast (some recipients haven't confirmed)
     if (age > REBROADCAST_THRESHOLD && age < CLEANUP_THRESHOLD) {
-      // Check retry limits - max 5 retries with exponential backoff
       const MAX_RETRIES = 5;
-      const RETRY_BACKOFF = 2000; // 2 seconds base delay
-      const timeSinceLastRetry = now - tracker.lastRetryTime;
-      const requiredDelay = RETRY_BACKOFF * Math.pow(2, tracker.retryCount); // Exponential backoff
-      
+      const BASE_DELAY = 1500;
+      const timeSinceLast = now - tracker.lastRetryTime;
+      const requiredDelay = BASE_DELAY * Math.pow(2, tracker.retryCount);
       if (tracker.retryCount >= MAX_RETRIES) {
-        console.warn(`[FILE-DELIVERY-ABANDON] ❌ ${tracker.filename} exceeded max retries (${MAX_RETRIES}) - abandoning delivery`);
-        
-        // Notify the sender that delivery failed
-        const deliveryFailure = {
-          type: 'fileDeliveryFailed',
-          fileName: tracker.filename,
-          timestamp: Date.now(),
-          originalTimestamp: tracker.timestamp,
-          reason: 'Max retries exceeded',
-          unconfirmedRecipients: Array.from(tracker.expectedRecipients).filter(
-            user => !tracker.confirmedRecipients.has(user)
-          )
-        };
-        
-        // Send failure notification to the original sender
-        await broadcastToRoom(tracker.roomId, 'fileDeliveryFailed', deliveryFailure, tracker.senderId);
-        
-        fileDeliveryTracking.delete(key);
-        continue;
-      }
-      
-      if (timeSinceLastRetry < requiredDelay) {
-        // Not time to retry yet due to backoff
-        continue;
-      }
-      
-      // Find unconfirmed recipients from the ORIGINAL expected list (frozen at send time)
-      // Do NOT include users who joined after the file was sent
-      const unconfirmedRecipients = Array.from(tracker.expectedRecipients).filter(
-        user => !tracker.confirmedRecipients.has(user)
-      );
-      
-      // Only try to deliver to unconfirmed recipients who are still connected
-      if (unconfirmedRecipients.length > 0) {
-        // Get current users in the room to verify they're still connected
-        const currentRoomUsers = rooms[tracker.roomId] ? 
-          Array.from(rooms[tracker.roomId].users) : [];
-        
-        // Only include unconfirmed recipients who are still in the room
-        const stillConnectedUnconfirmed = unconfirmedRecipients.filter(
-          user => currentRoomUsers.includes(user)
-        );
-        
-        if (stillConnectedUnconfirmed.length > 0) {
-          console.log(`[FILE-DELIVERY-RETRY] Attempt ${tracker.retryCount + 1}/${MAX_RETRIES}: Rebroadcasting ${tracker.filename} to ${stillConnectedUnconfirmed.length} original unconfirmed recipients: ${stillConnectedUnconfirmed.join(', ')}`);
-          
-          // Only send to specific unconfirmed recipients from original list
-          const clients = Array.from(wss.clients).filter((client) => {
-            const c = client as WebSocket & { joinedRoom?: string; joinedUser?: string };
-            return c.joinedRoom === tracker.roomId && 
-                   c.joinedUser && 
-                   stillConnectedUnconfirmed.includes(c.joinedUser) && 
-                   c.readyState === WebSocket.OPEN;
-          });
-          
-          if (clients.length === 0) {
-            console.warn(`[FILE-DELIVERY-RETRY] No connected clients found for ${tracker.filename} - marking as failed`);
-            fileDeliveryTracking.delete(key);
-            continue;
-          }
-          
-          let successCount = 0;
-          for (const client of clients) {
-            try {
-              client.send(JSON.stringify({ type: 'newMessage', message: tracker.message }));
-              successCount++;
-            } catch (error) {
-              console.error(`[FILE-DELIVERY-RETRY] Error sending ${tracker.filename} to specific client:`, error);
-            }
-          }
-          
-          console.log(`[FILE-DELIVERY-RETRY] Sent ${tracker.filename} to ${successCount}/${clients.length} original unconfirmed recipients`);
-          
-          // Update retry tracking
-          tracker.retryCount++;
-          tracker.lastRetryTime = now;
-          tracker.broadcastTime = now; // Update to prevent constant checking
-          
-          if (successCount === 0) {
-            console.warn(`[FILE-DELIVERY-RETRY] Failed to send ${tracker.filename} to any clients - will retry later`);
-          }
+        if (tracker.confirmedRecipients.size === 0) {
+          await broadcastToRoom(tracker.roomId, 'fileDeliveryFailed', {
+            fileName: tracker.filename,
+            transferId: tracker.transferId,
+            originalTimestamp: tracker.timestamp,
+            reason: 'Max retries with zero confirmations'
+          }, tracker.senderId);
         } else {
-          // All original expected recipients have either confirmed or left
-          console.log(`[FILE-DELIVERY] All original recipients of ${tracker.filename} have confirmed or left - cleaning up tracking`);
-          fileDeliveryTracking.delete(key);
-          continue;
+          await broadcastToRoom(tracker.roomId, 'fileDeliveryTimeout', {
+            fileName: tracker.filename,
+            transferId: tracker.transferId,
+            originalTimestamp: tracker.timestamp,
+            unconfirmedRecipients: Array.from(tracker.expectedRecipients).filter(u => !tracker.confirmedRecipients.has(u)),
+            confirmedRecipients: Array.from(tracker.confirmedRecipients)
+          }, tracker.senderId);
         }
-      } else {
-        // All original expected recipients have confirmed
-        console.log(`[FILE-DELIVERY] All original recipients of ${tracker.filename} have confirmed - cleaning up tracking`);
-        
-        // Notify sender of successful delivery to all recipients
-        const deliverySuccess = {
-          type: 'fileDeliverySuccess',
-          fileName: tracker.filename,
-          timestamp: Date.now(),
-          originalTimestamp: tracker.timestamp,
-          confirmedRecipients: Array.from(tracker.confirmedRecipients),
-          totalRecipients: tracker.expectedRecipients.size
-        };
-        
-        // Send success notification to the original sender
-        await broadcastToRoom(tracker.roomId, 'fileDeliverySuccess', deliverySuccess, tracker.senderId);
-        
         fileDeliveryTracking.delete(key);
         continue;
       }
+      if (timeSinceLast < requiredDelay) continue;
+      const stillPending = Array.from(tracker.expectedRecipients).filter(u => !tracker.confirmedRecipients.has(u));
+      if (stillPending.length === 0) {
+        // All confirmed earlier (race)
+        await broadcastToRoom(tracker.roomId, 'fileDeliverySuccess', {
+          fileName: tracker.filename,
+            transferId: tracker.transferId,
+          originalTimestamp: tracker.timestamp,
+          totalRecipients: tracker.expectedRecipients.size,
+          confirmedRecipients: Array.from(tracker.confirmedRecipients)
+        }, tracker.senderId);
+        fileDeliveryTracking.delete(key);
+        continue;
+      }
+      // Retry send ONLY to pending recipients
+      const targetClients = Array.from(wss.clients).filter(c => {
+        const wc = c as WebSocket & { joinedRoom?: string; joinedUser?: string };
+        return wc.readyState === WebSocket.OPEN && wc.joinedRoom === tracker.roomId && wc.joinedUser && stillPending.includes(wc.joinedUser);
+      });
+      for (const c of targetClients) {
+        try {
+          c.send(JSON.stringify({ type: 'newMessage', roomId: tracker.roomId, message: tracker.message }));
+        } catch {}
+      }
+      tracker.retryCount++;
+      tracker.lastRetryTime = now;
+      tracker.broadcastTime = now;
+      tracker.status = 'retrying';
+      await broadcastToRoom(tracker.roomId, 'fileDeliveryRetry', {
+        fileName: tracker.filename,
+        transferId: tracker.transferId,
+        originalTimestamp: tracker.timestamp,
+        attempt: tracker.retryCount,
+        deliveredCount: tracker.confirmedRecipients.size,
+        totalRecipients: tracker.expectedRecipients.size,
+        pendingRecipients: Array.from(tracker.expectedRecipients).filter(u => !tracker.confirmedRecipients.has(u))
+      }, tracker.senderId);
     }
     
     // Clean up old entries
@@ -418,27 +367,27 @@ function cleanupExpiredSubscriptions(): void {
 }
 
 // Clear all push subscriptions (when VAPID keys change)
-function clearAllPushSubscriptions(): void {
-  let clearedCount = 0
+// function clearAllPushSubscriptions(): void {
+//   let clearedCount = 0
   
-  for (const [roomId, subscriptions] of notificationSubscriptions.entries()) {
-    // Remove all subscriptions with push endpoints
-    const subscriptionsWithoutPush = subscriptions.filter(sub => !sub.pushSubscription)
+//   for (const [roomId, subscriptions] of notificationSubscriptions.entries()) {
+//     // Remove all subscriptions with push endpoints
+//     const subscriptionsWithoutPush = subscriptions.filter(sub => !sub.pushSubscription)
     
-    clearedCount += subscriptions.length - subscriptionsWithoutPush.length
+//     clearedCount += subscriptions.length - subscriptionsWithoutPush.length
     
-    if (subscriptionsWithoutPush.length === 0) {
-      notificationSubscriptions.delete(roomId)
-    } else {
-      notificationSubscriptions.set(roomId, subscriptionsWithoutPush)
-    }
-  }
+//     if (subscriptionsWithoutPush.length === 0) {
+//       notificationSubscriptions.delete(roomId)
+//     } else {
+//       notificationSubscriptions.set(roomId, subscriptionsWithoutPush)
+//     }
+//   }
   
-  console.log(`[NOTIFICATIONS] Cleared ${clearedCount} push subscriptions due to VAPID key change`)
+//   console.log(`[NOTIFICATIONS] Cleared ${clearedCount} push subscriptions due to VAPID key change`)
   
-  // Broadcast room updates since some subscriptions were removed
-  broadcastRooms()
-}
+//   // Broadcast room updates since some subscriptions were removed
+//   broadcastRooms()
+// }
 
 async function sendNotificationsForMessage(roomId: string, message: { username: string; text: string }): Promise<void> {
   const activeSubscriptions = getActiveSubscriptions(roomId);
@@ -1035,315 +984,224 @@ wss.on('connection', (ws: WebSocket & { joinedRoom?: string; joinedUser?: string
         }
         
         console.log(`[ws-server] Received sendFile: ${fileName} from ${username} in room ${roomId}`);
-        const message = { username, fileName, fileType, fileData, timestamp, type: 'file', ...(asAudio ? { asAudio: true } : {}) };if (rooms[roomId]) {          // Check if user is actually in the room's participant list
-          if (!rooms[roomId].users.has(username)) {
-            console.log(`[SECURITY] User ${username} attempted to send file to room ${roomId} without being a participant`);
-            
-            // Attempt auto-rejoin for non-password rooms
-            if (!rooms[roomId].locked && rooms[roomId].users.size < rooms[roomId].maxParticipants) {
-              console.log(`[AUTO-REJOIN] Attempting to auto-rejoin user ${username} to non-password room ${roomId} for file sending`);
-              
-              try {
-                // Check if username is already taken
-                if (rooms[roomId].users.has(username)) {
-                  console.log(`[AUTO-REJOIN] Username ${username} already taken in room ${roomId}`);
-                  ws.send(JSON.stringify({ 
-                    type: 'error', 
-                    error: 'Username already taken in this room.',
-                    redirect: `/${roomId}`,
-                    action: 'rejoin'
-                  }));
-                  return;
-                }
-                
-                // Add user to room
-                rooms[roomId].users.add(username);
-                
-                // Update WebSocket tracking
-                ws.joinedRoom = roomId;
-                ws.joinedUser = username;
-                
-                console.log(`[AUTO-REJOIN] Successfully rejoined user ${username} to room ${roomId} for file sending`);
-                
-                // Send join notification message
-                const joinMsg = { username: '', text: `${username} rejoined the chat.`, timestamp: Date.now(), system: true };
-                const usersArr = Array.from(rooms[roomId].users);
-                
-                // Broadcast join message and room info
-                await broadcastToRoom(roomId, 'newMessage', { message: joinMsg });
-                
-                const roomInfo = { 
-                  id: roomId, 
-                  name: rooms[roomId].name, 
-                  count: rooms[roomId].users.size, 
-                  maxParticipants: rooms[roomId].maxParticipants, 
-                  locked: rooms[roomId].locked, 
-                  visibility: rooms[roomId].visibility, 
-                  exists: true, 
-                  owner: rooms[roomId].owner, 
-                  users: usersArr 
-                };
-                await broadcastToRoom(roomId, 'roomInfo', { room: roomInfo });
-                broadcastRooms(); // Broadcast participant count change
-                
-                // Continue with sending the file after successful rejoin
-                console.log(`[AUTO-REJOIN] Proceeding to send file after successful rejoin`);
-                
-              } catch (error) {
-                console.error(`[AUTO-REJOIN] Error during auto-rejoin for user ${username} to room ${roomId} for file sending:`, error);
-                ws.send(JSON.stringify({ 
-                  type: 'error', 
-                  error: 'Failed to rejoin room automatically. Please rejoin manually.',
-                  redirect: `/${roomId}`,
-                  action: 'rejoin'
-                }));
-                return;
-              }
-            } else {
-              // Room is password-protected or full, cannot auto-rejoin
-              const reason = rooms[roomId].locked ? 'password-protected' : 'full';
-              console.log(`[SECURITY] Cannot auto-rejoin user ${username} to ${reason} room ${roomId} for file sending`);
-              ws.send(JSON.stringify({ 
-                type: 'error', 
-                error: `You must join the room before sending files. Room is ${reason}.`,
-                redirect: `/${roomId}`,
-                action: 'rejoin'
-              }));
-              return;
-            }
-          }          console.log('[ws-server] Broadcasting file message to room:', roomId);
-          
-          // Track expected recipients for delivery confirmation
-          // IMPORTANT: Only track users who are CURRENTLY in the room when file is sent
-          // Don't add late joiners to file delivery tracking
-          const expectedRecipients = new Set<string>();
-          if (rooms[roomId]) {
-            for (const user of rooms[roomId].users) {
-              if (user !== username) { // Exclude sender
-                expectedRecipients.add(user);
-              }
+        
+        // Build expected recipients (exclude sender)
+        const expectedRecipients = rooms[roomId]
+          ? new Set(Array.from(rooms[roomId].users).filter(u => u !== username))
+          : new Set<string>();
+        
+        // Generate transferId (stable per transfer)
+        const transferId = (globalThis.crypto && 'randomUUID' in globalThis.crypto)
+          ? (globalThis.crypto as Crypto & { randomUUID(): string }).randomUUID()
+          : `${timestamp}-${Math.random().toString(36).slice(2,10)}`;
+        
+        // Build message with transferId
+        const message = { username, fileName, fileType, fileData, timestamp, type: 'file', transferId, ...(asAudio ? { asAudio: true } : {}) };
+        
+        const recipientsArray = Array.from(expectedRecipients);
+        let deliveredCount = 0;
+        for (const client of wss.clients) {
+          const c = client as WebSocket & { joinedRoom?: string; joinedUser?: string };
+          if (c.readyState === WebSocket.OPEN && c.joinedRoom === roomId && c.joinedUser && c.joinedUser !== username && expectedRecipients.has(c.joinedUser)) {
+            try {
+              c.send(JSON.stringify({ type: 'newMessage', roomId, message }));
+              deliveredCount++;
+            } catch (e) {
+              console.error('[FILE SEND] Error sending file to', c.joinedUser, e);
             }
           }
-          
-          console.log(`[FILE-DELIVERY-TRACK] Tracking ${fileName} for ${expectedRecipients.size} current recipients: ${Array.from(expectedRecipients).join(', ')}`);
-          
-          // Start tracking file delivery - this list is FROZEN and won't include late joiners
-          const trackingKey = `${fileName}-${timestamp}-${username}`;
-          fileDeliveryTracking.set(trackingKey, {
-            roomId,
-            filename: fileName,
-            senderId: username,
-            timestamp,
-            expectedRecipients: new Set(expectedRecipients), // Frozen at time of sending
-            confirmedRecipients: new Set(),
-            message,
-            broadcastTime: Date.now(),
-            retryCount: 0,
-            lastRetryTime: Date.now()
-          });
-          
-          const broadcastSuccess = await broadcastToRoom(roomId, 'newMessage', { message });
-          console.log(`[ws-server] Broadcast result for ${fileName}: ${broadcastSuccess ? 'SUCCESS' : 'FAILED'}`);
-          
-          if (!broadcastSuccess) {
-            console.error(`[ws-server] ❌ Failed to broadcast ${fileName} to room ${roomId} - retrying...`);
-            // Retry broadcast after a short delay
-            setTimeout(async () => {
-              const retrySuccess = await broadcastToRoom(roomId, 'newMessage', { message });
-              console.log(`[ws-server] Retry broadcast result for ${fileName}: ${retrySuccess ? 'SUCCESS' : 'FAILED'}`);
-            }, 500);
-          }
-          
-          // Send acknowledgment to the sender
-          ws.send(JSON.stringify({ 
-            type: 'fileUploadAck', 
-            fileName: fileName,
-            timestamp: timestamp,
-            success: broadcastSuccess
-          }));
-          
-          // Send notifications for file messages too
-          const notificationMessage = {
-            username,
-            text: asAudio ? '🎤 Voice message' : `📎 ${fileName || 'File'}`
-          };
-          await sendNotificationsForMessage(roomId, notificationMessage);
-        }      } else if (msg.type === 'updateRoomSettings') {
-        const { roomId, username, name, maxParticipants, locked, password, visibility, updateId } = msg;        // Prevent updating global room settings
-        if (roomId === 'global') {
-          ws.send(JSON.stringify({ type: 'error', error: 'Global room settings cannot be modified.' }));
+        }
+        console.log(`[FILE SEND] ${fileName} transferId=${transferId} delivered immediately to ${deliveredCount}/${expectedRecipients.size}`);
+        
+        // Track (keyed by transferId)
+        fileDeliveryTracking.set(transferId, {
+          roomId,
+          filename: fileName,
+          senderId: username,
+          timestamp,
+          transferId,
+          expectedRecipients: new Set(expectedRecipients),
+          confirmedRecipients: new Set(),
+          message,
+          broadcastTime: Date.now(),
+          retryCount: 0,
+          lastRetryTime: Date.now(),
+          status: 'pending'
+        });
+        
+        // Acknowledge to sender (do NOT count sender as delivered)
+        ws.send(JSON.stringify({
+          type: 'fileUploadAck',
+          fileName,
+          transferId,
+          timestamp,
+          recipients: expectedRecipients.size,
+          delivered: deliveredCount,
+          success: expectedRecipients.size === 0 ? true : deliveredCount > 0
+        }));
+        
+        if (expectedRecipients.size > 0 && deliveredCount === 0) {
+          // Immediate failure hint
+          await broadcastToRoom(roomId, 'fileDeliveryImmediateFail', {
+            fileName,
+            transferId,
+            originalTimestamp: timestamp,
+            totalRecipients: expectedRecipients.size
+          }, username);
+        } else if (expectedRecipients.size > 0) {
+          await broadcastToRoom(roomId, 'fileDeliveryPending', {
+            fileName,
+            transferId,
+            originalTimestamp: timestamp,
+            totalRecipients: expectedRecipients.size,
+            deliveredCount,
+            pendingRecipients: recipientsArray
+          }, username);
+        } else {
+          await broadcastToRoom(roomId, 'fileDeliveryNoRecipients', { fileName, transferId, originalTimestamp: timestamp }, username);
+        }
+        
+        // Notifications
+        const notificationMessage = { username, text: asAudio ? '🎤 Voice message' : `📎 ${fileName || 'File'}` };
+        await sendNotificationsForMessage(roomId, notificationMessage);
+      } else if (msg.type === 'fileReceived') {
+        const { roomId, username, fileName, senderId, transferId } = msg;
+        console.log(`[FILE-DELIVERY] ✅ fileReceived from ${username} for ${fileName} transferId=${transferId} (sender=${senderId})`);
+        
+        if (!transferId) {
+          console.warn('[FILE-DELIVERY-TRACK] Missing transferId in fileReceived message, ignoring.');
           return;
         }
         
-        if (rooms[roomId] && rooms[roomId].owner === username) {
-          // Prevent setting maxParticipants lower than current user count
-          if (typeof maxParticipants === 'number') {
-            if (maxParticipants < rooms[roomId].users.size) {
-              ws.send(JSON.stringify({ type: 'error', error: `Cannot set max participants below current user count (${rooms[roomId].users.size}).` }));
-              return;
-            }
-            rooms[roomId].maxParticipants = maxParticipants;
-          }
-          if (typeof name === 'string') rooms[roomId].name = name;
-          if (typeof locked === 'boolean') rooms[roomId].locked = locked;
-          if (typeof visibility === 'string' && (visibility === 'public' || visibility === 'private')) {
-            rooms[roomId].visibility = visibility;
-          }
-          if (typeof password === 'string' && password.length > 0) {
-            rooms[roomId].password = bcrypt.hashSync(password, 8);
-            rooms[roomId].locked = true;
-          }
-          if (password === '') {
-            rooms[roomId].password = undefined;
-            rooms[roomId].locked = false;
-          }          // Broadcast updated roomInfo (with users)
-          const usersArr = Array.from(rooms[roomId].users);
-          const roomInfo = { 
-            id: roomId, 
-            name: rooms[roomId].name, 
-            count: rooms[roomId].users.size, 
-            maxParticipants: rooms[roomId].maxParticipants, 
-            locked: rooms[roomId].locked, 
-            visibility: rooms[roomId].visibility, 
-            exists: true, 
-            owner: rooms[roomId].owner, 
-            users: usersArr 
-          };
-          
-          await broadcastToRoom(roomId, 'roomInfo', { room: roomInfo, updateId });
-          
-          // Broadcast updated rooms list to all clients (visibility change affects public listing)
-          broadcastRooms();        } else {
-          ws.send(JSON.stringify({ type: 'error', error: 'Only the room owner can update settings.' }));
-        }      } else if (msg.type === 'subscribeNotifications') {
-        const { roomId, username, deviceId, interval, pushSubscription } = msg;
-        console.log(`[NOTIFICATIONS] Subscribe request: ${username} (device: ${deviceId}) in room ${roomId} for ${interval} minutes`, {
-          hasPushSubscription: !!pushSubscription
-        });
-        
-        if (interval > 0) {
-          addNotificationSubscription(roomId, username, deviceId || 'unknown', interval, pushSubscription);
-          ws.send(JSON.stringify({ 
-            type: 'notificationSubscribed', 
-            roomId, 
-            interval,
-            success: true 
-          }));
-        } else {
-          removeNotificationSubscription(roomId, username, deviceId || 'unknown');
-          ws.send(JSON.stringify({ 
-            type: 'notificationUnsubscribed', 
-            roomId,
-            success: true 
-          }));
-        }      } else if (msg.type === 'getNotificationStatus') {
-        const { roomId, username, deviceId } = msg;
-        const subscriptions = getActiveSubscriptions(roomId);
-        const userSubscription = subscriptions.find(sub => sub.username === username && sub.deviceId === (deviceId || 'unknown'));
-        
-        ws.send(JSON.stringify({
-          type: 'notificationStatus',
-          roomId,
-          subscribed: !!userSubscription,
-          interval: userSubscription?.interval || 0,
-          remainingTime: userSubscription ? Math.max(0, userSubscription.endTime - Date.now()) : 0
-        }));
-      } else if (msg.type === 'getAllNotificationStatus') {
-        const { deviceId } = msg;
-        console.log(`[NOTIFICATIONS] Getting all notification status for device: ${deviceId}`);
-        
-        // Find all subscriptions for this device across all rooms
-        const deviceSubscriptions: Array<{
-          roomId: string;
-          interval: number;
-          remainingTime: number;
-          username: string;
-        }> = [];
-        
-        for (const subscriptions of notificationSubscriptions.values()) {
-          for (const sub of subscriptions) {
-            if (sub.deviceId === deviceId) {
-              const remainingTime = Math.max(0, sub.endTime - Date.now());
-              if (remainingTime > 0) { // Only include active subscriptions
-                deviceSubscriptions.push({
-                  roomId: sub.roomId,
-                  interval: sub.interval,
-                  remainingTime,
-                  username: sub.username
-                });
-              }
-            }
-          }
-        }
-        
-        console.log(`[NOTIFICATIONS] Found ${deviceSubscriptions.length} active subscriptions for device ${deviceId}`);
-        
-        ws.send(JSON.stringify({
-          type: 'allNotificationStatus',
-          subscriptions: deviceSubscriptions
-        }));} else if (msg.type === 'clearAllPushSubscriptions') {
-        // Clear all push subscriptions (when VAPID keys change)
-        console.log('[NOTIFICATIONS] Received request to clear all push subscriptions due to VAPID key change');
-        clearAllPushSubscriptions();
-        ws.send(JSON.stringify({
-          type: 'pushSubscriptionsCleared',
-          success: true
-        }));      } else if (msg.type === 'fileReceived') {
-        const { roomId, username, fileName, senderId, timestamp } = msg;
-        console.log(`[FILE-DELIVERY] ✅ File confirmation received: ${senderId} → ${username}: ${fileName}`);
-        console.log(`[FILE-DELIVERY-DEBUG] Confirmation details:`, {
-          roomId,
-          username,
-          fileName,
-          senderId,
-          timestamp,
-          originalTimestamp: timestamp
-        });
-        
         // Validate that the receiver is actually in the room
         if (rooms[roomId] && rooms[roomId].users.has(username)) {
-          // Update delivery tracking
-          const trackingKey = `${fileName}-${timestamp}-${senderId}`;
-          console.log(`[FILE-DELIVERY-DEBUG] Looking for tracking key: "${trackingKey}"`);
-          console.log(`[FILE-DELIVERY-DEBUG] Available tracking keys:`, Array.from(fileDeliveryTracking.keys()));
-          
-          const tracker = fileDeliveryTracking.get(trackingKey);
-          
-          if (tracker && tracker.expectedRecipients.has(username)) {
-            tracker.confirmedRecipients.add(username);
-            console.log(`[FILE-DELIVERY-TRACK] ✅ ${fileName}: ${tracker.confirmedRecipients.size}/${tracker.expectedRecipients.size} confirmations received`);
-            
-            // Check if all recipients have confirmed
-            if (tracker.confirmedRecipients.size >= tracker.expectedRecipients.size) {
-              console.log(`[FILE-DELIVERY-TRACK] ✅ ${fileName} fully delivered to all ${tracker.expectedRecipients.size} recipients`);
-              fileDeliveryTracking.delete(trackingKey);
+          const tracker = fileDeliveryTracking.get(transferId);
+          if (!tracker) {
+            console.warn(`[FILE-DELIVERY-TRACK] No tracker found for transferId=${transferId} (file=${fileName})`);
+            if (fileDeliveryTracking.size > 0) {
+              console.log('[FILE-DELIVERY-TRACK] Active trackers:');
+              for (const [k, t] of fileDeliveryTracking.entries()) {
+                console.log(`  - ${k} file=${t.filename} sender=${t.senderId} ts=${t.timestamp} expected=${Array.from(t.expectedRecipients).join(',')} confirmed=${Array.from(t.confirmedRecipients).join(',')}`);
+              }
             }
-          } else if (!tracker) {
-            console.warn(`[FILE-DELIVERY-TRACK] ⚠️ No tracking found for key "${trackingKey}"`);
-            console.log(`[FILE-DELIVERY-TRACK] Available trackers:`);
-            for (const [key, t] of fileDeliveryTracking.entries()) {
-              console.log(`  - "${key}": sender=${t.senderId}, filename=${t.filename}, timestamp=${t.timestamp}, expected=[${Array.from(t.expectedRecipients).join(',')}], confirmed=[${Array.from(t.confirmedRecipients).join(',')}]`);
+            return;
+          }
+          if (tracker.senderId !== senderId) {
+            console.log(`[FILE-DELIVERY-TRACK] Sender mismatch for transferId=${transferId}: tracker.senderId=${tracker.senderId} provided=${senderId}`);
+          }
+          if (tracker.expectedRecipients.has(username)) {
+            tracker.confirmedRecipients.add(username);
+            console.log(`[FILE-DELIVERY-TRACK] Progress transferId=${transferId} ${tracker.confirmedRecipients.size}/${tracker.expectedRecipients.size}`);
+            await broadcastToRoom(roomId, 'fileDeliveryProgress', {
+              fileName: tracker.filename,
+              transferId: tracker.transferId,
+              originalTimestamp: tracker.timestamp,
+              totalRecipients: tracker.expectedRecipients.size,
+              deliveredCount: tracker.confirmedRecipients.size,
+              deliveredRecipients: Array.from(tracker.confirmedRecipients),
+              pendingRecipients: Array.from(tracker.expectedRecipients).filter(u => !tracker.confirmedRecipients.has(u))
+            }, tracker.senderId);
+            if (tracker.confirmedRecipients.size >= tracker.expectedRecipients.size) {
+              tracker.status = 'complete';
+              await broadcastToRoom(roomId, 'fileDeliverySuccess', {
+                fileName: tracker.filename,
+                transferId: tracker.transferId,
+                originalTimestamp: tracker.timestamp,
+                totalRecipients: tracker.expectedRecipients.size,
+                confirmedRecipients: Array.from(tracker.confirmedRecipients)
+              }, tracker.senderId);
+              fileDeliveryTracking.delete(transferId);
             }
           } else {
-            console.warn(`[FILE-DELIVERY-TRACK] ⚠️ ${username} not in expected recipients for ${fileName}`);
-            console.log(`[FILE-DELIVERY-TRACK] Expected recipients: [${Array.from(tracker.expectedRecipients).join(', ')}]`);
-            console.log(`[FILE-DELIVERY-TRACK] Confirmed recipients: [${Array.from(tracker.confirmedRecipients).join(', ')}]`);
+            console.warn(`[FILE-DELIVERY-TRACK] ${username} not expected for transferId=${transferId}`);
+            console.log(`[FILE-DELIVERY-TRACK] Expected: ${Array.from(tracker.expectedRecipients).join(', ')} | Confirmed: ${Array.from(tracker.confirmedRecipients).join(', ')}`);
           }
-          
-          // Send confirmation back to the original sender if they're still connected
-          const deliveryConfirmation = {
-            type: 'fileDeliveryConfirmed',
-            fileName,
+          // Per-recipient confirmation to sender
+          await broadcastToRoom(roomId, 'fileDeliveryConfirmed', {
+            fileName: tracker.filename,
+            transferId: tracker.transferId,
             receiverUsername: username,
             timestamp: Date.now(),
-            originalTimestamp: timestamp
-          };
-          
-          // Find and notify the sender
-          await broadcastToRoom(roomId, 'fileDeliveryConfirmed', deliveryConfirmation, senderId);
+            originalTimestamp: tracker.timestamp
+          }, tracker.senderId);
+          // Ack to receiver to stop local confirmation retries
+          await broadcastToRoom(roomId, 'fileDeliveryReceiptAck', {
+            fileName: tracker.filename,
+            transferId: tracker.transferId,
+            originalTimestamp: tracker.timestamp
+          }, username);
         } else {
           console.log(`[SECURITY] User ${username} attempted to confirm file receipt for room ${roomId} without being a participant`);
         }
+      } else if (msg.type === 'subscribeNotifications') {
+        const { roomId, username, deviceId, interval, pushSubscription } = msg
+        if (!roomId || !username || !deviceId || typeof interval !== 'number') {
+          ws.send(JSON.stringify({ type: 'notificationStatus', roomId, username, subscribed: false, error: 'Invalid subscription payload' }))
+          return
+        }
+        // interval === 0 means unsubscribe
+        if (interval <= 0) {
+          removeNotificationSubscription(roomId, username, deviceId)
+          ws.send(JSON.stringify({ type: 'notificationStatus', roomId, username, subscribed: false, interval: 0, remainingTime: 0 }))
+          return
+        }
+        // Normalize / validate interval (minutes)
+        const clampedInterval = Math.max(1, Math.min(1440, interval))
+        // Map pushSubscription from client (if provided) to server structure
+        let serverPushSub: WebPushSubscription | undefined
+        if (pushSubscription && pushSubscription.endpoint && pushSubscription.keys && pushSubscription.keys.p256dh && pushSubscription.keys.auth) {
+            serverPushSub = {
+              endpoint: pushSubscription.endpoint,
+              keys: {
+                p256dh: pushSubscription.keys.p256dh,
+                auth: pushSubscription.keys.auth
+              }
+            }
+        }
+        addNotificationSubscription(roomId, username, deviceId, clampedInterval, serverPushSub)
+        const remainingTime = clampedInterval * 60 * 1000
+        ws.send(JSON.stringify({
+          type: 'notificationStatus',
+          roomId,
+          username,
+          subscribed: true,
+          interval: clampedInterval,
+          remainingTime
+        }))
+        return
+      } else if (msg.type === 'getNotificationStatus') {
+        const { roomId, username, deviceId } = msg
+        if (!roomId || !deviceId) {
+          ws.send(JSON.stringify({ type: 'notificationStatus', roomId, username, subscribed: false, interval: 0, remainingTime: 0, error: 'Missing roomId or deviceId' }))
+          return
+        }
+        const subs = getActiveSubscriptions(roomId)
+        const now = Date.now()
+        const sub = subs.find(s => s.deviceId === deviceId)
+        if (sub) {
+          const remainingTime = Math.max(0, sub.endTime - now)
+          ws.send(JSON.stringify({ type: 'notificationStatus', roomId, username: sub.username, subscribed: true, interval: sub.interval, remainingTime }))
+        } else {
+          ws.send(JSON.stringify({ type: 'notificationStatus', roomId, username, subscribed: false, interval: 0, remainingTime: 0 }))
+        }
+        return
+      } else if (msg.type === 'getAllNotificationStatus') {
+        const { deviceId } = msg
+        if (!deviceId) {
+          ws.send(JSON.stringify({ type: 'allNotificationStatus', subscriptions: [], error: 'Missing deviceId' }))
+          return
+        }
+        const now = Date.now()
+        const all: Array<{ roomId: string; username: string; interval: number; remainingTime: number }> = []
+        for (const [roomId, subs] of notificationSubscriptions.entries()) {
+          for (const sub of subs) {
+            if (sub.deviceId === deviceId && sub.endTime > now) {
+              all.push({ roomId, username: sub.username, interval: sub.interval, remainingTime: sub.endTime - now })
+            }
+          }
+        }
+        ws.send(JSON.stringify({ type: 'allNotificationStatus', subscriptions: all }))
+        return
       } else if (msg.type === 'leaveRoom') {
         const { roomId, username } = msg;
         if (joinedRoom === roomId && joinedUser === username && rooms[roomId]) {
@@ -1703,6 +1561,7 @@ setInterval(() => {
       
       if (inactive || deadConnection) {
         toRemove.push(username)
+
         console.log(`[WEBRTC] Removing inactive/dead call peer: ${username} from room ${roomId} (inactive: ${inactive}, dead: ${deadConnection})`)
       }
     })

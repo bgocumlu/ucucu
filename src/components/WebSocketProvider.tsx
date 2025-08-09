@@ -61,25 +61,27 @@ export const WebSocketProvider = ({ children }: { children: React.ReactNode }) =
             return;
           }
           
-          // Handle file delivery status messages
-          if (msg.type === 'fileDeliverySuccess' || msg.type === 'fileDeliveryFailed' || msg.type === 'fileDeliveryTimeout') {
-            console.log('[WebSocketProvider] Received file delivery status:', msg);
-            
-            // Show user-friendly notification based on delivery status
-            if (typeof window !== 'undefined') {
-              if (msg.type === 'fileDeliverySuccess') {
-                // You could show a subtle success indicator
-                console.log(`✅ File "${msg.fileName}" delivered to all ${msg.totalRecipients} recipients`);
-              } else if (msg.type === 'fileDeliveryFailed') {
-                const unconfirmed = msg.unconfirmedRecipients?.join(', ') || 'some recipients';
-                alert(`❌ File delivery failed: "${msg.fileName}" could not be delivered to ${unconfirmed}. Please try sending the file again.`);
-              } else if (msg.type === 'fileDeliveryTimeout') {
-                const unconfirmed = msg.unconfirmedRecipients?.join(', ') || 'some recipients';
-                alert(`⚠️ File delivery timeout: "${msg.fileName}" may not have been received by ${unconfirmed}. You may want to check with them or resend the file.`);
+          // Handle file delivery status messages (extended with new event types)
+          if (new Set([
+            'fileDeliveryPending',
+            'fileDeliveryProgress',
+            'fileDeliverySuccess',
+            'fileDeliveryFailed',
+            'fileDeliveryTimeout',
+            'fileDeliveryNoRecipients',
+            'fileDeliveryImmediateFail',
+            'fileDeliveryRetry',
+            'fileDeliveryReceiptAck',
+            'fileDeliveryConfirmed'
+          ]).has(msg.type)) {
+            console.log('[WebSocketProvider] File delivery event:', msg);
+            setLastMessage((prev) => {
+              if (JSON.stringify(prev) !== JSON.stringify(msg)) {
+                if (onMessageRef.current) onMessageRef.current(msg);
+                return msg;
               }
-            }
-            
-            // Don't set this as lastMessage since it's a status notification
+              return prev;
+            });
             return;
           }
             // Handle push notifications

@@ -13,6 +13,7 @@ import { RoomSettingsModal } from "@/components/room-settings-modal"
 import { RoomLeaveDialog } from "@/components/room-leave-dialog"
 import { NotificationBell } from "@/components/notification-bell"
 import { useWebSocket } from "@/components/WebSocketProvider"
+import type { WSMessage } from "@/components/WebSocketProvider"
 
 interface Message {
   id: string
@@ -59,6 +60,8 @@ export default function ChatPage() {
     sentAt: number;
     deliveredTo: Set<string>;
     totalRecipients: number;
+    status?: string;
+    attempts?: number;
   }>>(new Map())
   const [showLeaveDialog, setShowLeaveDialog] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -70,7 +73,12 @@ export default function ChatPage() {
     timeout: NodeJS.Timeout
   } | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
-    // Join room on mount
+  interface PendingConfirmationPayload { type:'fileReceived'; roomId:string; fileName:string; senderId:string; username:string; timestamp:number; transferId?: string }
+  const pendingFileConfirmations = useRef<Map<string,{attempts:number;lastAttempt:number;payload:PendingConfirmationPayload}>>(new Map());
+  // Map provisional file key (fileName-timestamp) -> transferId once ack arrives
+  const provisionalFileKeys = useRef<Map<string,string>>(new Map());
+
+  // Join room on mount
   useEffect(() => {
     // Check for username in sessionStorage
     const username = sessionStorage.getItem(`username:${roomId}`) || ""
@@ -114,9 +122,8 @@ export default function ChatPage() {
     }    if (lastMessage.type === "newMessage" && lastMessage.roomId === roomId) {
       type IncomingMsg =
         | { username: string; text: string; timestamp: number; system?: boolean; isAI?: boolean; isTyping?: boolean; type?: undefined }
-        | { username: string; fileName: string; fileType: string; fileData: string; timestamp: number; type: "file"; asAudio?: boolean }
+        | { username: string; fileName: string; fileType: string; fileData: string; timestamp: number; type: "file"; asAudio?: boolean; transferId?: string }
         | { username: string; type: "fileUploadStart" | "fileUploadEnd"; fileName?: string; timestamp: number };
-      
       const msg = lastMessage.message as IncomingMsg;
       
       // Handle file upload status messages
@@ -130,6 +137,10 @@ export default function ChatPage() {
         });      } else if (msg.type === "file" && (msg.asAudio || (msg.fileType && msg.fileType.startsWith('audio/')))) {
         // Only add if it's not from current user (we already added optimistically)
         if (msg.username !== currentUser) {
+          // Require transferId for tracking
+          if (!msg.transferId) {
+            console.warn('[CHAT] Received audio/file without transferId, ignoring confirmation logic');
+          }
           setMessages((prev) => [
             ...prev,
             {
@@ -143,21 +154,27 @@ export default function ChatPage() {
               fileName: msg.fileName,
             },
           ]);
+          if (msg.transferId) {
             // Send confirmation that file was received
-          const confirmationMessage = {
-            type: "fileReceived",
-            roomId,
-            fileName: msg.fileName,
-            senderId: msg.username,
-            username: currentUser,
-            timestamp: msg.timestamp
-          };
-          console.log('[CHAT] Sending file received confirmation:', confirmationMessage);
-          send(confirmationMessage);
+            const confirmationMessage: PendingConfirmationPayload = {
+              type: 'fileReceived',
+              roomId,
+              fileName: msg.fileName,
+              senderId: msg.username,
+              username: currentUser,
+              timestamp: msg.timestamp,
+              transferId: msg.transferId
+            };
+            console.log('[CHAT] Sending file received confirmation:', confirmationMessage);
+            send(confirmationMessage as unknown as WSMessage);
+            pendingFileConfirmations.current.set(msg.transferId,{attempts:1,lastAttempt:Date.now(),payload:confirmationMessage});
+          }
         }
       } else if (msg.type === "file") {
-        // Only add if it's not from current user (we already added optimistically)
         if (msg.username !== currentUser) {
+          if (!msg.transferId) {
+            console.warn('[CHAT] Received file without transferId, ignoring confirmation logic');
+          }
           setMessages((prev) => [
             ...prev,
             {
@@ -171,18 +188,20 @@ export default function ChatPage() {
               fileName: msg.fileName,
             },
           ]);
-          
-          // Send confirmation that file was received
-          const confirmationMessage = {
-            type: "fileReceived",
-            roomId,
-            fileName: msg.fileName,
-            senderId: msg.username,
-            username: currentUser,
-            timestamp: msg.timestamp
-          };
-          console.log('[CHAT] Sending file received confirmation:', confirmationMessage);
-          send(confirmationMessage);
+          if (msg.transferId) {
+            const confirmationMessage: PendingConfirmationPayload = {
+              type: 'fileReceived',
+              roomId,
+              fileName: msg.fileName,
+              senderId: msg.username,
+              username: currentUser,
+              timestamp: msg.timestamp,
+              transferId: msg.transferId
+            };
+            console.log('[CHAT] Sending file received confirmation:', confirmationMessage);
+            send(confirmationMessage as unknown as WSMessage);
+            pendingFileConfirmations.current.set(msg.transferId,{attempts:1,lastAttempt:Date.now(),payload:confirmationMessage});
+          }
         }
       } else {
         // Handle regular text messages (including AI messages)
@@ -297,37 +316,86 @@ export default function ChatPage() {
         )      }
     }    // Handle file upload acknowledgments
     if (lastMessage.type === "fileUploadAck") {
-      const { fileName, success } = lastMessage;
-      
-      if (success) {
-        console.log(`[FILE UPLOAD] Successfully uploaded: ${fileName}`);
-      } else {
-        console.error(`[FILE UPLOAD] Failed to upload: ${fileName}`);
+      const { fileName, success, transferId, timestamp, recipients } = lastMessage as unknown as { fileName:string; success:boolean; transferId?:string; timestamp:number; recipients:number };
+      if (transferId) {
+        // Migrate provisional key (if exists) to transferId
+        const provisionalKey = `${fileName}-${timestamp}`;
+        setFileDeliveryStatus(prev => {
+          const updated = new Map(prev);
+          const provisional = updated.get(provisionalKey);
+          if (provisional) {
+            updated.delete(provisionalKey);
+            provisionalFileKeys.current.set(provisionalKey, transferId);
+            // Preserve delivered info
+            updated.set(transferId, { ...provisional, status: success ? 'pending' : 'immediate-fail' });
+          } else if (!updated.has(transferId)) {
+            updated.set(transferId, { fileName, sentAt: Date.now(), deliveredTo: new Set(), totalRecipients: recipients || 0, status: success ? 'pending' : 'immediate-fail' });
+          }
+          return updated;
+        });
       }
-    }    // Handle file delivery confirmations
+    }
+    // Handle file delivery confirmations (sender perspective)
     if (lastMessage.type === "fileDeliveryConfirmed") {
       const confirmationData = lastMessage as unknown as {
         fileName: string;
         receiverUsername: string;
         timestamp: number;
         originalTimestamp: number;
+        transferId?: string;
       };
-      console.log(`[FILE DELIVERY] ✅ ${confirmationData.fileName} confirmed delivered to ${confirmationData.receiverUsername} at ${new Date(confirmationData.timestamp).toISOString()}`);
-      
-      // Update delivery tracking
+      const key = confirmationData.transferId;
+      if (!key) return; // ignore if missing
       setFileDeliveryStatus(prev => {
         const updated = new Map(prev);
-        const key = `${confirmationData.fileName}-${confirmationData.originalTimestamp}`;
         const existing = updated.get(key);
         if (existing) {
           existing.deliveredTo.add(confirmationData.receiverUsername);
           updated.set(key, existing);
-          
-          // Log progress
-          console.log(`[FILE DELIVERY] ${confirmationData.fileName}: ${existing.deliveredTo.size}/${existing.totalRecipients} recipients confirmed`);
         }
         return updated;
       });
+    }
+    // Unified handling of delivery state events keyed by transferId
+    const deliveryEvents = new Set(['fileDeliveryPending','fileDeliveryProgress','fileDeliverySuccess','fileDeliveryFailed','fileDeliveryTimeout','fileDeliveryImmediateFail','fileDeliveryRetry']);
+    if (deliveryEvents.has(lastMessage.type) && (lastMessage as WSMessage & { transferId?: string }).transferId) {
+      const lm = lastMessage as WSMessage & { transferId: string; fileName?: string; totalRecipients?: number; deliveredRecipients?: string[]; confirmedRecipients?: string[]; attempt?: number };
+      const key = lm.transferId;
+      setFileDeliveryStatus(prev => {
+        const updated = new Map(prev);
+        let rec = updated.get(key);
+        if (!rec) {
+          rec = { fileName: String(lm.fileName), sentAt: Date.now(), deliveredTo: new Set(), totalRecipients: Number(lm.totalRecipients||0), status: 'pending', attempts:0 };
+        }
+        if (lm.type === 'fileDeliveryPending') {
+          rec.totalRecipients = Number(lm.totalRecipients||rec.totalRecipients);
+          rec.status = 'pending';
+        } else if (lm.type === 'fileDeliveryProgress') {
+          rec.deliveredTo = new Set(lm.deliveredRecipients || []);
+          rec.totalRecipients = Number(lm.totalRecipients||rec.totalRecipients);
+          rec.status = 'progress';
+        } else if (lm.type === 'fileDeliveryRetry') {
+          rec.status = 'retrying';
+          rec.attempts = Number(lm.attempt ?? rec.attempts ?? 0);
+        } else if (lm.type === 'fileDeliverySuccess') {
+          rec.deliveredTo = new Set(lm.confirmedRecipients || []);
+          rec.status = 'complete';
+        } else if (lm.type === 'fileDeliveryFailed') {
+          rec.status = 'failed';
+        } else if (lm.type === 'fileDeliveryTimeout') {
+          rec.status = 'timeout';
+        } else if (lm.type === 'fileDeliveryImmediateFail') {
+          rec.status = 'immediate-fail';
+        }
+        updated.set(key, rec);
+        return updated;
+      });
+    }
+    if (lastMessage.type === 'fileDeliveryReceiptAck') {
+      const ackKey = (lastMessage as WSMessage & { transferId?: string }).transferId;
+      if (ackKey && pendingFileConfirmations.current.has(ackKey)) {
+        pendingFileConfirmations.current.delete(ackKey);
+      }
     }
   }, [lastMessage, roomId, currentUser, pendingUpdate, send])
   // Auto-scroll to bottom
@@ -341,18 +409,68 @@ export default function ChatPage() {
   useEffect(() => {
     const interval = setInterval(() => {
       const now = Date.now();
-      const DELIVERY_TIMEOUT = 10000; // 10 seconds
-      
-      fileDeliveryStatus.forEach((status, key) => {
+      const WARNING_TIMEOUT = 15000; // warn after 15s
+      const FAIL_TIMEOUT = 30000; // mark failed after 30s (matches server cleanup window)
+      const CLEANUP_TIMEOUT = 60000; // remove local tracking after 60s
+
+      // We mutate via a staged copy only when needed to avoid unnecessary re-renders
+      let needsUpdate = false;
+      const updated = new Map(fileDeliveryStatus);
+
+  fileDeliveryStatus.forEach((status, key) => {
+        const deliveredCount = status.deliveredTo.size;
+        const total = status.totalRecipients;
         const timeSinceSent = now - status.sentAt;
-        if (timeSinceSent > DELIVERY_TIMEOUT && status.deliveredTo.size < status.totalRecipients) {
-          console.warn(`[FILE DELIVERY] ⚠️ ${status.fileName} may not have reached all recipients (${status.deliveredTo.size}/${status.totalRecipients} confirmed)`);
+
+        // Skip completed or already failed states (including server-declared failures/timeouts)
+        const terminalStates: Array<string> = ['complete','failed','timeout','immediate-fail','failed-local'];
+        if (status.status && terminalStates.includes(status.status)) return;
+
+        // Warning stage
+        // Augment status object with optional flags without using any
+        type AugmentedStatus = typeof status & { warned?: boolean; failureNotified?: boolean };
+        const s = status as AugmentedStatus;
+        if (timeSinceSent > WARNING_TIMEOUT && deliveredCount < total && !s.warned) {
+          console.warn(`[FILE DELIVERY] Possible delay for ${status.fileName} (${deliveredCount}/${total})`);
+          s.warned = true;
+          needsUpdate = true;
+        }
+
+        // Failure stage (local) – server should also emit, but if not received we fallback
+        if (timeSinceSent > FAIL_TIMEOUT && deliveredCount < total) {
+          if (status.status !== 'failed-local') {
+            status.status = 'failed-local';
+            if (!s.failureNotified) {
+              s.failureNotified = true;
+              // Append a non-intrusive system message instead of alert()
+              setMessages(prev => [...prev, {
+                id: `filefail_${key}_${Date.now()}`,
+                username: '',
+                text: `File delivery failed: ${status.fileName}. Not all recipients confirmed.`,
+                content: `File delivery failed: ${status.fileName}. Not all recipients confirmed.`,
+                type: 'system',
+                isOwn: false,
+                timestamp: new Date(),
+                system: true
+              }]);
+            }
+            needsUpdate = true;
+          }
+        }
+
+        // Cleanup very old pending entries to prevent infinite warnings
+        if (timeSinceSent > CLEANUP_TIMEOUT && deliveredCount < total) {
+          updated.delete(key);
+          needsUpdate = true;
         }
       });
-    }, 5000); // Check every 5 seconds
 
+      if (needsUpdate) {
+        setFileDeliveryStatus(updated);
+      }
+    }, 5000);
     return () => clearInterval(interval);
-  }, [fileDeliveryStatus])
+  }, [fileDeliveryStatus, setMessages])
 
   // Handle scroll to detect if user is at bottom
   const handleScroll = () => {
@@ -436,13 +554,14 @@ export default function ChatPage() {
                 isOwn: true,
                 fileData: base64,
                 fileName: file.name,
+                transferId: undefined // server assigns
               };
               
               setMessages(prev => [...prev, optimisticMessage]);
                 // Send the file to server
               try {
                 // Initialize delivery tracking for this file
-                const deliveryKey = `${file.name}-${timestamp}`;
+                const deliveryKey = `${file.name}-${timestamp}`; // provisional key
                 const totalRecipients = Math.max(1, participants.length - 1); // Exclude sender
                 setFileDeliveryStatus(prev => {
                   const updated = new Map(prev);
@@ -450,10 +569,12 @@ export default function ChatPage() {
                     fileName: file.name,
                     sentAt: timestamp,
                     deliveredTo: new Set(),
-                    totalRecipients: totalRecipients
+                    totalRecipients: totalRecipients,
+                    status: 'pending'
                   });
                   return updated;
                 });
+                provisionalFileKeys.current.set(deliveryKey, '');
                 
                 if (isAudio) {
                   send({
