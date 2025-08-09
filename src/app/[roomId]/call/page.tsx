@@ -174,10 +174,6 @@ export default function CallPage() {
   }, [createAndSendOffer])
   const [muted, setMuted] = useState(false)
   const [videoEnabled, setVideoEnabled] = useState(false)
-  // Video preflight modal state
-  const [showVideoPreflight, setShowVideoPreflight] = useState(false)
-  const preflightStreamRef = useRef<MediaStream | null>(null)
-  // (optional future) enablingVideo spinner removed for now
   const [screenSharing, setScreenSharing] = useState(false)
   const [expandedParticipants, setExpandedParticipants] = useState<Set<string>>(new Set())
   const [localPreviewExpanded, setLocalPreviewExpanded] = useState(false)
@@ -195,6 +191,62 @@ export default function CallPage() {
   }>({ outbound: { audio: 0, video: 0, screen: 0, total: 0 }, inbound: { audio: 0, video: 0, screen: 0, total: 0 }, lastUpdated: null })
   // Internal baseline maps to accumulate deltas (report IDs -> bytes)
   const usageBaselinesRef = useRef<{ outbound: Record<string, number>; inbound: Record<string, number> }>({ outbound: {}, inbound: {} })
+  // Per-peer inbound liveness (stalled detection)
+  const inboundLivenessRef = useRef<Record<string, { audioBytes: number; videoBytes: number; stagnantAudio: number; stagnantVideo: number }>>({})
+  // Remote audio analyser for silence detection
+  const remoteAudioAnalyserRef = useRef<Record<string, { analyser: AnalyserNode; ctx: AudioContext; data: Uint8Array; silentCycles: number }>>({})
+  // Escalation cooldown tracking to prevent thrash across detectors
+  const lastEscalationRef = useRef<Record<string, { lastRenegotiate: number; lastIce: number; lastRebuild: number }>>({})
+  // Auto force-sync cooldown
+  const lastAutoForceSyncRef = useRef<number>(0)
+  const [lastAutoForceSyncAt, setLastAutoForceSyncAt] = useState<number | null>(null)
+
+  // Centralized, rate-limited escalation helper used by all reliability detectors
+  const escalateConnection = useCallback((peerId: string, stage: 'renegotiate' | 'ice' | 'rebuild', reason: string) => {
+    const now = Date.now()
+    const rec = (lastEscalationRef.current[peerId] ||= { lastRenegotiate: 0, lastIce: 0, lastRebuild: 0 })
+    // Minimum spacing (ms)
+    const MIN_RENEGOTIATE = 5000
+    const MIN_ICE = 12000
+    const MIN_REBUILD = 20000
+    // If a higher-level action occurred recently, suppress lower levels
+    if (stage === 'renegotiate') {
+      if (now - rec.lastRebuild < MIN_REBUILD || now - rec.lastIce < MIN_ICE) return false
+      if (now - rec.lastRenegotiate < MIN_RENEGOTIATE) return false
+    } else if (stage === 'ice') {
+      if (now - rec.lastRebuild < MIN_REBUILD) return false
+      if (now - rec.lastIce < MIN_ICE) return false
+    } else if (stage === 'rebuild') {
+      if (now - rec.lastRebuild < MIN_REBUILD) return false
+    }
+    const pc = peerConnections.current[peerId]
+    if (!pc) return false
+    if (stage === 'renegotiate') {
+      if (pc.signalingState === 'stable') {
+        console.log(`🛡️ [Escalate] Renegotiate ${peerId} (${reason})`)
+        scheduleNegotiation(peerId, pc, reason)
+        rec.lastRenegotiate = now
+        return true
+      }
+      return false
+    }
+    if (stage === 'ice') {
+      if (pc.signalingState === 'stable') {
+        console.log(`🛡️ [Escalate] ICE restart ${peerId} (${reason})`)
+        createAndSendOffer(peerId, pc, reason, true)
+        rec.lastIce = now
+        return true
+      }
+      return false
+    }
+    // rebuild
+    console.log(`🛡️ [Escalate] Rebuild PeerConnection for ${peerId} (${reason})`)
+    recreatePeerConnection(peerId)
+    rec.lastRebuild = now
+    return true
+  // recreatePeerConnection intentionally excluded: recreated via late-binding after createPeerConnection; stable ref inside escalation paths.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scheduleNegotiation, createAndSendOffer])
 
   // ===== CAPABILITIES & DATA CHANNEL MANAGEMENT (ensure declared after dependent state) =====
   const dataChannelsRef = useRef<Record<string, RTCDataChannel>>({})
@@ -919,36 +971,31 @@ export default function CallPage() {
   const scheduleReconnectionRef = useRef<(peerId: string, reason: string) => void>(() => {})
   const scheduleReconnection = useCallback((peerId: string, reason: string) => scheduleReconnectionRef.current(peerId, reason), [])
 
-  async function recreatePeerConnection(peerId: string) {
-    console.log(`Recreating peer connection for ${peerId}`)
-    
-    // Close existing connection
-    if (peerConnections.current[peerId]) {
-      peerConnections.current[peerId].close()
-      delete peerConnections.current[peerId]
-    }
-    
-    // Create new connection
-    const newPc = createPeerConnection(peerId)
-    
-    // Trigger new negotiation
-    try {
-      const offer = await newPc.createOffer()
-      await newPc.setLocalDescription(offer)
-      if (wsRef.current) {
-        wsRef.current.send(JSON.stringify({ 
-          type: "call-offer", 
-          roomId, 
-          from: currentUser, 
-          to: peerId, 
-          payload: newPc.localDescription 
-        }))
+  const recreatePeerConnection = (peerId: string) => {
+    (async () => {
+      console.log(`Recreating peer connection for ${peerId}`)
+      const existing = peerConnections.current[peerId]
+      if (existing) {
+        try { existing.close() } catch {}
+        delete peerConnections.current[peerId]
       }
-    } catch (error) {
-      console.error('Error in recreated peer connection offer:', error)
-    }
-  // recreatePeerConnection does not directly depend on createPeerConnection stable identity for its logic
-  // (it only closes and re-creates via existing factory when invoked); omit from deps to avoid forward ref
+      const newPc = createPeerConnection(peerId)
+      try {
+        const offer = await newPc.createOffer()
+        await newPc.setLocalDescription(offer)
+        if (wsRef.current) {
+          wsRef.current.send(JSON.stringify({
+            type: 'call-offer',
+            roomId,
+            from: currentUser,
+            to: peerId,
+            payload: newPc.localDescription
+          }))
+        }
+      } catch (error) {
+        console.error('Error in recreated peer connection offer:', error)
+      }
+    })()
   }
 
   // Now implement reconnection logic with stable recreatePeerConnection
@@ -1002,6 +1049,43 @@ export default function CallPage() {
     }
     
     console.log(`🔗 ⚡ Creating ROBUST peer connection for ${remote} with health monitoring`)
+
+    // --- STABLE M-LINE FOUNDATION (late join fix) ---
+    // Some late join scenarios showed remote peers not receiving existing audio/video until a second renegotiation.
+    // We proactively create sendrecv transceivers for audio & video so the SDP advertises stable m-lines
+    // regardless of current track availability. Real tracks (or arbitrary placeholders) are then bound.
+    // This prevents "cut off" media for peers joining after initial negotiation bursts.
+  try {
+      // Audio
+      let audioTransceiver = pc.getTransceivers().find(t => t.receiver.track.kind === 'audio')
+      if (!audioTransceiver) {
+        audioTransceiver = pc.addTransceiver('audio', { direction: 'sendrecv' })
+      } else if (audioTransceiver.direction !== 'sendrecv') {
+        audioTransceiver.direction = 'sendrecv'
+      }
+      // Video
+      let videoTransceiver = pc.getTransceivers().find(t => t.receiver.track.kind === 'video')
+      if (!videoTransceiver) {
+        videoTransceiver = pc.addTransceiver('video', { direction: 'sendrecv' })
+      } else if (videoTransceiver.direction !== 'sendrecv') {
+        videoTransceiver.direction = 'sendrecv'
+      }
+      // Bind current local tracks (if any) via replaceTrack for stable ordering
+      const localAudioTrack = localStreamRef.current?.getAudioTracks()[0]
+      if (localAudioTrack && audioTransceiver?.sender) {
+        if (audioTransceiver.sender.track !== localAudioTrack) {
+          audioTransceiver.sender.replaceTrack(localAudioTrack).catch(() => {})
+        }
+      }
+      const localVideoTrack = localVideoStreamRef.current?.getVideoTracks()[0]
+      if (localVideoTrack && videoTransceiver?.sender) {
+        if (videoTransceiver.sender.track !== localVideoTrack) {
+          videoTransceiver.sender.replaceTrack(localVideoTrack).catch(() => {})
+        }
+      }
+    } catch (foundationErr) {
+      console.warn('Stable transceiver foundation setup failed (non-fatal):', foundationErr)
+    }
     
     // ROBUST CONNECTION: Add connection state monitoring
     setConnectionHealth(prev => ({ ...prev, [remote]: 'connecting' }))
@@ -1134,6 +1218,22 @@ export default function CallPage() {
       console.log('Received track:', track.kind, track.label, 'from', remote)
       
       if (track.kind === 'audio') {
+        // Attach analyser for silence detection (once per peer main audio stream)
+        if (!remoteAudioAnalyserRef.current[remote]) {
+          try {
+            const AC: typeof AudioContext | undefined = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+            const ctx = AC ? new AC() : null
+            if (!ctx) throw new Error('AudioContext unsupported')
+            const source = ctx.createMediaStreamSource(stream)
+            const analyser = ctx.createAnalyser()
+            analyser.fftSize = 256
+            source.connect(analyser)
+            remoteAudioAnalyserRef.current[remote] = { analyser, ctx, data: new Uint8Array(analyser.frequencyBinCount), silentCycles: 0 }
+            console.log('🛡️ Added audio analyser for', remote)
+          } catch (err) {
+            console.warn('Audio analyser init failed (non-fatal):', err)
+          }
+        }
         // Check if this is a mixed audio track (contains both mic and system audio)
         const isMixedAudio = track.label.toLowerCase().includes('mixed audio') ||
                            track.label.toLowerCase().includes('microphone + system')
@@ -1267,6 +1367,21 @@ export default function CallPage() {
     }
     
     console.log(`🔗 ✅ ROBUST peer connection for ${remote} created with ${pc.getSenders().length} senders in strict order`)
+
+    // Force an initial offer if we ended up not scheduling one (e.g., both sides waited politely or
+    // late join after tracks already established) to guarantee media flows.
+    setTimeout(() => {
+      const negotiation = negotiationStateRef.current[remote]
+      if (!negotiation) return
+      // If still stable and we have at least one sender with a track, ensure an offer goes out from impolite side
+      if (pc.signalingState === 'stable') {
+        const hasAnyTrack = pc.getSenders().some(s => s.track)
+        const weArePolite = negotiation.polite
+        if (!weArePolite && hasAnyTrack) {
+          scheduleNegotiation(remote, pc, 'late-join-foundation')
+        }
+      }
+    }, 300)
     
     // DATA CHANNEL (capabilities / control). Only one side (lexicographically smaller username) creates channel
     if (currentUser < remote) {
@@ -1322,6 +1437,148 @@ export default function CallPage() {
     
     return pc
   }, [currentUser, createAndSendOffer, getLocalCapabilities, updateRemoteCapabilities, scheduleNegotiation, sendCallSignal, scheduleReconnection])
+
+  // --- ULTRA RELIABILITY WATCHDOG (expects vs actual media) ---
+  const reliabilityStateRef = useRef<Record<string, { missingCycles: number }>>({})
+  useEffect(() => {
+    if (!joined) return
+    const interval = setInterval(() => {
+      Object.keys(peerConnections.current).forEach(peerId => {
+        const pc = peerConnections.current[peerId]
+        if (!pc) return
+        if (connectionHealth[peerId] !== 'connected') return
+        const caps = remoteCapabilities[peerId]
+        if (!caps) return
+        const expectAudio = caps.mic || caps.systemAudio
+        const expectVideo = caps.camera || caps.screen
+        const haveAudio = !!remoteStreams[peerId] || !!remoteSystemAudioStreams[peerId]
+        const haveVideo = !!remoteVideoStreams[peerId] || !!remoteScreenStreams[peerId]
+        const state = (reliabilityStateRef.current[peerId] ||= { missingCycles: 0 })
+        const missing = (expectAudio && !haveAudio) || (expectVideo && !haveVideo)
+        if (!missing) { state.missingCycles = 0; return }
+        state.missingCycles++
+        if (state.missingCycles === 1) {
+          escalateConnection(peerId, 'renegotiate', 'watchdog-missing')
+        } else if (state.missingCycles === 2) {
+          escalateConnection(peerId, 'ice', 'watchdog-missing')
+        } else if (state.missingCycles >= 3) {
+          if (escalateConnection(peerId, 'rebuild', 'watchdog-missing')) {
+            state.missingCycles = 0
+          }
+        }
+      })
+    }, 5000)
+    return () => clearInterval(interval)
+  }, [joined, remoteCapabilities, remoteStreams, remoteVideoStreams, remoteScreenStreams, remoteSystemAudioStreams, connectionHealth, escalateConnection])
+
+  // RTP stats-based stalled media detector (per peer bytes delta)
+  useEffect(() => {
+    if (!joined) return
+    const interval = setInterval(() => {
+      Object.keys(peerConnections.current).forEach(peerId => {
+        const caps = remoteCapabilities[peerId]
+        if (!caps) return
+        const liveness = (inboundLivenessRef.current[peerId] ||= { audioBytes: 0, videoBytes: 0, stagnantAudio: 0, stagnantVideo: 0 })
+        const pc = peerConnections.current[peerId]
+        if (!pc || pc.signalingState === 'closed') return
+        pc.getStats().then(stats => {
+          interface InboundRtpLike { type: string; kind?: 'audio' | 'video'; bytesReceived?: number }
+          let audioBytes = 0, videoBytes = 0
+            stats.forEach(r => {
+              const rep = r as unknown as InboundRtpLike
+              if (rep.type === 'inbound-rtp' && rep.kind === 'audio' && typeof rep.bytesReceived === 'number') audioBytes += rep.bytesReceived
+              if (rep.type === 'inbound-rtp' && rep.kind === 'video' && typeof rep.bytesReceived === 'number') videoBytes += rep.bytesReceived
+            })
+          if (caps.mic || caps.systemAudio) {
+            if (audioBytes === liveness.audioBytes) liveness.stagnantAudio++; else liveness.stagnantAudio = 0
+          } else liveness.stagnantAudio = 0
+          if (caps.camera || caps.screen) {
+            if (videoBytes === liveness.videoBytes) liveness.stagnantVideo++; else liveness.stagnantVideo = 0
+          } else liveness.stagnantVideo = 0
+          liveness.audioBytes = audioBytes
+          liveness.videoBytes = videoBytes
+          if ((liveness.stagnantAudio >= 3 || liveness.stagnantVideo >= 3) && connectionHealth[peerId] === 'connected') {
+            escalateConnection(peerId, 'renegotiate', 'stall-bytes')
+          }
+          if ((liveness.stagnantAudio >= 5 || liveness.stagnantVideo >= 5) && connectionHealth[peerId] === 'connected') {
+            escalateConnection(peerId, 'ice', 'stall-bytes')
+          }
+          if ((liveness.stagnantAudio >= 7 || liveness.stagnantVideo >= 7) && connectionHealth[peerId] === 'connected') {
+            if (escalateConnection(peerId, 'rebuild', 'stall-bytes')) {
+              liveness.stagnantAudio = 0; liveness.stagnantVideo = 0
+            }
+          }
+        }).catch(() => {})
+      })
+    }, 5000)
+    return () => clearInterval(interval)
+  }, [joined, remoteCapabilities, connectionHealth, escalateConnection])
+
+  // Audio energy silence detector (complements byte-level stall detection)
+  useEffect(() => {
+    if (!joined) return
+    const interval = setInterval(() => {
+      Object.entries(remoteAudioAnalyserRef.current).forEach(([peerId, entry]) => {
+        const caps = remoteCapabilities[peerId]
+  if (!caps || !(caps.mic || caps.systemAudio)) return
+  const analyser: AnalyserNode = entry.analyser
+  const data: Uint8Array = entry.data
+  ;(analyser.getByteTimeDomainData as unknown as (arr: Uint8Array) => void)(data)
+        let sum = 0
+        for (let i = 0; i < data.length; i++) {
+          const v = (data[i] - 128) / 128
+          sum += v * v
+        }
+        const rms = Math.sqrt(sum / data.length)
+        if (rms < 0.005) entry.silentCycles++; else entry.silentCycles = 0
+        if (entry.silentCycles === 5) {
+          escalateConnection(peerId, 'renegotiate', 'silence')
+        } else if (entry.silentCycles === 7) {
+          escalateConnection(peerId, 'ice', 'silence')
+        } else if (entry.silentCycles === 9) {
+          if (escalateConnection(peerId, 'rebuild', 'silence')) entry.silentCycles = 0
+        }
+      })
+    }, 2000)
+    return () => clearInterval(interval)
+  }, [joined, remoteCapabilities, escalateConnection])
+
+  // Exposed manual force sync (can be wired to a UI button later)
+  const forceResyncAll = useCallback(() => {
+    Object.entries(peerConnections.current).forEach(([peerId, pc]) => {
+      if (pc.signalingState === 'stable') {
+        escalateConnection(peerId, 'ice', 'force-resync')
+      }
+    })
+  }, [escalateConnection])
+  // Reference forceResyncAll so linter knows it's intentionally retained for future UI binding
+  useEffect(() => { /* keep */ }, [forceResyncAll])
+
+  // AUTOMATIC GLOBAL FORCE SYNC: trigger if majority of peers degraded or relayed for prolonged period
+  useEffect(() => {
+    if (!joined) return
+    const interval = setInterval(() => {
+      const entries = Object.values(remoteNetworkStats)
+      if (entries.length < 2) return // avoid single-peer noise
+      const poorBad = entries.filter(s => s.quality === 'poor' || s.quality === 'bad').length
+      const relay = entries.filter(s => s.path === 'relay').length
+      const ratioDegraded = poorBad / entries.length
+      const ratioRelay = relay / entries.length
+      const now = Date.now()
+      const COOLDOWN = 45000 // 45s between auto global force syncs
+      // Additional guard: skip if any peer had rebuild in last 15s to avoid stacking actions
+      const recentRebuild = Object.values(lastEscalationRef.current).some(t => now - t.lastRebuild < 15000)
+      if (!recentRebuild && (ratioDegraded >= 0.5 || ratioRelay >= 0.7) && (now - lastAutoForceSyncRef.current) > COOLDOWN) {
+        console.log('🛡️ [AutoForceSync] Triggering global forceResyncAll due to network degradation', { ratioDegraded, ratioRelay })
+        lastAutoForceSyncRef.current = now
+        setLastAutoForceSyncAt(now)
+        forceResyncAll()
+      } else if (recentRebuild && (ratioDegraded >= 0.5 || ratioRelay >= 0.7)) {
+        console.log('🛡️ [AutoForceSync] Suppressed due to recent rebuild action')
+      }
+    }, 10000)
+    return () => clearInterval(interval)
+  }, [joined, remoteNetworkStats, forceResyncAll])
 
 // Join call room with UNIVERSAL CONNECTION PROTOCOL
   const joinCall = async () => {
@@ -2195,156 +2452,132 @@ export default function CallPage() {
   // --- Toggle mirror for local video preview ---
   const toggleMirror = () => {
     setIsMirrored(!isMirrored)
-  }
-
-  // --- Internal helpers for new on-demand preflight video enabling ---
-  const disableVideo = async () => {
-    if (!videoEnabled) return
-    if (localVideoStreamRef.current) {
-      localVideoStreamRef.current.getTracks().forEach(track => track.stop())
-      localVideoStreamRef.current = null
-    }
-    const renegotiationPromises = Object.entries(peerConnections.current).map(async ([remote, pc]) => {
-      const currentVideoTrack = pc.getSenders().find(sender =>
-        sender.track && sender.track.kind === 'video' && !sender.track.label.toLowerCase().includes('screen')
-      )?.track || null
-      const success = await safeReplaceTrack(pc, currentVideoTrack, null, new MediaStream(), 'video')
-      if (!success) {
-        console.warn(`Failed safeReplaceTrack (video off) for ${remote}, fallback remove`)
-        pc.getSenders().forEach(sender => {
-          if (sender.track && sender.track.kind === 'video' && !sender.track.label.includes('screen')) {
-            pc.removeTrack(sender)
-          }
-        })
+  }  // --- Toggle video with optimized parallel renegotiation ---
+  const toggleVideo = async () => {
+    if (videoEnabled) {
+      // Turn off video
+      if (localVideoStreamRef.current) {
+        localVideoStreamRef.current.getTracks().forEach(track => track.stop())
+        localVideoStreamRef.current = null
       }
-      try {
-        const offer = await pc.createOffer()
-        await pc.setLocalDescription(offer)
-        wsRef.current?.send(JSON.stringify({ type: 'call-offer', roomId, from: currentUser, to: remote, payload: pc.localDescription }))
-      } catch (e) {
-        console.error('Video-off renegotiation failed', e)
-      }
-    })
-    await Promise.allSettled(renegotiationPromises)
-    setVideoEnabled(false)
-  }
-
-  const enableVideoWithStream = async (stream: MediaStream) => {
-    localVideoStreamRef.current = stream
-    const renegotiationPromises = Object.entries(peerConnections.current).map(async ([remote, pc]) => {
-      const videoTrack = stream.getVideoTracks()[0]
-      const success = await safeReplaceTrack(pc, null, videoTrack, stream, 'video')
-      if (!success) {
-        console.warn(`Failed safeReplaceTrack (video on) for ${remote}, fallback addTrack`)
-        if (!pc.getSenders().some(sender => sender.track === videoTrack)) {
-          pc.addTrack(videoTrack, stream)
+      
+      // Remove video tracks using safe replacement (maintain m-line order)
+      const renegotiationPromises = Object.entries(peerConnections.current).map(async ([remote, pc]) => {
+        // Use safeReplaceTrack to replace video track with null (maintains m-line order)
+        const currentVideoTrack = pc.getSenders().find(sender => 
+          sender.track && sender.track.kind === 'video' && 
+          !sender.track.label.toLowerCase().includes('screen')
+        )?.track || null
+        
+        const success = await safeReplaceTrack(pc, currentVideoTrack, null, new MediaStream(), 'video')
+        if (!success) {
+          console.warn(`Failed to safely replace video track for ${remote}, falling back to remove`)
+          // Fallback: remove track (may cause m-line reordering but necessary if replaceTrack fails)
+          pc.getSenders().forEach(sender => {
+            if (sender.track && sender.track.kind === 'video' && !sender.track.label.includes('screen')) {
+              pc.removeTrack(sender)
+            }
+          })
         }
-      }
-      const sender = pc.getSenders().find(s => s.track === videoTrack)
-      if (sender) {
+        
+        // Trigger renegotiation
         try {
-          const parameters = sender.getParameters()
-          if (!parameters.encodings) parameters.encodings = [{}]
-          if (parameters.encodings[0]) {
-            parameters.encodings[0].maxBitrate = 4000000
-            parameters.encodings[0].maxFramerate = 60
-            parameters.encodings[0].scaleResolutionDownBy = 1
+          const offer = await pc.createOffer()
+          await pc.setLocalDescription(offer)
+          if (wsRef.current) {
+            wsRef.current.send(JSON.stringify({ 
+              type: "call-offer", 
+              roomId, 
+              from: currentUser, 
+              to: remote, 
+              payload: pc.localDescription 
+            }))
           }
-          await sender.setParameters(parameters)
-        } catch (e) {
-          console.warn('Failed to set video sender params', e)
+        } catch (error) {
+          console.error(`Error creating video-off offer for ${remote}:`, error)
         }
-      }
+      })
+      
+      // Wait for all renegotiations to complete
+      await Promise.allSettled(renegotiationPromises)
+      setVideoEnabled(false)
+    } else {      // Turn on video
       try {
-        const offer = await pc.createOffer()
-        await pc.setLocalDescription(offer)
-        wsRef.current?.send(JSON.stringify({ type: 'call-offer', roomId, from: currentUser, to: remote, payload: pc.localDescription }))
-      } catch (e) {
-        console.error('Video-on renegotiation failed', e)
-      }
-    })
-    await Promise.allSettled(renegotiationPromises)
-    setVideoEnabled(true)
-  }
-
-  const openVideoPreflight = async () => {
-    if (videoEnabled) return
-    setShowVideoPreflight(true)
-    if (!preflightStreamRef.current) {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: {
+        const stream = await navigator.mediaDevices.getUserMedia({ 
+          video: { 
             facingMode: currentCamera,
             width: { ideal: 1920, min: 1280 },
             height: { ideal: 1080, min: 720 },
-            frameRate: { ideal: 60 },
+            frameRate: { ideal: 60 }, // 60fps for streaming platform quality
             aspectRatio: { ideal: 16/9 }
-          },
-          audio: false
+          }, 
+          audio: false 
         })
-        preflightStreamRef.current = stream
-      } catch (e) {
-        console.error('Preflight camera access denied', e)
+        localVideoStreamRef.current = stream
+        
+        // Add video tracks and trigger parallel renegotiation
+        const renegotiationPromises = Object.entries(peerConnections.current).map(async ([remote, pc]) => {
+          const videoTrack = stream.getVideoTracks()[0]
+          
+          // Use safeReplaceTrack to maintain m-line order
+          const success = await safeReplaceTrack(pc, null, videoTrack, stream, 'video')
+          if (!success) {
+            console.warn(`Failed to safely add video track for ${remote}, falling back to addTrack`)
+            // Fallback: add track normally (may cause m-line reordering)
+            if (!pc.getSenders().some(sender => sender.track === videoTrack)) {
+              pc.addTrack(videoTrack, stream)
+              console.log(`Added video track to peer connection: ${remote}`)
+            }
+          }
+          
+          // Set encoding parameters for video optimization
+          const sender = pc.getSenders().find(s => s.track === videoTrack)
+          if (sender) {
+            try {
+              const parameters = sender.getParameters()
+              if (!parameters.encodings) {
+                parameters.encodings = [{}]
+              }
+              // Optimize for streaming platform quality: high bitrate, 60fps
+              if (parameters.encodings[0]) {
+                parameters.encodings[0].maxBitrate = 4000000 // 4 Mbps for 60fps 1080p streaming
+                parameters.encodings[0].maxFramerate = 60    // 60fps for streaming platform quality
+                parameters.encodings[0].scaleResolutionDownBy = 1 // No downscaling for best quality
+              }
+              await sender.setParameters(parameters)
+              console.log(`Set video encoding parameters for ${remote}`)
+            } catch (error) {
+              console.warn(`Failed to set video encoding parameters for ${remote}:`, error)
+            }
+          }
+          
+          // Trigger renegotiation
+          try {
+            const offer = await pc.createOffer()
+            await pc.setLocalDescription(offer)
+            if (wsRef.current) {
+              wsRef.current.send(JSON.stringify({ 
+                type: "call-offer", 
+                roomId, 
+                from: currentUser, 
+                to: remote, 
+                payload: pc.localDescription 
+              }))
+            }
+          } catch (error) {
+            console.error(`Error creating video offer for ${remote}:`, error)
+          }
+        })
+        
+        // Wait for all renegotiations to complete in parallel
+        await Promise.allSettled(renegotiationPromises)
+        setVideoEnabled(true)
+      } catch (error) {
+        console.error('Error accessing camera:', error)
         setError('Camera access denied')
-        setShowVideoPreflight(false)
       }
     }
-  }
-
-  const cancelVideoPreflight = () => {
-    if (preflightStreamRef.current) {
-      preflightStreamRef.current.getTracks().forEach(t => t.stop())
-      preflightStreamRef.current = null
-    }
-    setShowVideoPreflight(false)
-  }
-
-  const confirmVideoPreflight = async () => {
-    if (!preflightStreamRef.current) return
-    const stream = preflightStreamRef.current
-    preflightStreamRef.current = null // ownership transferred
-    setShowVideoPreflight(false)
-    try {
-      await enableVideoWithStream(stream)
-    } catch (e) {
-      console.error('Enable video from preflight failed', e)
-      setError('Failed to enable camera')
-      stream.getTracks().forEach(t => t.stop())
-    }
-  }
-
-  const preflightFlipCamera = async () => {
-    if (!showVideoPreflight) return
-    const newCamera = currentCamera === 'user' ? 'environment' : 'user'
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: newCamera,
-          width: { ideal: 1920, min: 1280 },
-          height: { ideal: 1080, min: 720 },
-          frameRate: { ideal: 60 },
-          aspectRatio: { ideal: 16/9 }
-        },
-        audio: false
-      })
-      if (preflightStreamRef.current) preflightStreamRef.current.getTracks().forEach(t => t.stop())
-      preflightStreamRef.current = stream
-      setCurrentCamera(newCamera)
-    } catch (e) {
-      console.error('Preflight flip failed', e)
-      setError('Cannot switch camera')
-    }
-  }
-
-  // New public toggle entrypoint used by UI button
-  const toggleVideo = async () => {
-    if (videoEnabled) {
-      await disableVideo()
-    } else {
-      await openVideoPreflight()
-    }
-  }
-  // --- Toggle screen sharing with optimized parallel renegotiation ---
+  }// --- Toggle screen sharing with optimized parallel renegotiation ---
   const toggleScreenShare = async () => {
     if (screenSharing) {
       // Turn off screen sharing with safe track replacement
@@ -3274,6 +3507,11 @@ export default function CallPage() {
             <p className="text-xs text-gray-500 truncate max-w-[80px]">/{roomId}</p>
           </div>
           <div className="flex items-center gap-2 flex-shrink-0 min-w-0">
+            {joined && lastAutoForceSyncAt && Date.now() - lastAutoForceSyncAt < 20000 && (
+              <span className="text-[10px] px-2 py-1 rounded-full bg-indigo-100 text-indigo-700 font-medium" title="Automatic force sync recently triggered to improve quality">
+                Auto Sync
+              </span>
+            )}
             {/* Reconnect Button - only show when joined */}
             {joined && (
               <Button
@@ -3286,6 +3524,19 @@ export default function CallPage() {
               >
                 <RotateCcw className={`h-4 w-4 ${reconnecting ? 'animate-spin' : ''}`} />
                 <span className="sm:inline">{reconnecting ? 'Reconnecting...' : 'Reconnect'}</span>
+              </Button>
+            )}
+            {joined && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={forceResyncAll}
+                disabled={reconnecting || connecting}
+                className="flex items-center gap-1"
+                title="Force renegotiation with ICE restart for all peers"
+              >
+                <RefreshCw className="h-4 w-4" />
+                <span className="hidden sm:inline">Force Sync</span>
               </Button>
             )}
             
@@ -3389,47 +3640,6 @@ export default function CallPage() {
           <div className="h-full flex flex-col min-h-0 space-y-4">            
           {/* Control Panel */}
             <div className="bg-gray-50 rounded-lg p-3 flex-shrink-0">
-              {showVideoPreflight && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
-                  <div className="bg-white rounded-lg shadow-xl w-full max-w-sm sm:max-w-md flex flex-col">
-                    <div className="px-4 py-3 border-b flex items-center justify-between">
-                      <h3 className="font-semibold text-sm">Camera Preview</h3>
-                      <button onClick={cancelVideoPreflight} className="text-gray-500 hover:text-gray-700 text-xs">Close</button>
-                    </div>
-                    <div className="p-4 space-y-3">
-                      <div className="relative rounded overflow-hidden bg-black aspect-video">
-                        <video
-                          autoPlay
-                          playsInline
-                          muted
-                          ref={(el) => { if (el && preflightStreamRef.current) el.srcObject = preflightStreamRef.current }}
-                          className="w-full h-full object-cover"
-                          style={{ transform: isMirrored ? 'scaleX(-1)' : 'none' }}
-                        />
-                        <div className="absolute top-2 right-2 flex gap-2">
-                          <button
-                            onClick={preflightFlipCamera}
-                            className="bg-white/80 hover:bg-white text-gray-700 rounded px-2 py-1 text-xs"
-                            title="Flip camera"
-                          >Flip</button>
-                          <button
-                            onClick={toggleMirror}
-                            className="bg-white/80 hover:bg-white text-gray-700 rounded px-2 py-1 text-xs"
-                            title="Mirror preview"
-                          >Mirror</button>
-                        </div>
-                      </div>
-                      <div className="text-xs text-gray-600 leading-snug">
-                        Preview your camera before sharing. You can flip or mirror. Click Start when ready.
-                      </div>
-                      <div className="flex gap-2 pt-1">
-                        <Button onClick={cancelVideoPreflight} variant="outline" className="flex-1 text-xs py-2">Cancel</Button>
-                        <Button onClick={confirmVideoPreflight} className="flex-1 text-xs py-2">Start</Button>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              )}
               <div className="flex items-center justify-between flex-wrap gap-2">
                 <div className="text-sm font-medium text-gray-700 flex items-center gap-2">
                   Controls
