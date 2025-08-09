@@ -10,6 +10,7 @@ import { NotificationBell } from "@/components/notification-bell"
 declare global {
   interface Window {
     webkitAudioContext?: typeof AudioContext
+    __ICE_SERVERS__?: RTCIceServer[]
   }
   
   interface HTMLElement {
@@ -29,7 +30,20 @@ declare global {
 }
 
 const SIGNALING_SERVER_URL = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:3001"
-const ICE_CONFIG = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] }
+// Build ICE servers dynamically so TURN can be injected via env (all in-memory, no persistence)
+// Optional envs:
+//  NEXT_PUBLIC_TURN_URLS=turn:turn.example.com:3478,turns:turn.example.com:5349
+//  NEXT_PUBLIC_TURN_USERNAME=user
+//  NEXT_PUBLIC_TURN_CREDENTIAL=pass
+const buildIceServers = (): RTCIceServer[] => (
+  [
+    { urls: ["stun:stun.l.google.com:19302"] },
+    // Hardcoded TURN servers (replace with your actual host / creds)
+    { urls: ["turn:turn.yourhost.com:3478", "turns:turn.yourhost.com:5349"], username: "user", credential: "pass" }
+  ]
+)
+
+const ICE_CONFIG = () => ({ iceServers: buildIceServers() })
 
 export default function CallPage() {
   const params = useParams()
@@ -59,6 +73,8 @@ export default function CallPage() {
   const localScreenStreamRef = useRef<MediaStream | null>(null)
   const localSystemAudioStreamRef = useRef<MediaStream | null>(null)
   const peerConnections = useRef<Record<string, RTCPeerConnection>>({})
+  // Reconnection manager state
+  const reconnectionStateRef = useRef<Record<string, { phase: number; attempts: number; nextDelay: number; timer?: number }>>({})
   // Negotiation state per peer for perfect negotiation pattern
   const negotiationStateRef = useRef<Record<string, { isMakingOffer: boolean; ignoreOffer: boolean; polite: boolean }>>({})
   // Negotiation control (coalescing & rate limiting)
@@ -158,6 +174,10 @@ export default function CallPage() {
   }, [createAndSendOffer])
   const [muted, setMuted] = useState(false)
   const [videoEnabled, setVideoEnabled] = useState(false)
+  // Video preflight modal state
+  const [showVideoPreflight, setShowVideoPreflight] = useState(false)
+  const preflightStreamRef = useRef<MediaStream | null>(null)
+  // (optional future) enablingVideo spinner removed for now
   const [screenSharing, setScreenSharing] = useState(false)
   const [expandedParticipants, setExpandedParticipants] = useState<Set<string>>(new Set())
   const [localPreviewExpanded, setLocalPreviewExpanded] = useState(false)
@@ -165,8 +185,16 @@ export default function CallPage() {
   const [speakingPeers, setSpeakingPeers] = useState<Record<string, boolean>>({})
   const [localSpeaking, setLocalSpeaking] = useState(false)
   // Network quality stats per peer
-  const [remoteNetworkStats, setRemoteNetworkStats] = useState<Record<string, { rttMs: number; lossPct: number; quality: 'excellent' | 'good' | 'fair' | 'poor' | 'bad' }>>({})
+  const [remoteNetworkStats, setRemoteNetworkStats] = useState<Record<string, { rttMs: number; lossPct: number; quality: 'excellent' | 'good' | 'fair' | 'poor' | 'bad'; path?: 'direct' | 'srflx' | 'relay' | 'unknown' }>>({})
   const [debugStats, setDebugStats] = useState(false)
+  // Cumulative data usage (approx) per direction & media kind (bytes)
+  const [dataUsage, setDataUsage] = useState<{
+    outbound: { audio: number; video: number; screen: number; total: number }
+    inbound: { audio: number; video: number; screen: number; total: number }
+    lastUpdated: number | null
+  }>({ outbound: { audio: 0, video: 0, screen: 0, total: 0 }, inbound: { audio: 0, video: 0, screen: 0, total: 0 }, lastUpdated: null })
+  // Internal baseline maps to accumulate deltas (report IDs -> bytes)
+  const usageBaselinesRef = useRef<{ outbound: Record<string, number>; inbound: Record<string, number> }>({ outbound: {}, inbound: {} })
 
   // ===== CAPABILITIES & DATA CHANNEL MANAGEMENT (ensure declared after dependent state) =====
   const dataChannelsRef = useRef<Record<string, RTCDataChannel>>({})
@@ -205,14 +233,59 @@ export default function CallPage() {
         if (pc.signalingState === 'closed') continue
         try {
           const stats = await pc.getStats()
-          interface CandidatePairLike { currentRoundTripTime?: number; roundTripTime?: number; state?: string; nominated?: boolean }
+          let outboundAudioBytes = 0
+          let outboundVideoBytes = 0
+          let outboundScreenBytes = 0
+          let inboundAudioBytes = 0
+          let inboundVideoBytes = 0
+          let inboundScreenBytes = 0
+          interface CandidatePairLike { currentRoundTripTime?: number; roundTripTime?: number; state?: string; nominated?: boolean; localCandidateId?: string; remoteCandidateId?: string }
+          interface IceCandidateLike { id?: string; candidateType?: 'host' | 'srflx' | 'relay' | 'prflx'; type?: string }
           const candidatePairs: CandidatePairLike[] = []
+          const localCandidates: Record<string, IceCandidateLike> = {}
+          const remoteCandidates: Record<string, IceCandidateLike> = {}
           let totalPackets = 0
           let lostPackets = 0
           stats.forEach(report => {
+            // Data usage accumulation
+            if (report.type === 'outbound-rtp') {
+              const r = report as unknown as { id: string; kind?: string; bytesSent?: number; frameWidth?: number; frameHeight?: number } // frame dims can help differentiate screen vs camera heuristically later
+              if (typeof r.bytesSent === 'number' && r.kind) {
+                const prev = usageBaselinesRef.current.outbound[r.id] || 0
+                const delta = Math.max(0, r.bytesSent - prev)
+                usageBaselinesRef.current.outbound[r.id] = r.bytesSent
+                if (r.kind === 'audio') outboundAudioBytes += delta
+                if (r.kind === 'video') {
+                  interface VideoLike { mediaSourceId?: unknown; trackIdentifier?: string }
+                  const vr = r as VideoLike
+                  const idStr = typeof vr.mediaSourceId === 'string' ? vr.mediaSourceId : (vr.mediaSourceId ? String(vr.mediaSourceId) : '')
+                  const trackId = vr.trackIdentifier || ''
+                  const isLikelyScreen = idStr.toLowerCase().includes('screen') || trackId.toLowerCase().includes('screen')
+                  if (isLikelyScreen) outboundScreenBytes += delta; else outboundVideoBytes += delta
+                }
+              }
+            } else if (report.type === 'inbound-rtp') {
+              const r = report as unknown as { id: string; kind?: string; bytesReceived?: number; trackIdentifier?: string }
+              if (typeof r.bytesReceived === 'number' && r.kind) {
+                const prev = usageBaselinesRef.current.inbound[r.id] || 0
+                const delta = Math.max(0, r.bytesReceived - prev)
+                usageBaselinesRef.current.inbound[r.id] = r.bytesReceived
+                if (r.kind === 'audio') inboundAudioBytes += delta
+                if (r.kind === 'video') {
+                  const isLikelyScreen = r.trackIdentifier?.toLowerCase?.().includes('screen')
+                  if (isLikelyScreen) inboundScreenBytes += delta; else inboundVideoBytes += delta
+                }
+              }
+            }
             if (report.type === 'candidate-pair') {
               const cp = report as unknown as CandidatePairLike
               if (cp.state === 'succeeded' && cp.nominated) candidatePairs.push(cp)
+            } else if (report.type === 'local-candidate') {
+              const lc = report as unknown as IceCandidateLike
+              if (lc.id) localCandidates[lc.id] = lc
+            } else if (report.type === 'remote-candidate') {
+              const rc = report as unknown as IceCandidateLike
+              if (rc.id) remoteCandidates[rc.id] = rc
             }
             if (report.type === 'remote-inbound-rtp' || report.type === 'inbound-rtp') {
               const r = report as unknown as { kind?: string; packetsReceived?: number; packetsLost?: number }
@@ -222,10 +295,36 @@ export default function CallPage() {
               }
             }
           })
+          // Commit usage deltas to state (aggregate across peers)
+          if (outboundAudioBytes || outboundVideoBytes || outboundScreenBytes || inboundAudioBytes || inboundVideoBytes || inboundScreenBytes) {
+            setDataUsage(prev => {
+              const newOutbound = { ...prev.outbound }
+              const newInbound = { ...prev.inbound }
+              newOutbound.audio += outboundAudioBytes
+              newOutbound.video += outboundVideoBytes
+              newOutbound.screen += outboundScreenBytes
+              newOutbound.total += outboundAudioBytes + outboundVideoBytes + outboundScreenBytes
+              newInbound.audio += inboundAudioBytes
+              newInbound.video += inboundVideoBytes
+              newInbound.screen += inboundScreenBytes
+              newInbound.total += inboundAudioBytes + inboundVideoBytes + inboundScreenBytes
+              return { outbound: newOutbound, inbound: newInbound, lastUpdated: Date.now() }
+            })
+          }
           let rtt = 0
             if (candidatePairs.length) {
               rtt = candidatePairs.reduce((min, p) => Math.min(min, (p.currentRoundTripTime ?? p.roundTripTime ?? Infinity)), Infinity)
             }
+          // Determine path type from selected pair (take first succeeded nominated)
+          let path: 'direct' | 'srflx' | 'relay' | 'unknown' = 'unknown'
+          const selected = candidatePairs[0]
+          if (selected && selected.localCandidateId && selected.remoteCandidateId) {
+            const lc = localCandidates[selected.localCandidateId]
+            const rc = remoteCandidates[selected.remoteCandidateId]
+            if (lc?.candidateType === 'relay' || rc?.candidateType === 'relay') path = 'relay'
+            else if (lc?.candidateType === 'srflx' || rc?.candidateType === 'srflx') path = 'srflx'
+            else if (lc?.candidateType === 'host' && rc?.candidateType === 'host') path = 'direct'
+          }
           const lossRatio = totalPackets > 200 ? lostPackets / totalPackets : 0
           const rttMs = (rtt || 0) * 1000
           let quality: 'excellent' | 'good' | 'fair' | 'poor' | 'bad' = 'excellent'
@@ -233,7 +332,7 @@ export default function CallPage() {
           else if (lossRatio > 0.1 || rttMs > 800) quality = 'poor'
           else if (lossRatio > 0.05 || rttMs > 400) quality = 'fair'
           else if (lossRatio > 0.02 || rttMs > 250) quality = 'good'
-          setRemoteNetworkStats(prev => ({ ...prev, [peerId]: { rttMs: Math.round(rttMs), lossPct: +(lossRatio * 100).toFixed(1), quality } }))
+          setRemoteNetworkStats(prev => ({ ...prev, [peerId]: { rttMs: Math.round(rttMs), lossPct: +(lossRatio * 100).toFixed(1), quality, path } }))
         } catch {
           /* ignore */
         }
@@ -815,7 +914,12 @@ export default function CallPage() {
     }
   }
 
-  const recreatePeerConnection = async (peerId: string) => {
+  // ===== Reconnection Manager (phased backoff) =====
+  // placeholder, actual implementation defined after recreatePeerConnection
+  const scheduleReconnectionRef = useRef<(peerId: string, reason: string) => void>(() => {})
+  const scheduleReconnection = useCallback((peerId: string, reason: string) => scheduleReconnectionRef.current(peerId, reason), [])
+
+  async function recreatePeerConnection(peerId: string) {
     console.log(`Recreating peer connection for ${peerId}`)
     
     // Close existing connection
@@ -843,10 +947,51 @@ export default function CallPage() {
     } catch (error) {
       console.error('Error in recreated peer connection offer:', error)
     }
+  // recreatePeerConnection does not directly depend on createPeerConnection stable identity for its logic
+  // (it only closes and re-creates via existing factory when invoked); omit from deps to avoid forward ref
+  }
+
+  // Now implement reconnection logic with stable recreatePeerConnection
+  scheduleReconnectionRef.current = (peerId: string, reason: string) => {
+    const st = (reconnectionStateRef.current[peerId] ||= { phase: 0, attempts: 0, nextDelay: 1000 })
+    if (st.phase === 0) {
+      if (st.attempts >= 3) { st.phase = 1; st.attempts = 0; st.nextDelay = 3000 }
+      else {
+        const pc = peerConnections.current[peerId]
+        if (pc && pc.signalingState === 'stable') {
+          console.log(`🛠️ Reconnection[${peerId}] ICE restart attempt ${st.attempts + 1} (reason: ${reason})`)
+          createAndSendOffer(peerId, pc, 'auto-ice-restart', true)
+        }
+        st.attempts++
+        st.nextDelay *= 2
+        if (st.nextDelay > 4000) st.nextDelay = 4000
+      }
+    }
+    if (st.phase === 1) {
+      if (st.attempts >= 2) { st.phase = 2; st.attempts = 0; st.nextDelay = 8000 }
+      else {
+        console.log(`🛠️ Reconnection[${peerId}] rebuilding PeerConnection attempt ${st.attempts + 1}`)
+        recreatePeerConnection(peerId)
+        st.attempts++
+        st.nextDelay *= 2
+        if (st.nextDelay > 6000) st.nextDelay = 6000
+      }
+    }
+    if (st.phase === 2) {
+      console.log(`🛠️ Reconnection[${peerId}] exhausted attempts - awaiting manual action`)
+      return
+    }
+    clearTimeout(st.timer)
+    st.timer = window.setTimeout(() => {
+      const health = connectionHealth[peerId]
+      if (health === 'connected') return
+      scheduleReconnection(peerId, 'timer')
+    }, st.nextDelay)
   }
 
   const createPeerConnection = useCallback((remote: string) => {
-    const pc = new RTCPeerConnection(ICE_CONFIG)
+  // Use dynamic ICE config (includes TURN if env vars provided)
+  const pc = new RTCPeerConnection(ICE_CONFIG())
     peerConnections.current[remote] = pc
 
     // Initialize negotiation state (lexicographic smaller username is polite)
@@ -906,10 +1051,12 @@ export default function CallPage() {
         case 'failed':
           setConnectionHealth(prev => ({ ...prev, [remote]: 'failed' }))
           console.log(`🔗 ❌ ${remote} CONNECTION FAILED - will trigger immediate recovery`)
+          scheduleReconnection(remote, 'conn-failed')
           break
         case 'disconnected':
           setConnectionHealth(prev => ({ ...prev, [remote]: 'disconnected' }))
           console.log(`🔗 ⚠️ ${remote} DISCONNECTED - will attempt reconnection`)
+          scheduleReconnection(remote, 'conn-disconnected')
           break
         case 'connecting':
           setConnectionHealth(prev => ({ ...prev, [remote]: 'connecting' }))
@@ -934,10 +1081,12 @@ export default function CallPage() {
           if (pc.signalingState === 'stable') {
             createAndSendOffer(remote, pc, 'ice-restart', true)
           }
+          scheduleReconnection(remote, 'ice-failed')
           break
         case 'disconnected':
           console.log(`🔗 ⚠️ ICE DISCONNECTED for ${remote} - connection lost`)
           setConnectionHealth(prev => ({ ...prev, [remote]: 'disconnected' }))
+          scheduleReconnection(remote, 'ice-disconnected')
           break
         case 'connected':
         case 'completed':
@@ -1172,10 +1321,11 @@ export default function CallPage() {
     }
     
     return pc
-  }, [currentUser, createAndSendOffer, getLocalCapabilities, updateRemoteCapabilities, scheduleNegotiation, sendCallSignal])
+  }, [currentUser, createAndSendOffer, getLocalCapabilities, updateRemoteCapabilities, scheduleNegotiation, sendCallSignal, scheduleReconnection])
 
 // Join call room with UNIVERSAL CONNECTION PROTOCOL
   const joinCall = async () => {
+  // Preflight removed: proceed immediately
     setConnecting(true)
     setConnectionSequenceProgress(0)
     setError("")
@@ -2045,132 +2195,156 @@ export default function CallPage() {
   // --- Toggle mirror for local video preview ---
   const toggleMirror = () => {
     setIsMirrored(!isMirrored)
-  }  // --- Toggle video with optimized parallel renegotiation ---
-  const toggleVideo = async () => {
-    if (videoEnabled) {
-      // Turn off video
-      if (localVideoStreamRef.current) {
-        localVideoStreamRef.current.getTracks().forEach(track => track.stop())
-        localVideoStreamRef.current = null
-      }
-      
-      // Remove video tracks using safe replacement (maintain m-line order)
-      const renegotiationPromises = Object.entries(peerConnections.current).map(async ([remote, pc]) => {
-        // Use safeReplaceTrack to replace video track with null (maintains m-line order)
-        const currentVideoTrack = pc.getSenders().find(sender => 
-          sender.track && sender.track.kind === 'video' && 
-          !sender.track.label.toLowerCase().includes('screen')
-        )?.track || null
-        
-        const success = await safeReplaceTrack(pc, currentVideoTrack, null, new MediaStream(), 'video')
-        if (!success) {
-          console.warn(`Failed to safely replace video track for ${remote}, falling back to remove`)
-          // Fallback: remove track (may cause m-line reordering but necessary if replaceTrack fails)
-          pc.getSenders().forEach(sender => {
-            if (sender.track && sender.track.kind === 'video' && !sender.track.label.includes('screen')) {
-              pc.removeTrack(sender)
-            }
-          })
-        }
-        
-        // Trigger renegotiation
-        try {
-          const offer = await pc.createOffer()
-          await pc.setLocalDescription(offer)
-          if (wsRef.current) {
-            wsRef.current.send(JSON.stringify({ 
-              type: "call-offer", 
-              roomId, 
-              from: currentUser, 
-              to: remote, 
-              payload: pc.localDescription 
-            }))
+  }
+
+  // --- Internal helpers for new on-demand preflight video enabling ---
+  const disableVideo = async () => {
+    if (!videoEnabled) return
+    if (localVideoStreamRef.current) {
+      localVideoStreamRef.current.getTracks().forEach(track => track.stop())
+      localVideoStreamRef.current = null
+    }
+    const renegotiationPromises = Object.entries(peerConnections.current).map(async ([remote, pc]) => {
+      const currentVideoTrack = pc.getSenders().find(sender =>
+        sender.track && sender.track.kind === 'video' && !sender.track.label.toLowerCase().includes('screen')
+      )?.track || null
+      const success = await safeReplaceTrack(pc, currentVideoTrack, null, new MediaStream(), 'video')
+      if (!success) {
+        console.warn(`Failed safeReplaceTrack (video off) for ${remote}, fallback remove`)
+        pc.getSenders().forEach(sender => {
+          if (sender.track && sender.track.kind === 'video' && !sender.track.label.includes('screen')) {
+            pc.removeTrack(sender)
           }
-        } catch (error) {
-          console.error(`Error creating video-off offer for ${remote}:`, error)
-        }
-      })
-      
-      // Wait for all renegotiations to complete
-      await Promise.allSettled(renegotiationPromises)
-      setVideoEnabled(false)
-    } else {      // Turn on video
+        })
+      }
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ 
-          video: { 
+        const offer = await pc.createOffer()
+        await pc.setLocalDescription(offer)
+        wsRef.current?.send(JSON.stringify({ type: 'call-offer', roomId, from: currentUser, to: remote, payload: pc.localDescription }))
+      } catch (e) {
+        console.error('Video-off renegotiation failed', e)
+      }
+    })
+    await Promise.allSettled(renegotiationPromises)
+    setVideoEnabled(false)
+  }
+
+  const enableVideoWithStream = async (stream: MediaStream) => {
+    localVideoStreamRef.current = stream
+    const renegotiationPromises = Object.entries(peerConnections.current).map(async ([remote, pc]) => {
+      const videoTrack = stream.getVideoTracks()[0]
+      const success = await safeReplaceTrack(pc, null, videoTrack, stream, 'video')
+      if (!success) {
+        console.warn(`Failed safeReplaceTrack (video on) for ${remote}, fallback addTrack`)
+        if (!pc.getSenders().some(sender => sender.track === videoTrack)) {
+          pc.addTrack(videoTrack, stream)
+        }
+      }
+      const sender = pc.getSenders().find(s => s.track === videoTrack)
+      if (sender) {
+        try {
+          const parameters = sender.getParameters()
+          if (!parameters.encodings) parameters.encodings = [{}]
+          if (parameters.encodings[0]) {
+            parameters.encodings[0].maxBitrate = 4000000
+            parameters.encodings[0].maxFramerate = 60
+            parameters.encodings[0].scaleResolutionDownBy = 1
+          }
+          await sender.setParameters(parameters)
+        } catch (e) {
+          console.warn('Failed to set video sender params', e)
+        }
+      }
+      try {
+        const offer = await pc.createOffer()
+        await pc.setLocalDescription(offer)
+        wsRef.current?.send(JSON.stringify({ type: 'call-offer', roomId, from: currentUser, to: remote, payload: pc.localDescription }))
+      } catch (e) {
+        console.error('Video-on renegotiation failed', e)
+      }
+    })
+    await Promise.allSettled(renegotiationPromises)
+    setVideoEnabled(true)
+  }
+
+  const openVideoPreflight = async () => {
+    if (videoEnabled) return
+    setShowVideoPreflight(true)
+    if (!preflightStreamRef.current) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: {
             facingMode: currentCamera,
             width: { ideal: 1920, min: 1280 },
             height: { ideal: 1080, min: 720 },
-            frameRate: { ideal: 60 }, // 60fps for streaming platform quality
+            frameRate: { ideal: 60 },
             aspectRatio: { ideal: 16/9 }
-          }, 
-          audio: false 
+          },
+          audio: false
         })
-        localVideoStreamRef.current = stream
-        
-        // Add video tracks and trigger parallel renegotiation
-        const renegotiationPromises = Object.entries(peerConnections.current).map(async ([remote, pc]) => {
-          const videoTrack = stream.getVideoTracks()[0]
-          
-          // Use safeReplaceTrack to maintain m-line order
-          const success = await safeReplaceTrack(pc, null, videoTrack, stream, 'video')
-          if (!success) {
-            console.warn(`Failed to safely add video track for ${remote}, falling back to addTrack`)
-            // Fallback: add track normally (may cause m-line reordering)
-            if (!pc.getSenders().some(sender => sender.track === videoTrack)) {
-              pc.addTrack(videoTrack, stream)
-              console.log(`Added video track to peer connection: ${remote}`)
-            }
-          }
-          
-          // Set encoding parameters for video optimization
-          const sender = pc.getSenders().find(s => s.track === videoTrack)
-          if (sender) {
-            try {
-              const parameters = sender.getParameters()
-              if (!parameters.encodings) {
-                parameters.encodings = [{}]
-              }
-              // Optimize for streaming platform quality: high bitrate, 60fps
-              if (parameters.encodings[0]) {
-                parameters.encodings[0].maxBitrate = 4000000 // 4 Mbps for 60fps 1080p streaming
-                parameters.encodings[0].maxFramerate = 60    // 60fps for streaming platform quality
-                parameters.encodings[0].scaleResolutionDownBy = 1 // No downscaling for best quality
-              }
-              await sender.setParameters(parameters)
-              console.log(`Set video encoding parameters for ${remote}`)
-            } catch (error) {
-              console.warn(`Failed to set video encoding parameters for ${remote}:`, error)
-            }
-          }
-          
-          // Trigger renegotiation
-          try {
-            const offer = await pc.createOffer()
-            await pc.setLocalDescription(offer)
-            if (wsRef.current) {
-              wsRef.current.send(JSON.stringify({ 
-                type: "call-offer", 
-                roomId, 
-                from: currentUser, 
-                to: remote, 
-                payload: pc.localDescription 
-              }))
-            }
-          } catch (error) {
-            console.error(`Error creating video offer for ${remote}:`, error)
-          }
-        })
-        
-        // Wait for all renegotiations to complete in parallel
-        await Promise.allSettled(renegotiationPromises)
-        setVideoEnabled(true)
-      } catch (error) {
-        console.error('Error accessing camera:', error)
+        preflightStreamRef.current = stream
+      } catch (e) {
+        console.error('Preflight camera access denied', e)
         setError('Camera access denied')
+        setShowVideoPreflight(false)
       }
     }
-  }// --- Toggle screen sharing with optimized parallel renegotiation ---
+  }
+
+  const cancelVideoPreflight = () => {
+    if (preflightStreamRef.current) {
+      preflightStreamRef.current.getTracks().forEach(t => t.stop())
+      preflightStreamRef.current = null
+    }
+    setShowVideoPreflight(false)
+  }
+
+  const confirmVideoPreflight = async () => {
+    if (!preflightStreamRef.current) return
+    const stream = preflightStreamRef.current
+    preflightStreamRef.current = null // ownership transferred
+    setShowVideoPreflight(false)
+    try {
+      await enableVideoWithStream(stream)
+    } catch (e) {
+      console.error('Enable video from preflight failed', e)
+      setError('Failed to enable camera')
+      stream.getTracks().forEach(t => t.stop())
+    }
+  }
+
+  const preflightFlipCamera = async () => {
+    if (!showVideoPreflight) return
+    const newCamera = currentCamera === 'user' ? 'environment' : 'user'
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: newCamera,
+          width: { ideal: 1920, min: 1280 },
+          height: { ideal: 1080, min: 720 },
+          frameRate: { ideal: 60 },
+          aspectRatio: { ideal: 16/9 }
+        },
+        audio: false
+      })
+      if (preflightStreamRef.current) preflightStreamRef.current.getTracks().forEach(t => t.stop())
+      preflightStreamRef.current = stream
+      setCurrentCamera(newCamera)
+    } catch (e) {
+      console.error('Preflight flip failed', e)
+      setError('Cannot switch camera')
+    }
+  }
+
+  // New public toggle entrypoint used by UI button
+  const toggleVideo = async () => {
+    if (videoEnabled) {
+      await disableVideo()
+    } else {
+      await openVideoPreflight()
+    }
+  }
+  // --- Toggle screen sharing with optimized parallel renegotiation ---
   const toggleScreenShare = async () => {
     if (screenSharing) {
       // Turn off screen sharing with safe track replacement
@@ -3215,6 +3389,47 @@ export default function CallPage() {
           <div className="h-full flex flex-col min-h-0 space-y-4">            
           {/* Control Panel */}
             <div className="bg-gray-50 rounded-lg p-3 flex-shrink-0">
+              {showVideoPreflight && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+                  <div className="bg-white rounded-lg shadow-xl w-full max-w-sm sm:max-w-md flex flex-col">
+                    <div className="px-4 py-3 border-b flex items-center justify-between">
+                      <h3 className="font-semibold text-sm">Camera Preview</h3>
+                      <button onClick={cancelVideoPreflight} className="text-gray-500 hover:text-gray-700 text-xs">Close</button>
+                    </div>
+                    <div className="p-4 space-y-3">
+                      <div className="relative rounded overflow-hidden bg-black aspect-video">
+                        <video
+                          autoPlay
+                          playsInline
+                          muted
+                          ref={(el) => { if (el && preflightStreamRef.current) el.srcObject = preflightStreamRef.current }}
+                          className="w-full h-full object-cover"
+                          style={{ transform: isMirrored ? 'scaleX(-1)' : 'none' }}
+                        />
+                        <div className="absolute top-2 right-2 flex gap-2">
+                          <button
+                            onClick={preflightFlipCamera}
+                            className="bg-white/80 hover:bg-white text-gray-700 rounded px-2 py-1 text-xs"
+                            title="Flip camera"
+                          >Flip</button>
+                          <button
+                            onClick={toggleMirror}
+                            className="bg-white/80 hover:bg-white text-gray-700 rounded px-2 py-1 text-xs"
+                            title="Mirror preview"
+                          >Mirror</button>
+                        </div>
+                      </div>
+                      <div className="text-xs text-gray-600 leading-snug">
+                        Preview your camera before sharing. You can flip or mirror. Click Start when ready.
+                      </div>
+                      <div className="flex gap-2 pt-1">
+                        <Button onClick={cancelVideoPreflight} variant="outline" className="flex-1 text-xs py-2">Cancel</Button>
+                        <Button onClick={confirmVideoPreflight} className="flex-1 text-xs py-2">Start</Button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
               <div className="flex items-center justify-between flex-wrap gap-2">
                 <div className="text-sm font-medium text-gray-700 flex items-center gap-2">
                   Controls
@@ -3226,16 +3441,7 @@ export default function CallPage() {
                     </div>
                   )}
                 </div>
-                <div className="flex items-center gap-2 flex-wrap">{/* Audio Controls */}
-                  <Button
-                    size="sm"
-                    variant={debugStats ? 'default' : 'outline'}
-                    onClick={() => setDebugStats(d => !d)}
-                    className="flex items-center gap-1"
-                    title="Toggle network stats overlay"
-                  >
-                    📊<span className="hidden sm:inline">Stats</span>
-                  </Button>
+                <div className="flex items-center gap-2 flex-wrap">{/* Core Controls Only (mobile-friendly) */}
                   {!actualIsListener && (
                     <Button
                       size="sm"
@@ -3310,6 +3516,22 @@ export default function CallPage() {
                     <span className="hidden sm:inline">Leave</span>
                   </Button>
                 </div>
+              </div>
+              {/* Compact Diagnostics Toggle (separate row to reduce clutter) */}
+              <div className="mt-2 flex items-center justify-between gap-2 text-xs">
+                <button
+                  onClick={() => setDebugStats(d => !d)}
+                  className={`px-2 py-1 rounded border transition-colors ${debugStats ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-600 border-gray-300'}`}
+                  title="Toggle diagnostics"
+                >
+                  {debugStats ? 'Hide Stats' : 'Show Stats'}
+                </button>
+                {debugStats && (
+                  <div className="font-mono text-[10px] leading-tight bg-gray-100 border border-gray-200 rounded px-2 py-1 flex-1 text-right">
+                    <div>UP {(dataUsage.outbound.total/1024/1024).toFixed(2)} MB • DN {(dataUsage.inbound.total/1024/1024).toFixed(2)} MB</div>
+                    <div className="opacity-70">A {(dataUsage.outbound.audio/1024/1024).toFixed(2)}/{(dataUsage.inbound.audio/1024/1024).toFixed(2)} V {(dataUsage.outbound.video/1024/1024).toFixed(2)}/{(dataUsage.inbound.video/1024/1024).toFixed(2)} S {(dataUsage.outbound.screen/1024/1024).toFixed(2)}/{(dataUsage.inbound.screen/1024/1024).toFixed(2)}</div>
+                  </div>
+                )}
               </div>
                 {/* Local Speaking Indicator */}
               {!actualIsListener && (
@@ -3446,6 +3668,12 @@ export default function CallPage() {
                     const isExpanded = expandedParticipants.has(peer);
                     const hasVideo = remoteVideoStreams[peer];
                     const hasScreenShare = remoteScreenStreams[peer];
+                    const net = remoteNetworkStats[peer]
+                    const pathLetter = net?.path === 'relay' ? 'R' : net?.path === 'srflx' ? 'N' : net?.path === 'direct' ? 'D' : undefined
+                    const pathTitle = net?.path ? (
+                      net.path === 'relay' ? 'Relay (TURN in use)' : net.path === 'srflx' ? 'Server-reflexive (likely behind NAT)' : net.path === 'direct' ? 'Direct host-to-host' : 'Unknown path'
+                    ) : 'Unknown path'
+                    const recon = reconnectionStateRef.current[peer]
                     
                     return (
                       <div
@@ -3524,9 +3752,16 @@ export default function CallPage() {
                                   remoteNetworkStats[peer].quality === 'fair' ? 'bg-yellow-100 text-yellow-700 border-yellow-300' :
                                   remoteNetworkStats[peer].quality === 'poor' ? 'bg-orange-100 text-orange-700 border-orange-300' :
                                   'bg-red-100 text-red-700 border-red-300'
-                                }`} title={`RTT ${remoteNetworkStats[peer].rttMs}ms • Loss ${remoteNetworkStats[peer].lossPct}%`}>
+                                }`} title={`RTT ${remoteNetworkStats[peer].rttMs}ms • Loss ${remoteNetworkStats[peer].lossPct}%${pathLetter ? ' • Path ' + pathLetter : ''}`}>
                                   {remoteNetworkStats[peer].quality[0].toUpperCase()}
                                 </span>
+                              )}
+                              {pathLetter && (
+                                <span className={`inline-flex items-center text-[10px] px-1 rounded font-medium border ml-0.5 ${
+                                  pathLetter === 'R' ? 'bg-purple-100 text-purple-700 border-purple-300' :
+                                  pathLetter === 'N' ? 'bg-blue-100 text-blue-700 border-blue-300' :
+                                  'bg-gray-100 text-gray-700 border-gray-300'
+                                }`} title={pathTitle}>{pathLetter}</span>
                               )}
                             </span>
                             {/* Enhanced Connection Health Indicator with detailed feedback */}
@@ -3537,12 +3772,15 @@ export default function CallPage() {
                                 connectionHealth[peer] === 'failed' ? 'bg-red-500 animate-bounce' :
                                 connectionHealth[peer] === 'disconnected' ? 'bg-orange-500' :
                                 'bg-gray-400'
-                              }`} title={`Connection: ${connectionHealth[peer] || 'unknown'}`}></span>
+                              }`} title={`Connection: ${connectionHealth[peer] || 'unknown'}${recon ? ` • Phase ${recon.phase} Attempt ${recon.attempts}` : ''}`}></span>
                               {/* Show state text for failed/problematic connections */}
                               {(connectionHealth[peer] === 'failed' || connectionHealth[peer] === 'disconnected') && (
                                 <span className="text-xs text-red-600 font-medium">
                                   {connectionHealth[peer] === 'failed' ? 'Reconnecting...' : 'Lost'}
                                 </span>
+                              )}
+                              {recon && recon.phase === 2 && connectionHealth[peer] !== 'connected' && (
+                                <Button size="sm" variant="outline" className="h-5 px-1 text-[10px] leading-none" onClick={(e) => { e.stopPropagation(); delete reconnectionStateRef.current[peer]; scheduleReconnection(peer, 'manual-force') }}>Force</Button>
                               )}
                             </span>
                           </div>
@@ -3558,7 +3796,7 @@ export default function CallPage() {
                                   createAndSendOffer(peer, pc, 'manual-ice-restart', true)
                                 }
                               }}
-                              className="p-1 h-6 w-6 sm:h-7 sm:w-7"
+                              className={`p-1 h-6 w-6 sm:h-7 sm:w-7 ${!isExpanded ? 'hidden sm:inline-flex' : 'inline-flex'}`}
                               title="Manual ICE restart"
                             >
                               <RefreshCw className="h-2.5 w-2.5 sm:h-3 sm:w-3" />
@@ -3571,7 +3809,7 @@ export default function CallPage() {
                                 e.stopPropagation()
                                 enterFullscreen(peer)
                               }}
-                              className="p-1 h-6 w-6 sm:h-7 sm:w-7"
+                              className={`p-1 h-6 w-6 sm:h-7 sm:w-7 ${!isExpanded ? 'hidden sm:inline-flex' : 'inline-flex'}`}
                               title={`Enter fullscreen for ${peer}`}
                             >
                               <Maximize className="h-2.5 w-2.5 sm:h-3 sm:w-3" />
@@ -3605,6 +3843,8 @@ export default function CallPage() {
                             <div>RTT: {remoteNetworkStats[peer].rttMs}ms</div>
                             <div>Loss: {remoteNetworkStats[peer].lossPct}%</div>
                             <div>Q: {remoteNetworkStats[peer].quality}</div>
+                            {pathLetter && <div>Path: {pathLetter}</div>}
+                            {recon && recon.phase < 2 && connectionHealth[peer] !== 'connected' && <div>Reconn: P{recon.phase} #{recon.attempts}</div>}
                           </div>
                         )}
                         
@@ -3646,6 +3886,8 @@ export default function CallPage() {
           </div>
         )}
       </main>
+  {/* Preflight dialog removed per user request */}
     </div>
   )
 }
+
