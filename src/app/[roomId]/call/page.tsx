@@ -45,6 +45,24 @@ const buildIceServers = (): RTCIceServer[] => (
 
 const ICE_CONFIG = () => ({ iceServers: buildIceServers() })
 
+// Placeholder screen-share (black) track factory so late joiners always get a stable screen m-line.
+interface ArbitraryScreenTrack extends MediaStreamTrack { isArbitraryScreenTrack?: boolean }
+interface TaggedSender extends RTCRtpSender { __mic?: boolean; __camera?: boolean; __screen?: boolean }
+function createArbitraryScreenPlaceholderTrack(): MediaStreamTrack {
+  const canvas = document.createElement('canvas')
+  canvas.width = 16
+  canvas.height = 16
+  const ctx = canvas.getContext('2d')
+  if (ctx) {
+    ctx.fillStyle = '#000'
+    ctx.fillRect(0, 0, canvas.width, canvas.height)
+  }
+  const stream = canvas.captureStream(1) // 1 fps minimal overhead
+  const track = stream.getVideoTracks()[0] as ArbitraryScreenTrack
+  track.isArbitraryScreenTrack = true
+  return track
+}
+
 export default function CallPage() {
   const params = useParams()
   const router = useRouter()
@@ -392,6 +410,98 @@ export default function CallPage() {
     }, 5000)
     return () => clearInterval(interval)
   }, [joined])
+
+  // Adaptive outbound encoding based on jitter / RTT / loss (lightweight heuristic)
+  useEffect(() => {
+    if (!joined) return
+    const interval = setInterval(async () => {
+      for (const pc of Object.values(peerConnections.current)) {
+        if (pc.signalingState === 'closed') continue
+        try {
+          const stats = await pc.getStats()
+          interface OutboundRtpLike { type: string; kind?: string; id?: string; bytesSent?: number; packetsSent?: number; packetsLost?: number; qualityLimitationReason?: string; jitter?: number; trackId?: string; mediaSourceId?: string }
+          let maxJitter = 0
+          let totalSent = 0
+          let totalLost = 0
+          interface JitterCapable extends OutboundRtpLike { jitter?: number }
+          stats.forEach(r => {
+            const rep = r as unknown as JitterCapable
+            if (rep.type === 'outbound-rtp' && rep.kind === 'video') {
+              if (typeof rep.jitter === 'number') maxJitter = Math.max(maxJitter, rep.jitter)
+              if (typeof rep.packetsSent === 'number') totalSent += rep.packetsSent
+              if (typeof rep.packetsLost === 'number') totalLost += rep.packetsLost
+            }
+          })
+          const lossRatio = totalSent > 50 ? totalLost / totalSent : 0
+          const degrade = lossRatio > 0.08 || maxJitter > 0.06
+          const improve = lossRatio < 0.02 && maxJitter < 0.02
+          if (degrade || improve) {
+            pc.getSenders().forEach(sender => {
+              if (sender.track && sender.track.kind === 'video') {
+                try {
+                  const params = sender.getParameters()
+                  if (!params.encodings) params.encodings = [{}]
+                  const enc = params.encodings[0] || (params.encodings[0] = {})
+                  if (degrade) {
+                    // Step bitrate down with floor
+                    const cur = enc.maxBitrate || 2_500_000
+                    const next = Math.max(350_000, Math.round(cur * 0.6))
+                    if (next < cur) {
+                      enc.maxBitrate = next
+                      enc.scaleResolutionDownBy = Math.min((enc.scaleResolutionDownBy || 1) * 1.1, 2.5)
+                      sender.setParameters(params).catch(() => {})
+                    }
+                  } else if (improve) {
+                    const cur = enc.maxBitrate || 600_000
+                    const next = Math.min(5_000_000, Math.round(cur * 1.3))
+                    if (next > cur) {
+                      enc.maxBitrate = next
+                      enc.scaleResolutionDownBy = Math.max(1, (enc.scaleResolutionDownBy || 1) * 0.9)
+                      sender.setParameters(params).catch(() => {})
+                    }
+                  }
+                } catch {}
+              }
+            })
+          }
+        } catch {}
+      }
+    }, 8000)
+    return () => clearInterval(interval)
+  }, [joined])
+
+  // Outbound stall detector (detects when we send zero bytes on active video for several intervals)
+  const outboundStallRef = useRef<Record<string, { lastBytes: number; stagnant: number }>>({})
+  useEffect(() => {
+    if (!joined) return
+    const interval = setInterval(async () => {
+      for (const [peerId, pc] of Object.entries(peerConnections.current)) {
+        if (pc.signalingState === 'closed') continue
+        try {
+          const stats = await pc.getStats()
+          let videoBytes = 0
+          interface OutboundVideoBytes { type: string; kind?: string; bytesSent?: number }
+          stats.forEach(r => {
+            const rep = r as unknown as OutboundVideoBytes
+            if (rep.type === 'outbound-rtp' && rep.kind === 'video' && typeof rep.bytesSent === 'number') {
+              videoBytes += rep.bytesSent
+            }
+          })
+          const rec = (outboundStallRef.current[peerId] ||= { lastBytes: 0, stagnant: 0 })
+          if (videoBytes === rec.lastBytes) rec.stagnant++; else rec.stagnant = 0
+          rec.lastBytes = videoBytes
+          if (rec.stagnant === 3) {
+            escalateConnection(peerId, 'renegotiate', 'outbound-stall')
+          } else if (rec.stagnant === 5) {
+            escalateConnection(peerId, 'ice', 'outbound-stall')
+          } else if (rec.stagnant === 7) {
+            escalateConnection(peerId, 'rebuild', 'outbound-stall')
+          }
+        } catch {}
+      }
+    }, 5000)
+    return () => clearInterval(interval)
+  }, [joined, escalateConnection])
   
   // ROBUST CONNECTION: Add connection health monitoring
   const [connectionHealth, setConnectionHealth] = useState<Record<string, 'connecting' | 'connected' | 'failed' | 'disconnected'>>({})
@@ -930,21 +1040,24 @@ export default function CallPage() {
            sender.track.label.toLowerCase().includes('screen'))
         )
       } else if (trackType === 'video') {
-        // Find camera video sender (not screen)
-        targetSender = pc.getSenders().find(sender => 
-          sender.track && sender.track.kind === 'video' && 
-          !sender.track.label.toLowerCase().includes('screen') &&
-          !sender.track.label.toLowerCase().includes('monitor') &&
-          !sender.track.label.toLowerCase().includes('display')
-        )
+        // Prefer sender explicitly tagged as camera.
+  targetSender = pc.getSenders().find(s => (s as TaggedSender).__camera)
+        if (!targetSender) {
+          targetSender = pc.getSenders().find(sender => 
+            sender.track && sender.track.kind === 'video' && 
+            !sender.track.label.toLowerCase().includes('screen') &&
+            !sender.track.label.toLowerCase().includes('monitor') &&
+            !sender.track.label.toLowerCase().includes('display') &&
+            !(sender as TaggedSender).__screen
+          )
+        }
       } else if (trackType === 'screen') {
-        // Find screen video sender
-        targetSender = pc.getSenders().find(sender => 
-          sender.track && sender.track.kind === 'video' && 
-          (sender.track.label.toLowerCase().includes('screen') ||
-           sender.track.label.toLowerCase().includes('monitor') ||
-           sender.track.label.toLowerCase().includes('display'))
-        )
+        // Prefer a sender explicitly tagged as screen.
+  targetSender = pc.getSenders().find(s => (s as TaggedSender).__screen)
+        if (!targetSender) {
+          const videoSenders = pc.getSenders().filter(s => s.track && s.track.kind === 'video')
+            if (videoSenders.length > 1) targetSender = videoSenders[1]
+        }
       }
       
       if (targetSender) {
@@ -1056,35 +1169,46 @@ export default function CallPage() {
     // regardless of current track availability. Real tracks (or arbitrary placeholders) are then bound.
     // This prevents "cut off" media for peers joining after initial negotiation bursts.
   try {
-      // Audio
+      // Audio baseline transceiver
       let audioTransceiver = pc.getTransceivers().find(t => t.receiver.track.kind === 'audio')
-      if (!audioTransceiver) {
-        audioTransceiver = pc.addTransceiver('audio', { direction: 'sendrecv' })
-      } else if (audioTransceiver.direction !== 'sendrecv') {
-        audioTransceiver.direction = 'sendrecv'
-      }
-      // Video
-      let videoTransceiver = pc.getTransceivers().find(t => t.receiver.track.kind === 'video')
-      if (!videoTransceiver) {
-        videoTransceiver = pc.addTransceiver('video', { direction: 'sendrecv' })
-      } else if (videoTransceiver.direction !== 'sendrecv') {
-        videoTransceiver.direction = 'sendrecv'
-      }
-      // Bind current local tracks (if any) via replaceTrack for stable ordering
+      if (!audioTransceiver) audioTransceiver = pc.addTransceiver('audio', { direction: 'sendrecv' })
+      else if (audioTransceiver.direction !== 'sendrecv') audioTransceiver.direction = 'sendrecv'
+  if (audioTransceiver?.sender) (audioTransceiver.sender as TaggedSender).__mic = true
+
+      // Primary camera video transceiver (index 0 of video)
+      let cameraTransceiver = pc.getTransceivers().filter(t => t.receiver.track.kind === 'video')[0]
+      if (!cameraTransceiver) cameraTransceiver = pc.addTransceiver('video', { direction: 'sendrecv' })
+      else if (cameraTransceiver.direction !== 'sendrecv') cameraTransceiver.direction = 'sendrecv'
+  if (cameraTransceiver?.sender) (cameraTransceiver.sender as TaggedSender).__camera = true
+
+      // Secondary screen-share transceiver (index 1). Ensure placeholder if no screen yet.
+      let screenTransceiver = pc.getTransceivers().filter(t => t.receiver.track.kind === 'video')[1]
+      if (!screenTransceiver) screenTransceiver = pc.addTransceiver('video', { direction: 'sendrecv' })
+      else if (screenTransceiver.direction !== 'sendrecv') screenTransceiver.direction = 'sendrecv'
+  if (screenTransceiver?.sender) (screenTransceiver.sender as TaggedSender).__screen = true
+
+      // Bind existing local tracks where available, else placeholder for screen.
       const localAudioTrack = localStreamRef.current?.getAudioTracks()[0]
-      if (localAudioTrack && audioTransceiver?.sender) {
-        if (audioTransceiver.sender.track !== localAudioTrack) {
-          audioTransceiver.sender.replaceTrack(localAudioTrack).catch(() => {})
-        }
+      if (localAudioTrack && audioTransceiver?.sender && audioTransceiver.sender.track !== localAudioTrack) {
+        audioTransceiver.sender.replaceTrack(localAudioTrack).catch(() => {})
       }
       const localVideoTrack = localVideoStreamRef.current?.getVideoTracks()[0]
-      if (localVideoTrack && videoTransceiver?.sender) {
-        if (videoTransceiver.sender.track !== localVideoTrack) {
-          videoTransceiver.sender.replaceTrack(localVideoTrack).catch(() => {})
+      if (localVideoTrack && cameraTransceiver?.sender && cameraTransceiver.sender.track !== localVideoTrack) {
+        cameraTransceiver.sender.replaceTrack(localVideoTrack).catch(() => {})
+      }
+      const localScreenTrack = localScreenStreamRef.current?.getVideoTracks()[0]
+      if (screenTransceiver?.sender) {
+        if (localScreenTrack && screenTransceiver.sender.track !== localScreenTrack) {
+          screenTransceiver.sender.replaceTrack(localScreenTrack).catch(() => {})
+        } else if (!localScreenTrack) {
+          const existing = screenTransceiver.sender.track as (ArbitraryScreenTrack | null)
+          if (!existing || !existing.isArbitraryScreenTrack) {
+            screenTransceiver.sender.replaceTrack(createArbitraryScreenPlaceholderTrack()).catch(() => {})
+          }
         }
       }
     } catch (foundationErr) {
-      console.warn('Stable transceiver foundation setup failed (non-fatal):', foundationErr)
+      console.warn('Stable transceiver foundation setup (with screen placeholder) failed (non-fatal):', foundationErr)
     }
     
     // ROBUST CONNECTION: Add connection state monitoring
@@ -2603,7 +2727,10 @@ export default function CallPage() {
         )?.track || null
         
         if (currentScreenTrack) {
-          await safeReplaceTrack(pc, currentScreenTrack, null, new MediaStream(), 'screen')
+          // Instead of going to a null track (which can create an "inactive" m-line in some browsers),
+          // restore a tiny placeholder screen track so late joiners still bind the screen m-line immediately.
+          const placeholder = createArbitraryScreenPlaceholderTrack()
+          await safeReplaceTrack(pc, currentScreenTrack, placeholder, new MediaStream([placeholder]), 'screen')
         }
         
         // Remove system audio track safely
@@ -2963,7 +3090,14 @@ export default function CallPage() {
           const cleanupPromises = Object.entries(peerConnections.current).map(async ([remote, pc]) => {
             pc.getSenders().forEach(sender => {
               if (sender.track && sender.track.readyState === 'ended') {
-                pc.removeTrack(sender)
+                // For screen sender, restore placeholder instead of removing entirely
+                const tagged = sender as TaggedSender
+                if (tagged.__screen) {
+                  const placeholder = createArbitraryScreenPlaceholderTrack()
+                  try { sender.replaceTrack(placeholder) } catch {}
+                } else {
+                  pc.removeTrack(sender)
+                }
               }
             })
             
