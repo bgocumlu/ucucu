@@ -10,7 +10,6 @@ import { NotificationBell } from "@/components/notification-bell"
 declare global {
   interface Window {
     webkitAudioContext?: typeof AudioContext
-    __ICE_SERVERS__?: RTCIceServer[]
   }
   
   interface HTMLElement {
@@ -30,42 +29,7 @@ declare global {
 }
 
 const SIGNALING_SERVER_URL = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:3001"
-// Build ICE servers dynamically so TURN can be injected via env (all in-memory, no persistence)
-// Optional envs:
-//  NEXT_PUBLIC_TURN_URLS=turn:turn.example.com:3478,turns:turn.example.com:5349
-//  NEXT_PUBLIC_TURN_USERNAME=user
-//  NEXT_PUBLIC_TURN_CREDENTIAL=pass
-const buildIceServers = (): RTCIceServer[] => (
-  [
-    { urls: ["stun:stun.l.google.com:19302"] },
-    // Hardcoded TURN servers (replace with your actual host / creds)
-    { urls: ["turn:turn.yourhost.com:3478", "turns:turn.yourhost.com:5349"], username: "user", credential: "pass" }
-  ]
-)
-
-const ICE_CONFIG = () => ({ iceServers: buildIceServers() })
-
-// Placeholder screen-share (black) track factory so late joiners always get a stable screen m-line.
-interface ArbitraryScreenTrack extends MediaStreamTrack { isArbitraryScreenTrack?: boolean }
-interface TaggedSender extends RTCRtpSender { __mic?: boolean; __camera?: boolean; __screen?: boolean }
-function createArbitraryScreenPlaceholderTrack(): MediaStreamTrack {
-  const canvas = document.createElement('canvas')
-  canvas.width = 16
-  canvas.height = 16
-  const ctx = canvas.getContext('2d')
-  if (ctx) {
-    ctx.fillStyle = '#000'
-    ctx.fillRect(0, 0, canvas.width, canvas.height)
-  }
-  const stream = canvas.captureStream(1) // 1 fps minimal overhead
-  const track = stream.getVideoTracks()[0] as ArbitraryScreenTrack
-  track.isArbitraryScreenTrack = true
-  // Ensure label contains 'screen' so existing screen sender is detected and replaced instead of adding a new m-line.
-  try {
-    Object.defineProperty(track, 'label', { value: 'Screen Placeholder', configurable: false })
-  } catch { /* non-fatal */ }
-  return track
-}
+const ICE_CONFIG = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] }
 
 export default function CallPage() {
   const params = useParams()
@@ -84,11 +48,6 @@ export default function CallPage() {
   const [remoteVideoStreams, setRemoteVideoStreams] = useState<Record<string, MediaStream>>({})
   const [remoteScreenStreams, setRemoteScreenStreams] = useState<Record<string, MediaStream>>({})
   const [remoteSystemAudioStreams, setRemoteSystemAudioStreams] = useState<Record<string, MediaStream>>({}) // NEW: separate system audio streams
-  // Mirror remote video/screen streams in refs for immediate synchronous access during ontrack classification
-  const remoteVideoStreamsRef = useRef<Record<string, MediaStream>>({})
-  const remoteScreenStreamsRef = useRef<Record<string, MediaStream>>({})
-  useEffect(() => { remoteVideoStreamsRef.current = remoteVideoStreams }, [remoteVideoStreams])
-  useEffect(() => { remoteScreenStreamsRef.current = remoteScreenStreams }, [remoteScreenStreams])
   const [participants, setParticipants] = useState<Set<string>>(new Set()) // Track all participants
   const localAudioRef = useRef<HTMLAudioElement>(null)
   const localVideoRef = useRef<HTMLVideoElement>(null)
@@ -100,107 +59,6 @@ export default function CallPage() {
   const localScreenStreamRef = useRef<MediaStream | null>(null)
   const localSystemAudioStreamRef = useRef<MediaStream | null>(null)
   const peerConnections = useRef<Record<string, RTCPeerConnection>>({})
-  // Reconnection manager state
-  const reconnectionStateRef = useRef<Record<string, { phase: number; attempts: number; nextDelay: number; timer?: number }>>({})
-  // Negotiation state per peer for perfect negotiation pattern
-  const negotiationStateRef = useRef<Record<string, { isMakingOffer: boolean; ignoreOffer: boolean; polite: boolean }>>({})
-  // Negotiation control (coalescing & rate limiting)
-  const negotiationControlRef = useRef<Record<string, { lastOfferAt: number; timer: number | null; pendingIceRestart: boolean; reasons: Set<string> }>>({})
-  // Track candidate video streams per peer for post-arrival reconciliation (late join screen detection)
-  const remoteVideoCandidatesRef = useRef<Record<string, Set<string>>>({})
-
-  // Unified signaling sender ensuring username consistency
-  interface CallSignal {
-    type: string
-    roomId?: string
-    username?: string
-    from?: string
-    to?: string
-  payload?: RTCSessionDescriptionInit | RTCIceCandidateInit | null
-    [k: string]: unknown
-  }
-  const sendCallSignal = useCallback((message: CallSignal) => {
-    if (!wsRef.current) return
-    if (!message.roomId) message.roomId = roomId
-    // Ensure identity metadata for all call-* messages
-    if (message.type?.startsWith('call-')) {
-      if (!('username' in message)) message.username = currentUser
-      if (!('from' in message)) message.from = currentUser
-    }
-    try { wsRef.current.send(JSON.stringify(message)) } catch { /* ignore */ }
-  }, [currentUser, roomId])
-
-  // Central helper to send an offer safely with glare handling
-  const createAndSendOffer = useCallback(async (peerId: string, pc: RTCPeerConnection, reason: string, iceRestart: boolean = false) => {
-    const ctrl = (negotiationControlRef.current[peerId] ||= { lastOfferAt: 0, timer: null, pendingIceRestart: false, reasons: new Set() })
-    const now = Date.now()
-    const MIN_INTERVAL = 700 // ms between actual offers
-    // Rate limit: if too soon since last offer, schedule instead
-    if (now - ctrl.lastOfferAt < MIN_INTERVAL && pc.signalingState !== 'have-local-offer') {
-      // queue
-      ctrl.reasons.add(reason)
-      if (iceRestart) ctrl.pendingIceRestart = true
-      if (!ctrl.timer) {
-        const delay = MIN_INTERVAL - (now - ctrl.lastOfferAt) + 25
-        ctrl.timer = window.setTimeout(() => {
-          ctrl.timer = null
-          // Re-run with aggregated reasons
-          const aggReason = Array.from(ctrl.reasons).join(',') || 'coalesced'
-          const doIceRestart = ctrl.pendingIceRestart
-          ctrl.reasons.clear()
-          ctrl.pendingIceRestart = false
-          createAndSendOffer(peerId, pc, aggReason, doIceRestart)
-        }, delay)
-      }
-      return
-    }
-    try {
-      if (!negotiationStateRef.current[peerId]) return
-      const state = negotiationStateRef.current[peerId]
-      state.isMakingOffer = true
-      console.log(`📡 Creating offer (${reason}) to ${peerId}${iceRestart ? ' with ICE restart' : ''}`)
-      const offer = await pc.createOffer(iceRestart ? { iceRestart: true } : undefined)
-      if (pc.signalingState !== 'closed') {
-        await pc.setLocalDescription(offer)
-        ctrl.lastOfferAt = Date.now()
-        sendCallSignal({
-          type: 'call-offer',
-          roomId,
-          to: peerId,
-          payload: pc.localDescription
-        })
-      }
-    } catch (err) {
-      console.warn(`⚠️ Offer creation failed for ${peerId}:`, err)
-    } finally {
-      if (negotiationStateRef.current[peerId]) {
-        negotiationStateRef.current[peerId].isMakingOffer = false
-      }
-    }
-  }, [roomId, sendCallSignal])
-
-  // Coalesced negotiation scheduler (short debounce to group multiple triggers within 120ms)
-  const scheduleNegotiation = useCallback((peerId: string, pc: RTCPeerConnection, reason: string, iceRestart = false) => {
-    const ctrl = (negotiationControlRef.current[peerId] ||= { lastOfferAt: 0, timer: null, pendingIceRestart: false, reasons: new Set() })
-    ctrl.reasons.add(reason)
-    if (iceRestart) ctrl.pendingIceRestart = true
-    if (ctrl.timer) {
-      return // already scheduled
-    }
-    ctrl.timer = window.setTimeout(() => {
-      ctrl.timer = null
-      const aggReason = Array.from(ctrl.reasons).join(',') || 'debounced'
-      const doIceRestart = ctrl.pendingIceRestart
-      ctrl.reasons.clear()
-      ctrl.pendingIceRestart = false
-      if (pc.signalingState === 'stable') {
-        createAndSendOffer(peerId, pc, aggReason, doIceRestart)
-      } else {
-        // If not stable, try again shortly
-        scheduleNegotiation(peerId, pc, 'wait-stable-' + aggReason, doIceRestart)
-      }
-    }, 120) // debounce window
-  }, [createAndSendOffer])
   const [muted, setMuted] = useState(false)
   const [videoEnabled, setVideoEnabled] = useState(false)
   const [screenSharing, setScreenSharing] = useState(false)
@@ -209,310 +67,6 @@ export default function CallPage() {
   const [peerMuted, setPeerMuted] = useState<Record<string, boolean>>({}) // <--- NEW: track muted state for each remote peer
   const [speakingPeers, setSpeakingPeers] = useState<Record<string, boolean>>({})
   const [localSpeaking, setLocalSpeaking] = useState(false)
-  // Network quality stats per peer
-  const [remoteNetworkStats, setRemoteNetworkStats] = useState<Record<string, { rttMs: number; lossPct: number; quality: 'excellent' | 'good' | 'fair' | 'poor' | 'bad'; path?: 'direct' | 'srflx' | 'relay' | 'unknown' }>>({})
-  const [debugStats, setDebugStats] = useState(false)
-  // Cumulative data usage (approx) per direction & media kind (bytes)
-  const [dataUsage, setDataUsage] = useState<{
-    outbound: { audio: number; video: number; screen: number; total: number }
-    inbound: { audio: number; video: number; screen: number; total: number }
-    lastUpdated: number | null
-  }>({ outbound: { audio: 0, video: 0, screen: 0, total: 0 }, inbound: { audio: 0, video: 0, screen: 0, total: 0 }, lastUpdated: null })
-  // Internal baseline maps to accumulate deltas (report IDs -> bytes)
-  const usageBaselinesRef = useRef<{ outbound: Record<string, number>; inbound: Record<string, number> }>({ outbound: {}, inbound: {} })
-  // Per-peer inbound liveness (stalled detection)
-  const inboundLivenessRef = useRef<Record<string, { audioBytes: number; videoBytes: number; stagnantAudio: number; stagnantVideo: number }>>({})
-  // Remote audio analyser for silence detection
-  const remoteAudioAnalyserRef = useRef<Record<string, { analyser: AnalyserNode; ctx: AudioContext; data: Uint8Array; silentCycles: number }>>({})
-  // Escalation cooldown tracking to prevent thrash across detectors
-  const lastEscalationRef = useRef<Record<string, { lastRenegotiate: number; lastIce: number; lastRebuild: number }>>({})
-  // Auto force-sync cooldown
-  const lastAutoForceSyncRef = useRef<number>(0)
-  const [lastAutoForceSyncAt, setLastAutoForceSyncAt] = useState<number | null>(null)
-
-  // Centralized, rate-limited escalation helper used by all reliability detectors
-  const escalateConnection = useCallback((peerId: string, stage: 'renegotiate' | 'ice' | 'rebuild', reason: string) => {
-    const now = Date.now()
-    const rec = (lastEscalationRef.current[peerId] ||= { lastRenegotiate: 0, lastIce: 0, lastRebuild: 0 })
-    // Minimum spacing (ms)
-    const MIN_RENEGOTIATE = 5000
-    const MIN_ICE = 12000
-    const MIN_REBUILD = 20000
-    // If a higher-level action occurred recently, suppress lower levels
-    if (stage === 'renegotiate') {
-      if (now - rec.lastRebuild < MIN_REBUILD || now - rec.lastIce < MIN_ICE) return false
-      if (now - rec.lastRenegotiate < MIN_RENEGOTIATE) return false
-    } else if (stage === 'ice') {
-      if (now - rec.lastRebuild < MIN_REBUILD) return false
-      if (now - rec.lastIce < MIN_ICE) return false
-    } else if (stage === 'rebuild') {
-      if (now - rec.lastRebuild < MIN_REBUILD) return false
-    }
-    const pc = peerConnections.current[peerId]
-    if (!pc) return false
-    if (stage === 'renegotiate') {
-      if (pc.signalingState === 'stable') {
-        console.log(`🛡️ [Escalate] Renegotiate ${peerId} (${reason})`)
-        scheduleNegotiation(peerId, pc, reason)
-        rec.lastRenegotiate = now
-        return true
-      }
-      return false
-    }
-    if (stage === 'ice') {
-      if (pc.signalingState === 'stable') {
-        console.log(`🛡️ [Escalate] ICE restart ${peerId} (${reason})`)
-        createAndSendOffer(peerId, pc, reason, true)
-        rec.lastIce = now
-        return true
-      }
-      return false
-    }
-    // rebuild
-    console.log(`🛡️ [Escalate] Rebuild PeerConnection for ${peerId} (${reason})`)
-    recreatePeerConnection(peerId)
-    rec.lastRebuild = now
-    return true
-  // recreatePeerConnection intentionally excluded: recreated via late-binding after createPeerConnection; stable ref inside escalation paths.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scheduleNegotiation, createAndSendOffer])
-
-  // ===== CAPABILITIES & DATA CHANNEL MANAGEMENT (ensure declared after dependent state) =====
-  const dataChannelsRef = useRef<Record<string, RTCDataChannel>>({})
-  const [remoteCapabilities, setRemoteCapabilities] = useState<Record<string, { mic: boolean; camera: boolean; screen: boolean; systemAudio: boolean }>>({})
-  const lastIceRestartRef = useRef<Record<string, number>>({})
-
-  const updateRemoteCapabilities = useCallback((peerId: string, caps: Partial<{ mic: boolean; camera: boolean; screen: boolean; systemAudio: boolean }>) => {
-    setRemoteCapabilities(prev => {
-      const existing = prev[peerId] || { mic: false, camera: false, screen: false, systemAudio: false }
-      return { ...prev, [peerId]: { ...existing, ...caps } }
-    })
-  }, [setRemoteCapabilities])
-
-  const getLocalCapabilities = useCallback(() => {
-    const hasRealMic = !!localStreamRef.current?.getAudioTracks().some(t => !("isArbitraryTrack" in t)) && !muted
-    const hasCamera = !!localVideoStreamRef.current?.getVideoTracks().length && videoEnabled
-    const hasScreen = !!localScreenStreamRef.current?.getVideoTracks().length && screenSharing
-    const hasSystem = !!localSystemAudioStreamRef.current?.getAudioTracks().length && screenSharing
-    return { mic: hasRealMic, camera: hasCamera, screen: hasScreen, systemAudio: hasSystem }
-  }, [muted, videoEnabled, screenSharing])
-
-  const broadcastCapabilities = useCallback(() => {
-    const caps = getLocalCapabilities()
-    Object.values(dataChannelsRef.current).forEach(dc => {
-      if (dc.readyState === 'open') {
-        try { dc.send(JSON.stringify({ type: 'caps', payload: caps })) } catch {}
-      }
-    })
-  }, [getLocalCapabilities])
-
-  // Periodic network stats collection (RTT / packet loss) feeding remoteNetworkStats
-  useEffect(() => {
-    if (!joined) return
-    const interval = setInterval(async () => {
-      for (const [peerId, pc] of Object.entries(peerConnections.current)) {
-        if (pc.signalingState === 'closed') continue
-        try {
-          const stats = await pc.getStats()
-          let outboundAudioBytes = 0
-          let outboundVideoBytes = 0
-          let outboundScreenBytes = 0
-          let inboundAudioBytes = 0
-          let inboundVideoBytes = 0
-          let inboundScreenBytes = 0
-          interface CandidatePairLike { currentRoundTripTime?: number; roundTripTime?: number; state?: string; nominated?: boolean; localCandidateId?: string; remoteCandidateId?: string }
-          interface IceCandidateLike { id?: string; candidateType?: 'host' | 'srflx' | 'relay' | 'prflx'; type?: string }
-          const candidatePairs: CandidatePairLike[] = []
-          const localCandidates: Record<string, IceCandidateLike> = {}
-          const remoteCandidates: Record<string, IceCandidateLike> = {}
-          let totalPackets = 0
-          let lostPackets = 0
-          stats.forEach(report => {
-            // Data usage accumulation
-            if (report.type === 'outbound-rtp') {
-              const r = report as unknown as { id: string; kind?: string; bytesSent?: number; frameWidth?: number; frameHeight?: number } // frame dims can help differentiate screen vs camera heuristically later
-              if (typeof r.bytesSent === 'number' && r.kind) {
-                const prev = usageBaselinesRef.current.outbound[r.id] || 0
-                const delta = Math.max(0, r.bytesSent - prev)
-                usageBaselinesRef.current.outbound[r.id] = r.bytesSent
-                if (r.kind === 'audio') outboundAudioBytes += delta
-                if (r.kind === 'video') {
-                  interface VideoLike { mediaSourceId?: unknown; trackIdentifier?: string }
-                  const vr = r as VideoLike
-                  const idStr = typeof vr.mediaSourceId === 'string' ? vr.mediaSourceId : (vr.mediaSourceId ? String(vr.mediaSourceId) : '')
-                  const trackId = vr.trackIdentifier || ''
-                  const isLikelyScreen = idStr.toLowerCase().includes('screen') || trackId.toLowerCase().includes('screen')
-                  if (isLikelyScreen) outboundScreenBytes += delta; else outboundVideoBytes += delta
-                }
-              }
-            } else if (report.type === 'inbound-rtp') {
-              const r = report as unknown as { id: string; kind?: string; bytesReceived?: number; trackIdentifier?: string }
-              if (typeof r.bytesReceived === 'number' && r.kind) {
-                const prev = usageBaselinesRef.current.inbound[r.id] || 0
-                const delta = Math.max(0, r.bytesReceived - prev)
-                usageBaselinesRef.current.inbound[r.id] = r.bytesReceived
-                if (r.kind === 'audio') inboundAudioBytes += delta
-                if (r.kind === 'video') {
-                  const isLikelyScreen = r.trackIdentifier?.toLowerCase?.().includes('screen')
-                  if (isLikelyScreen) inboundScreenBytes += delta; else inboundVideoBytes += delta
-                }
-              }
-            }
-            if (report.type === 'candidate-pair') {
-              const cp = report as unknown as CandidatePairLike
-              if (cp.state === 'succeeded' && cp.nominated) candidatePairs.push(cp)
-            } else if (report.type === 'local-candidate') {
-              const lc = report as unknown as IceCandidateLike
-              if (lc.id) localCandidates[lc.id] = lc
-            } else if (report.type === 'remote-candidate') {
-              const rc = report as unknown as IceCandidateLike
-              if (rc.id) remoteCandidates[rc.id] = rc
-            }
-            if (report.type === 'remote-inbound-rtp' || report.type === 'inbound-rtp') {
-              const r = report as unknown as { kind?: string; packetsReceived?: number; packetsLost?: number }
-              if ((r.kind === 'audio' || r.kind === 'video') && typeof r.packetsReceived === 'number' && typeof r.packetsLost === 'number') {
-                totalPackets += r.packetsReceived + r.packetsLost
-                lostPackets += r.packetsLost
-              }
-            }
-          })
-          // Commit usage deltas to state (aggregate across peers)
-          if (outboundAudioBytes || outboundVideoBytes || outboundScreenBytes || inboundAudioBytes || inboundVideoBytes || inboundScreenBytes) {
-            setDataUsage(prev => {
-              const newOutbound = { ...prev.outbound }
-              const newInbound = { ...prev.inbound }
-              newOutbound.audio += outboundAudioBytes
-              newOutbound.video += outboundVideoBytes
-              newOutbound.screen += outboundScreenBytes
-              newOutbound.total += outboundAudioBytes + outboundVideoBytes + outboundScreenBytes
-              newInbound.audio += inboundAudioBytes
-              newInbound.video += inboundVideoBytes
-              newInbound.screen += inboundScreenBytes
-              newInbound.total += inboundAudioBytes + inboundVideoBytes + inboundScreenBytes
-              return { outbound: newOutbound, inbound: newInbound, lastUpdated: Date.now() }
-            })
-          }
-          let rtt = 0
-            if (candidatePairs.length) {
-              rtt = candidatePairs.reduce((min, p) => Math.min(min, (p.currentRoundTripTime ?? p.roundTripTime ?? Infinity)), Infinity)
-            }
-          // Determine path type from selected pair (take first succeeded nominated)
-          let path: 'direct' | 'srflx' | 'relay' | 'unknown' = 'unknown'
-          const selected = candidatePairs[0]
-          if (selected && selected.localCandidateId && selected.remoteCandidateId) {
-            const lc = localCandidates[selected.localCandidateId]
-            const rc = remoteCandidates[selected.remoteCandidateId]
-            if (lc?.candidateType === 'relay' || rc?.candidateType === 'relay') path = 'relay'
-            else if (lc?.candidateType === 'srflx' || rc?.candidateType === 'srflx') path = 'srflx'
-            else if (lc?.candidateType === 'host' && rc?.candidateType === 'host') path = 'direct'
-          }
-          const lossRatio = totalPackets > 200 ? lostPackets / totalPackets : 0
-          const rttMs = (rtt || 0) * 1000
-          let quality: 'excellent' | 'good' | 'fair' | 'poor' | 'bad' = 'excellent'
-          if (lossRatio > 0.2 || rttMs > 1500) quality = 'bad'
-          else if (lossRatio > 0.1 || rttMs > 800) quality = 'poor'
-          else if (lossRatio > 0.05 || rttMs > 400) quality = 'fair'
-          else if (lossRatio > 0.02 || rttMs > 250) quality = 'good'
-          setRemoteNetworkStats(prev => ({ ...prev, [peerId]: { rttMs: Math.round(rttMs), lossPct: +(lossRatio * 100).toFixed(1), quality, path } }))
-        } catch {
-          /* ignore */
-        }
-      }
-    }, 5000)
-    return () => clearInterval(interval)
-  }, [joined])
-
-  // Adaptive outbound encoding based on jitter / RTT / loss (lightweight heuristic)
-  useEffect(() => {
-    if (!joined) return
-    const interval = setInterval(async () => {
-      for (const pc of Object.values(peerConnections.current)) {
-        if (pc.signalingState === 'closed') continue
-        try {
-          const stats = await pc.getStats()
-          interface OutboundRtpLike { type: string; kind?: string; id?: string; bytesSent?: number; packetsSent?: number; packetsLost?: number; qualityLimitationReason?: string; jitter?: number; trackId?: string; mediaSourceId?: string }
-          let maxJitter = 0
-          let totalSent = 0
-          let totalLost = 0
-          interface JitterCapable extends OutboundRtpLike { jitter?: number }
-          stats.forEach(r => {
-            const rep = r as unknown as JitterCapable
-            if (rep.type === 'outbound-rtp' && rep.kind === 'video') {
-              if (typeof rep.jitter === 'number') maxJitter = Math.max(maxJitter, rep.jitter)
-              if (typeof rep.packetsSent === 'number') totalSent += rep.packetsSent
-              if (typeof rep.packetsLost === 'number') totalLost += rep.packetsLost
-            }
-          })
-          const lossRatio = totalSent > 50 ? totalLost / totalSent : 0
-          const degrade = lossRatio > 0.08 || maxJitter > 0.06
-          const improve = lossRatio < 0.02 && maxJitter < 0.02
-          if (degrade || improve) {
-            pc.getSenders().forEach(sender => {
-              if (sender.track && sender.track.kind === 'video') {
-                try {
-                  const params = sender.getParameters()
-                  if (!params.encodings) params.encodings = [{}]
-                  const enc = params.encodings[0] || (params.encodings[0] = {})
-                  if (degrade) {
-                    // Step bitrate down with floor
-                    const cur = enc.maxBitrate || 2_500_000
-                    const next = Math.max(350_000, Math.round(cur * 0.6))
-                    if (next < cur) {
-                      enc.maxBitrate = next
-                      enc.scaleResolutionDownBy = Math.min((enc.scaleResolutionDownBy || 1) * 1.1, 2.5)
-                      sender.setParameters(params).catch(() => {})
-                    }
-                  } else if (improve) {
-                    const cur = enc.maxBitrate || 600_000
-                    const next = Math.min(5_000_000, Math.round(cur * 1.3))
-                    if (next > cur) {
-                      enc.maxBitrate = next
-                      enc.scaleResolutionDownBy = Math.max(1, (enc.scaleResolutionDownBy || 1) * 0.9)
-                      sender.setParameters(params).catch(() => {})
-                    }
-                  }
-                } catch {}
-              }
-            })
-          }
-        } catch {}
-      }
-    }, 8000)
-    return () => clearInterval(interval)
-  }, [joined])
-
-  // Outbound stall detector (detects when we send zero bytes on active video for several intervals)
-  const outboundStallRef = useRef<Record<string, { lastBytes: number; stagnant: number }>>({})
-  useEffect(() => {
-    if (!joined) return
-    const interval = setInterval(async () => {
-      for (const [peerId, pc] of Object.entries(peerConnections.current)) {
-        if (pc.signalingState === 'closed') continue
-        try {
-          const stats = await pc.getStats()
-          let videoBytes = 0
-          interface OutboundVideoBytes { type: string; kind?: string; bytesSent?: number }
-          stats.forEach(r => {
-            const rep = r as unknown as OutboundVideoBytes
-            if (rep.type === 'outbound-rtp' && rep.kind === 'video' && typeof rep.bytesSent === 'number') {
-              videoBytes += rep.bytesSent
-            }
-          })
-          const rec = (outboundStallRef.current[peerId] ||= { lastBytes: 0, stagnant: 0 })
-          if (videoBytes === rec.lastBytes) rec.stagnant++; else rec.stagnant = 0
-          rec.lastBytes = videoBytes
-          if (rec.stagnant === 3) {
-            escalateConnection(peerId, 'renegotiate', 'outbound-stall')
-          } else if (rec.stagnant === 5) {
-            escalateConnection(peerId, 'ice', 'outbound-stall')
-          } else if (rec.stagnant === 7) {
-            escalateConnection(peerId, 'rebuild', 'outbound-stall')
-          }
-        } catch {}
-      }
-    }, 5000)
-    return () => clearInterval(interval)
-  }, [joined, escalateConnection])
   
   // ROBUST CONNECTION: Add connection health monitoring
   const [connectionHealth, setConnectionHealth] = useState<Record<string, 'connecting' | 'connected' | 'failed' | 'disconnected'>>({})
@@ -704,14 +258,7 @@ export default function CallPage() {
           datas[peer] = new Uint8Array(analysers[peer].fftSize)
           const src = audioContexts[peer].createMediaStreamSource(stream)
           src.connect(analysers[peer])
-        }
-        // Collect audio samples for RMS calculation
-        if (analysers[peer]) {
-          // TS lib mismatch workaround: getByteTimeDomainData expects Uint8Array; our buffer is standard Uint8Array.
-          // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-          // @ts-ignore
-          analysers[peer].getByteTimeDomainData(datas[peer])
-        }
+        }        analysers[peer].getByteTimeDomainData(datas[peer])
         const rms = Math.sqrt(datas[peer].reduce((sum, v) => sum + Math.pow(v - 128, 2), 0) / datas[peer].length)
         newSpeaking[peer] = rms > 4
       })
@@ -928,57 +475,11 @@ export default function CallPage() {
     setCurrentUser(username)
   }, [roomId, router])  // Perfect negotiation implementation to handle SSL transport role conflicts
   async function safeSetRemoteDescription(pc: RTCPeerConnection, desc: RTCSessionDescriptionInit, isPolite: boolean = false) {
-    // Track last answer time to suppress immediate renegotiation loops
-    const answerLoopGuard = (window as unknown as { __lastRemoteAnswerAt?: number })
-    if (desc.type === 'answer') {
-      answerLoopGuard.__lastRemoteAnswerAt = Date.now()
-    }
-    // Throttled / deduplicated logging & duplicate SDP guard
-    if (pc.remoteDescription && pc.remoteDescription.type === desc.type && pc.remoteDescription.sdp === desc.sdp) {
-      return 'ignored'
-    }
-
-    interface RTCLogCache { [k: string]: { last: number; suppressed: number } }
-    const win = window as unknown as { __rtcLogCache?: RTCLogCache }
-    if (!win.__rtcLogCache) win.__rtcLogCache = {}
-    const cache = win.__rtcLogCache
-    const key = `setRemote:${desc.type}:${isPolite}`
-    const now = Date.now()
-    const entry = cache[key] || { last: 0, suppressed: 0 }
-    const elapsed = now - entry.last
-    if (elapsed < 2000) {
-      // Suppress burst; count suppressed
-      entry.suppressed += 1
-      cache[key] = entry
-    } else {
-      if (entry.suppressed > 0) {
-        console.log(`Setting remote description: ${desc.type} (polite=${isPolite}) +${entry.suppressed} suppressed repeats`)
-        entry.suppressed = 0
-      } else {
-        console.log(`Setting remote description: ${desc.type}, signaling state: ${pc.signalingState}, isPolite: ${isPolite}`)
-      }
-      entry.last = now
-      cache[key] = entry
-    }
+    console.log(`Setting remote description: ${desc.type}, signaling state: ${pc.signalingState}, isPolite: ${isPolite}`)
     
     try {
       await pc.setRemoteDescription(new RTCSessionDescription(desc));
-      // Success log throttled similarly
-      const skey = `setRemoteSuccess:${desc.type}`
-      const sentry = cache[skey] || { last: 0, suppressed: 0 }
-      const selapsed = now - sentry.last
-      if (selapsed < 2000) {
-        sentry.suppressed += 1
-      } else {
-        if (sentry.suppressed > 0) {
-          console.log(`Successfully set remote ${desc.type} (+${sentry.suppressed} suppressed)`)
-          sentry.suppressed = 0
-        } else {
-          console.log(`Successfully set remote ${desc.type}`)
-        }
-        sentry.last = Date.now()
-      }
-      cache[skey] = sentry
+      console.log(`Successfully set remote ${desc.type}`)
       return 'success'
     } catch (e: unknown) {
       const error = e as Error;
@@ -1051,24 +552,21 @@ export default function CallPage() {
            sender.track.label.toLowerCase().includes('screen'))
         )
       } else if (trackType === 'video') {
-        // Prefer sender explicitly tagged as camera.
-  targetSender = pc.getSenders().find(s => (s as TaggedSender).__camera)
-        if (!targetSender) {
-          targetSender = pc.getSenders().find(sender => 
-            sender.track && sender.track.kind === 'video' && 
-            !sender.track.label.toLowerCase().includes('screen') &&
-            !sender.track.label.toLowerCase().includes('monitor') &&
-            !sender.track.label.toLowerCase().includes('display') &&
-            !(sender as TaggedSender).__screen
-          )
-        }
+        // Find camera video sender (not screen)
+        targetSender = pc.getSenders().find(sender => 
+          sender.track && sender.track.kind === 'video' && 
+          !sender.track.label.toLowerCase().includes('screen') &&
+          !sender.track.label.toLowerCase().includes('monitor') &&
+          !sender.track.label.toLowerCase().includes('display')
+        )
       } else if (trackType === 'screen') {
-        // Prefer a sender explicitly tagged as screen.
-  targetSender = pc.getSenders().find(s => (s as TaggedSender).__screen)
-        if (!targetSender) {
-          const videoSenders = pc.getSenders().filter(s => s.track && s.track.kind === 'video')
-            if (videoSenders.length > 1) targetSender = videoSenders[1]
-        }
+        // Find screen video sender
+        targetSender = pc.getSenders().find(sender => 
+          sender.track && sender.track.kind === 'video' && 
+          (sender.track.label.toLowerCase().includes('screen') ||
+           sender.track.label.toLowerCase().includes('monitor') ||
+           sender.track.label.toLowerCase().includes('display'))
+        )
       }
       
       if (targetSender) {
@@ -1090,137 +588,41 @@ export default function CallPage() {
     }
   }
 
-  // ===== Reconnection Manager (phased backoff) =====
-  // placeholder, actual implementation defined after recreatePeerConnection
-  const scheduleReconnectionRef = useRef<(peerId: string, reason: string) => void>(() => {})
-  const scheduleReconnection = useCallback((peerId: string, reason: string) => scheduleReconnectionRef.current(peerId, reason), [])
-
-  const recreatePeerConnection = (peerId: string) => {
-    (async () => {
-      console.log(`Recreating peer connection for ${peerId}`)
-      const existing = peerConnections.current[peerId]
-      if (existing) {
-        try { existing.close() } catch {}
-        delete peerConnections.current[peerId]
-      }
-      const newPc = createPeerConnection(peerId)
-      try {
-        const offer = await newPc.createOffer()
-        await newPc.setLocalDescription(offer)
-        if (wsRef.current) {
-          wsRef.current.send(JSON.stringify({
-            type: 'call-offer',
-            roomId,
-            from: currentUser,
-            to: peerId,
-            payload: newPc.localDescription
-          }))
-        }
-      } catch (error) {
-        console.error('Error in recreated peer connection offer:', error)
-      }
-    })()
-  }
-
-  // Now implement reconnection logic with stable recreatePeerConnection
-  scheduleReconnectionRef.current = (peerId: string, reason: string) => {
-    const st = (reconnectionStateRef.current[peerId] ||= { phase: 0, attempts: 0, nextDelay: 1000 })
-    if (st.phase === 0) {
-      if (st.attempts >= 3) { st.phase = 1; st.attempts = 0; st.nextDelay = 3000 }
-      else {
-        const pc = peerConnections.current[peerId]
-        if (pc && pc.signalingState === 'stable') {
-          console.log(`🛠️ Reconnection[${peerId}] ICE restart attempt ${st.attempts + 1} (reason: ${reason})`)
-          createAndSendOffer(peerId, pc, 'auto-ice-restart', true)
-        }
-        st.attempts++
-        st.nextDelay *= 2
-        if (st.nextDelay > 4000) st.nextDelay = 4000
-      }
+  const recreatePeerConnection = async (peerId: string) => {
+    console.log(`Recreating peer connection for ${peerId}`)
+    
+    // Close existing connection
+    if (peerConnections.current[peerId]) {
+      peerConnections.current[peerId].close()
+      delete peerConnections.current[peerId]
     }
-    if (st.phase === 1) {
-      if (st.attempts >= 2) { st.phase = 2; st.attempts = 0; st.nextDelay = 8000 }
-      else {
-        console.log(`🛠️ Reconnection[${peerId}] rebuilding PeerConnection attempt ${st.attempts + 1}`)
-        recreatePeerConnection(peerId)
-        st.attempts++
-        st.nextDelay *= 2
-        if (st.nextDelay > 6000) st.nextDelay = 6000
+    
+    // Create new connection
+    const newPc = createPeerConnection(peerId)
+    
+    // Trigger new negotiation
+    try {
+      const offer = await newPc.createOffer()
+      await newPc.setLocalDescription(offer)
+      if (wsRef.current) {
+        wsRef.current.send(JSON.stringify({ 
+          type: "call-offer", 
+          roomId, 
+          from: currentUser, 
+          to: peerId, 
+          payload: newPc.localDescription 
+        }))
       }
+    } catch (error) {
+      console.error('Error in recreated peer connection offer:', error)
     }
-    if (st.phase === 2) {
-      console.log(`🛠️ Reconnection[${peerId}] exhausted attempts - awaiting manual action`)
-      return
-    }
-    clearTimeout(st.timer)
-    st.timer = window.setTimeout(() => {
-      const health = connectionHealth[peerId]
-      if (health === 'connected') return
-      scheduleReconnection(peerId, 'timer')
-    }, st.nextDelay)
   }
 
   const createPeerConnection = useCallback((remote: string) => {
-  // Use dynamic ICE config (includes TURN if env vars provided)
-  const pc = new RTCPeerConnection(ICE_CONFIG())
+    const pc = new RTCPeerConnection(ICE_CONFIG)
     peerConnections.current[remote] = pc
-
-    // Initialize negotiation state (lexicographic smaller username is polite)
-    negotiationStateRef.current[remote] = {
-      isMakingOffer: false,
-      ignoreOffer: false,
-      polite: currentUser < remote
-    }
     
     console.log(`🔗 ⚡ Creating ROBUST peer connection for ${remote} with health monitoring`)
-
-    // --- STABLE M-LINE FOUNDATION (late join fix) ---
-    // Some late join scenarios showed remote peers not receiving existing audio/video until a second renegotiation.
-    // We proactively create sendrecv transceivers for audio & video so the SDP advertises stable m-lines
-    // regardless of current track availability. Real tracks (or arbitrary placeholders) are then bound.
-    // This prevents "cut off" media for peers joining after initial negotiation bursts.
-  try {
-      // Audio baseline transceiver
-      let audioTransceiver = pc.getTransceivers().find(t => t.receiver.track.kind === 'audio')
-      if (!audioTransceiver) audioTransceiver = pc.addTransceiver('audio', { direction: 'sendrecv' })
-      else if (audioTransceiver.direction !== 'sendrecv') audioTransceiver.direction = 'sendrecv'
-  if (audioTransceiver?.sender) (audioTransceiver.sender as TaggedSender).__mic = true
-
-      // Primary camera video transceiver (index 0 of video)
-      let cameraTransceiver = pc.getTransceivers().filter(t => t.receiver.track.kind === 'video')[0]
-      if (!cameraTransceiver) cameraTransceiver = pc.addTransceiver('video', { direction: 'sendrecv' })
-      else if (cameraTransceiver.direction !== 'sendrecv') cameraTransceiver.direction = 'sendrecv'
-  if (cameraTransceiver?.sender) (cameraTransceiver.sender as TaggedSender).__camera = true
-
-      // Secondary screen-share transceiver (index 1). Ensure placeholder if no screen yet.
-      let screenTransceiver = pc.getTransceivers().filter(t => t.receiver.track.kind === 'video')[1]
-      if (!screenTransceiver) screenTransceiver = pc.addTransceiver('video', { direction: 'sendrecv' })
-      else if (screenTransceiver.direction !== 'sendrecv') screenTransceiver.direction = 'sendrecv'
-  if (screenTransceiver?.sender) (screenTransceiver.sender as TaggedSender).__screen = true
-
-      // Bind existing local tracks where available, else placeholder for screen.
-      const localAudioTrack = localStreamRef.current?.getAudioTracks()[0]
-      if (localAudioTrack && audioTransceiver?.sender && audioTransceiver.sender.track !== localAudioTrack) {
-        audioTransceiver.sender.replaceTrack(localAudioTrack).catch(() => {})
-      }
-      const localVideoTrack = localVideoStreamRef.current?.getVideoTracks()[0]
-      if (localVideoTrack && cameraTransceiver?.sender && cameraTransceiver.sender.track !== localVideoTrack) {
-        cameraTransceiver.sender.replaceTrack(localVideoTrack).catch(() => {})
-      }
-      const localScreenTrack = localScreenStreamRef.current?.getVideoTracks()[0]
-      if (screenTransceiver?.sender) {
-        if (localScreenTrack && screenTransceiver.sender.track !== localScreenTrack) {
-          screenTransceiver.sender.replaceTrack(localScreenTrack).catch(() => {})
-        } else if (!localScreenTrack) {
-          const existing = screenTransceiver.sender.track as (ArbitraryScreenTrack | null)
-          if (!existing || !existing.isArbitraryScreenTrack) {
-            screenTransceiver.sender.replaceTrack(createArbitraryScreenPlaceholderTrack()).catch(() => {})
-          }
-        }
-      }
-    } catch (foundationErr) {
-      console.warn('Stable transceiver foundation setup (with screen placeholder) failed (non-fatal):', foundationErr)
-    }
     
     // ROBUST CONNECTION: Add connection state monitoring
     setConnectionHealth(prev => ({ ...prev, [remote]: 'connecting' }))
@@ -1270,12 +672,10 @@ export default function CallPage() {
         case 'failed':
           setConnectionHealth(prev => ({ ...prev, [remote]: 'failed' }))
           console.log(`🔗 ❌ ${remote} CONNECTION FAILED - will trigger immediate recovery`)
-          scheduleReconnection(remote, 'conn-failed')
           break
         case 'disconnected':
           setConnectionHealth(prev => ({ ...prev, [remote]: 'disconnected' }))
           console.log(`🔗 ⚠️ ${remote} DISCONNECTED - will attempt reconnection`)
-          scheduleReconnection(remote, 'conn-disconnected')
           break
         case 'connecting':
           setConnectionHealth(prev => ({ ...prev, [remote]: 'connecting' }))
@@ -1296,16 +696,10 @@ export default function CallPage() {
         case 'failed':
           console.log(`🔗 🚨 ICE FAILED for ${remote} - connection will not work`)
           setConnectionHealth(prev => ({ ...prev, [remote]: 'failed' }))
-          // Attempt ICE restart automatically
-          if (pc.signalingState === 'stable') {
-            createAndSendOffer(remote, pc, 'ice-restart', true)
-          }
-          scheduleReconnection(remote, 'ice-failed')
           break
         case 'disconnected':
           console.log(`🔗 ⚠️ ICE DISCONNECTED for ${remote} - connection lost`)
           setConnectionHealth(prev => ({ ...prev, [remote]: 'disconnected' }))
-          scheduleReconnection(remote, 'ice-disconnected')
           break
         case 'connected':
         case 'completed':
@@ -1323,55 +717,18 @@ export default function CallPage() {
     }
     
     pc.onicecandidate = (e) => {
-      // Ignore null candidate events (end-of-candidates) for now or optionally send a marker
-      if (!e.candidate) return
-      if (!remote) {
-        console.warn('⚠️ ICE candidate event with undefined remote peer id; suppressing send.')
-        return
+      if (e.candidate && wsRef.current) {
+        wsRef.current.send(JSON.stringify({ type: "call-ice", roomId, from: currentUser, to: remote, payload: e.candidate }))
       }
-      const payload = (e.candidate as unknown as { toJSON?: () => RTCIceCandidateInit }).toJSON ? (e.candidate as unknown as { toJSON: () => RTCIceCandidateInit }).toJSON() : (e.candidate as unknown as RTCIceCandidateInit)
-      if (!payload.candidate) return // safety
-      sendCallSignal({ type: 'call-ice', to: remote, payload })
-    }
-
-    // Automatic negotiation handler (fires after track add/replace)
-    pc.onnegotiationneeded = () => {
-      // Suppress churn right after setting a remote answer (<500ms)
-      const lastAns = (window as unknown as { __lastRemoteAnswerAt?: number }).__lastRemoteAnswerAt || 0
-      if (Date.now() - lastAns < 500) {
-        return
-      }
-      if (negotiationStateRef.current[remote]?.isMakingOffer) return
-      if (pc.signalingState !== 'stable') return
-      scheduleNegotiation(remote, pc, 'onnegotiationneeded')
     }
     
     pc.ontrack = (e) => {
       const track = e.track
-      // Some browsers (or race conditions) may deliver an empty e.streams array; synthesize one.
-      const stream = e.streams && e.streams[0] ? e.streams[0] : new MediaStream([track])
+      const stream = e.streams[0]
       
       console.log('Received track:', track.kind, track.label, 'from', remote)
       
       if (track.kind === 'audio') {
-        // Attach analyser for silence detection (once per peer main audio stream)
-        if (!remoteAudioAnalyserRef.current[remote]) {
-          try {
-            const AC: typeof AudioContext | undefined = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
-            const ctx = AC ? new AC() : null
-            if (!ctx) throw new Error('AudioContext unsupported')
-            // Some browsers may deliver empty e.streams; ensure a proper MediaStream
-            const mediaStreamForAudio = stream instanceof MediaStream ? stream : new MediaStream([track])
-            const source = ctx.createMediaStreamSource(mediaStreamForAudio)
-            const analyser = ctx.createAnalyser()
-            analyser.fftSize = 256
-            source.connect(analyser)
-            remoteAudioAnalyserRef.current[remote] = { analyser, ctx, data: new Uint8Array(analyser.frequencyBinCount), silentCycles: 0 }
-            console.log('🛡️ Added audio analyser for', remote)
-          } catch (err) {
-            console.warn('Audio analyser init failed (non-fatal):', err)
-          }
-        }
         // Check if this is a mixed audio track (contains both mic and system audio)
         const isMixedAudio = track.label.toLowerCase().includes('mixed audio') ||
                            track.label.toLowerCase().includes('microphone + system')
@@ -1406,368 +763,111 @@ export default function CallPage() {
           setRemoteStreams(prev => ({ ...prev, [remote]: stream }))
         }
       } else if (track.kind === 'video') {
-        const label = track.label.toLowerCase()
-        const settings = track.getSettings ? track.getSettings() : {}
-        const width = (settings as { width?: number }).width || 0
-        const height = (settings as { height?: number }).height || 0
-        // Primary heuristic (keywords / displaySurface)
-        let keywordHeuristic = label.includes('screen') || label.includes('monitor') || label.includes('display') || (settings as { displaySurface?: string }).displaySurface === 'monitor'
-        if (keywordHeuristic && label.includes('placeholder')) keywordHeuristic = false
-
-        // Fallback heuristic 1: second arriving distinct video stream becomes screen if none assigned yet
-        const existingScreen = remoteScreenStreamsRef.current[remote]
-        const existingCamera = remoteVideoStreamsRef.current[remote]
-        const secondStreamHeuristic = !existingScreen && !!existingCamera && existingCamera.id !== stream.id
-
-        // Fallback heuristic 2: resolution-based (typical screen shares are >= 1280 width or height >= 800)
-        const resolutionHeuristic = !existingScreen && (width >= 1280 || height >= 800)
-
-        // Fallback heuristic 3: transceiver index (best-effort)
-        let indexHeuristic = false
-        try {
-          const allVideo = peerConnections.current[remote]?.getTransceivers().filter(t => t.receiver.track.kind === 'video') || []
-          const second = allVideo[1]
-          indexHeuristic = !!second && second.receiver.track === track && !label.includes('placeholder')
-        } catch {}
-
-        // Fallback heuristic 4: remote capabilities advertise screen
-        const remoteCaps = remoteCapabilities[remote]
-        const capsHeuristic = !!remoteCaps?.screen && !existingScreen
-
-        const isScreenShare = keywordHeuristic || secondStreamHeuristic || resolutionHeuristic || indexHeuristic || capsHeuristic
-        console.log('🔍 Video track classification', {
-          remote,
-            trackLabel: track.label,
-          keywordHeuristic,
-          secondStreamHeuristic,
-          resolutionHeuristic,
-          indexHeuristic,
-          capsHeuristic,
-          width,
-          height,
-          decidedScreen: isScreenShare
-        })
-
+        // Check track label or use track settings to determine if it's screen share
+        // Screen share tracks typically have labels containing 'screen' or have specific constraints
+        const isScreenShare = track.label.toLowerCase().includes('screen') || 
+                             track.label.toLowerCase().includes('monitor') ||
+                             track.label.toLowerCase().includes('display') ||
+                             track.getSettings().displaySurface === 'monitor'
+        
         if (isScreenShare) {
-          setRemoteScreenStreams(prev => {
-            const existing = prev[remote]
-            if (existing && existing.id === stream.id) return prev
-            return { ...prev, [remote]: stream }
-          })
+          console.log('Setting as screen share for', remote)
+          setRemoteScreenStreams(prev => ({ ...prev, [remote]: stream }))
         } else {
-          setRemoteVideoStreams(prev => {
-            const existing = prev[remote]
-            if (existing && existing.id === stream.id) return prev
-            return { ...prev, [remote]: stream }
-          })
+          console.log('Setting as video for', remote)
+          setRemoteVideoStreams(prev => ({ ...prev, [remote]: stream }))
         }
-
-        // Register candidate for reconciliation
-  const set = (remoteVideoCandidatesRef.current[remote] ||= new Set())
-  if (stream && stream.id) set.add(stream.id)
-        // Post-arrival reconciliation: if we have >=2 distinct video streams and no screen decided, pick one
-        setTimeout(() => {
-          const currentScreen = remoteScreenStreamsRef.current[remote]
-          if (currentScreen) return // already have screen
-          const currentVideo = remoteVideoStreamsRef.current[remote]
-          const candidateIds = remoteVideoCandidatesRef.current[remote]
-          if (!candidateIds || candidateIds.size < 2) return
-          // Heuristic: prefer stream with larger resolution; collect latest tracks from DOM refs
-          const allStreams: MediaStream[] = []
-          if (currentVideo) allStreams.push(currentVideo)
-          // Attempt to find second stream via peer connection receivers
-          try {
-            const pc = peerConnections.current[remote]
-            if (pc) {
-              const videoReceivers = pc.getReceivers().filter(r => r.track && r.track.kind === 'video')
-              videoReceivers.forEach(r => {
-                // Build a synthetic stream for measurement if not already captured
-                if (!allStreams.find(s => s.getVideoTracks()[0]?.id === r.track.id)) {
-                  allStreams.push(new MediaStream([r.track]))
-                }
-              })
-            }
-          } catch {}
-          if (allStreams.length < 2) return
-          // Measure resolutions (may be zero early; filter zeros last)
-          interface TrackSettings { width?: number; height?: number }
-          const enriched = allStreams.map(s => {
-            const vt = s.getVideoTracks()[0]
-            if (!vt) return { stream: s, width: 0, height: 0, label: 'unknown' }
-            const st: TrackSettings = vt.getSettings ? vt.getSettings() as TrackSettings : {}
-            return { stream: s, width: st.width || 0, height: st.height || 0, label: vt.label }
-          }).filter(e => e) as { stream: MediaStream; width: number; height: number; label: string }[]
-          enriched.sort((a,b) => (b.width*b.height) - (a.width*a.height))
-          const chosen = enriched.find(e => e.width >= 800 || e.height >= 600) || enriched[0]
-          if (chosen && chosen.stream && chosen.stream.id && chosen.stream.id !== currentVideo?.id) {
-            console.log('🛠️ Reconciliation assigning screen stream for', remote, chosen)
-            setRemoteScreenStreams(prev => ({ ...prev, [remote]: chosen.stream }))
-          }
-        }, 350)
       }
     }
     
-    // --- CONSOLIDATED: Track binding handled via transceivers above; avoid duplicate addTrack (caused InvalidAccessError) ---
-    // We only ensure placeholder foundations exist and bind via existing transceiver senders (replaceTrack), never addTrack here.
-    try {
-      // Ensure arbitrary audio foundation if no real mic track yet
-      const haveRealMic = !!localStreamRef.current?.getAudioTracks().some(t => !('isArbitraryTrack' in t))
-      if (!haveRealMic) {
-        if (!localStreamRef.current || localStreamRef.current.getAudioTracks().length === 0) {
-          const arbitraryAudio = createArbitraryAudioTrack()
-          localStreamRef.current = arbitraryAudio
-        }
-        const micTrack = localStreamRef.current.getAudioTracks()[0]
-        const micSender = pc.getTransceivers().find(t => t.receiver.track.kind === 'audio')?.sender
-        if (micSender && micSender.track !== micTrack) micSender.replaceTrack(micTrack).catch(()=>{})
-      }
-      // Ensure arbitrary camera video foundation if none
-      const haveRealCam = !!localVideoStreamRef.current?.getVideoTracks().some(t => !('isArbitraryTrack' in t))
-      if (!haveRealCam) {
-        if (!localVideoStreamRef.current || localVideoStreamRef.current.getVideoTracks().length === 0) {
-          localVideoStreamRef.current = createArbitraryVideoTrack()
-        }
-        const camTrack = localVideoStreamRef.current.getVideoTracks()[0]
-        const camSender = pc.getTransceivers().filter(t => t.receiver.track.kind === 'video')[0]?.sender
-        if (camSender && camSender.track !== camTrack) camSender.replaceTrack(camTrack).catch(()=>{})
-      }
-      // Screen placeholder already ensured above; if screen sharing active bind real track
-      const realScreenTrack = localScreenStreamRef.current?.getVideoTracks()[0]
-      if (realScreenTrack) {
-        const screenSender = pc.getTransceivers().filter(t => t.receiver.track.kind === 'video')[1]?.sender
-        if (screenSender && screenSender.track !== realScreenTrack) {
-          const existing = screenSender.track as (MediaStreamTrack & { isArbitraryScreenTrack?: boolean }) | null
-          if (existing && existing.isArbitraryScreenTrack) {
-            // Will be replaced below
-          }
-          if (!existing || existing !== realScreenTrack) {
-            screenSender.replaceTrack(realScreenTrack).catch(()=>{})
-          }
-        }
-      }
-    } catch (e) {
-      console.warn('Post-foundation track binding pass failed (non-fatal):', e)
-    }
-    console.log(`🔗 ✅ Peer connection for ${remote} ready with ${pc.getSenders().length} senders (transceiver-based)`)
-    try {
-      const videoTx = pc.getTransceivers().filter(t => t.receiver.track.kind === 'video')
-      console.log('🔎 Transceiver snapshot', remote, videoTx.map((t,i) => ({ index: i, mid: t.mid, dir: t.direction, trackId: t.receiver.track.id, label: t.receiver.track.label })))
-    } catch {}
-
-    // Force an initial offer if we ended up not scheduling one (e.g., both sides waited politely or
-    // late join after tracks already established) to guarantee media flows.
-    setTimeout(() => {
-      const negotiation = negotiationStateRef.current[remote]
-      if (!negotiation) return
-      if (pc.signalingState === 'stable') {
-        const hasAnyTrack = pc.getSenders().some(s => s.track)
-        if (hasAnyTrack) {
-          console.log(`🔗 🎯 Forcing initial negotiation for ${remote} (late-join guarantee)`)
-          scheduleNegotiation(remote, pc, 'late-join-foundation')
-        }
-      }
-    }, 300)
+    // --- ENHANCED: Always add local tracks to new peer connection with robust arbitrary track foundation ---
+    // CRITICAL: Add tracks in STRICT CONSISTENT ORDER to avoid m-line ordering issues
+    console.log(`🔗 Creating ROBUST peer connection for ${remote}. Adding tracks in strict order:`)
     
-    // DATA CHANNEL (capabilities / control). Only one side (lexicographically smaller username) creates channel
-    if (currentUser < remote) {
-      try {
-        const dc = pc.createDataChannel('control')
-        dataChannelsRef.current[remote] = dc
-        console.log(`📡 Created data channel to ${remote}`)
-        dc.onopen = () => {
-          console.log(`📡 Data channel open with ${remote}`)
-          // Send initial capabilities snapshot
-          const caps = getLocalCapabilities()
-            try { dc.send(JSON.stringify({ type: 'caps', payload: caps })) } catch {}
-        }
-        dc.onmessage = (e) => {
-          try {
-            const msg = JSON.parse(e.data)
-            if (msg.type === 'caps') {
-              updateRemoteCapabilities(remote, msg.payload)
-            }
-          } catch (err) {
-            console.warn('Data channel message parse error:', err)
-          }
-        }
-        dc.onclose = () => { console.log(`📡 Data channel closed with ${remote}`); delete dataChannelsRef.current[remote] }
-        dc.onerror = (err) => console.warn('Data channel error', err)
-      } catch (err) {
-        console.warn('Failed to create data channel', err)
+    // STRICT ORDER: Always maintain the same track order across all negotiations
+    // Order: 1) Audio (mic), 2) System Audio, 3) Video (camera), 4) Screen Share
+    
+    // 1. FOUNDATION: Always ensure we have persistent arbitrary tracks for WebRTC foundation
+    const currentAudioTracks = localStreamRef.current?.getAudioTracks() || []
+    const hasRealAudio = currentAudioTracks.some(track => !('isArbitraryTrack' in track))
+    
+    if (!hasRealAudio) {
+      console.log(`🔗 📦 No real audio detected, ensuring arbitrary audio foundation exists`)
+      if (!localStreamRef.current || currentAudioTracks.length === 0) {
+        console.log(`🔗 🔧 Creating new arbitrary audio foundation`)
+        const arbitraryAudioStream = createArbitraryAudioTrack()
+        localStreamRef.current = arbitraryAudioStream
       }
     }
-    pc.ondatachannel = (event) => {
-      const dc = event.channel
-      dataChannelsRef.current[remote] = dc
-      console.log(`📡 Received data channel from ${remote}`)
-      dc.onopen = () => {
-        console.log(`📡 Data channel open (rx) with ${remote}`)
-        // Respond with our capabilities
-        const caps = getLocalCapabilities()
-        try { dc.send(JSON.stringify({ type: 'caps', payload: caps })) } catch {}
-      }
-      dc.onmessage = (e) => {
-        try {
-          const msg = JSON.parse(e.data)
-          if (msg.type === 'caps') {
-            updateRemoteCapabilities(remote, msg.payload)
-          }
-        } catch (err) {
-          console.warn('Data channel message parse error:', err)
+    
+    const currentVideoTracks = localVideoStreamRef.current?.getVideoTracks() || []
+    const hasRealVideo = currentVideoTracks.some(track => !('isArbitraryTrack' in track))
+    
+    if (!hasRealVideo && (!localVideoStreamRef.current || currentVideoTracks.length === 0)) {
+      console.log(`🔗 🔧 Creating persistent arbitrary video foundation`)
+      const arbitraryVideoStream = createArbitraryVideoTrack()
+      localVideoStreamRef.current = arbitraryVideoStream
+    }
+    
+    // STRICT ORDER IMPLEMENTATION: Add tracks in exact order to maintain m-line consistency
+    
+    // 1. FIRST: Add microphone audio tracks (real or arbitrary) - ALWAYS position 0
+    if (localStreamRef.current) {
+      const audioTracks = localStreamRef.current.getAudioTracks()
+      if (audioTracks.length > 0) {
+        const audioTrack = audioTracks[0] // Use only first audio track to maintain order
+        if (!pc.getSenders().some(sender => sender.track === audioTrack)) {
+          pc.addTrack(audioTrack, localStreamRef.current)
+          const isArbitrary = 'isArbitraryTrack' in audioTrack
+          console.log(`🔗 ✅ [POS 0] Added ${isArbitrary ? 'arbitrary' : 'real'} audio track: ${audioTrack.label}, enabled: ${audioTrack.enabled}`)
         }
       }
-      dc.onclose = () => { console.log(`📡 Data channel closed (rx) with ${remote}`); delete dataChannelsRef.current[remote] }
-      dc.onerror = (err) => console.warn('Data channel error', err)
     }
+    
+    // 2. SECOND: Add system audio tracks (if available) - ALWAYS position 1
+    if (localSystemAudioStreamRef.current) {
+      const systemAudioTracks = localSystemAudioStreamRef.current.getAudioTracks()
+      if (systemAudioTracks.length > 0) {
+        const systemAudioTrack = systemAudioTracks[0] // Use only first system audio track
+        if (!pc.getSenders().some(sender => sender.track === systemAudioTrack)) {
+          pc.addTrack(systemAudioTrack, localSystemAudioStreamRef.current)
+          console.log(`🔗 ✅ [POS 1] Added system audio track: ${systemAudioTrack.label}, enabled: ${systemAudioTrack.enabled}`)
+        }
+      }
+    }
+    
+    // 3. THIRD: Add video tracks (real or arbitrary) - ALWAYS position 2
+    if (localVideoStreamRef.current) {
+      const videoTracks = localVideoStreamRef.current.getVideoTracks()
+      if (videoTracks.length > 0) {
+        const videoTrack = videoTracks[0] // Use only first video track to maintain order
+        if (!pc.getSenders().some(sender => sender.track === videoTrack)) {
+          pc.addTrack(videoTrack, localVideoStreamRef.current)
+          const isArbitrary = 'isArbitraryTrack' in videoTrack
+          console.log(`🔗 ✅ [POS 2] Added ${isArbitrary ? 'arbitrary' : 'real'} video track: ${videoTrack.label}`)
+        }
+      }
+    }
+    
+    // 4. FOURTH: Add screen share tracks (if available) - ALWAYS position 3
+    if (localScreenStreamRef.current) {
+      const screenTracks = localScreenStreamRef.current.getVideoTracks()
+      if (screenTracks.length > 0) {
+        const screenTrack = screenTracks[0] // Use only first screen track
+        if (!pc.getSenders().some(sender => sender.track === screenTrack)) {
+          pc.addTrack(screenTrack, localScreenStreamRef.current)
+          console.log(`🔗 ✅ [POS 3] Added screen share track: ${screenTrack.label}`)
+        }
+      }
+    }
+    
+    console.log(`🔗 ✅ ROBUST peer connection for ${remote} created with ${pc.getSenders().length} senders in strict order`)
     
     return pc
-  }, [currentUser, createAndSendOffer, getLocalCapabilities, updateRemoteCapabilities, scheduleNegotiation, sendCallSignal, scheduleReconnection, remoteCapabilities])
-
-  // --- ULTRA RELIABILITY WATCHDOG (expects vs actual media) ---
-  const reliabilityStateRef = useRef<Record<string, { missingCycles: number }>>({})
-  useEffect(() => {
-    if (!joined) return
-    const interval = setInterval(() => {
-      Object.keys(peerConnections.current).forEach(peerId => {
-        const pc = peerConnections.current[peerId]
-        if (!pc) return
-        if (connectionHealth[peerId] !== 'connected') return
-        const caps = remoteCapabilities[peerId]
-        if (!caps) return
-        const expectAudio = caps.mic || caps.systemAudio
-        const expectVideo = caps.camera || caps.screen
-        const haveAudio = !!remoteStreams[peerId] || !!remoteSystemAudioStreams[peerId]
-        const haveVideo = !!remoteVideoStreams[peerId] || !!remoteScreenStreams[peerId]
-        const state = (reliabilityStateRef.current[peerId] ||= { missingCycles: 0 })
-        const missing = (expectAudio && !haveAudio) || (expectVideo && !haveVideo)
-        if (!missing) { state.missingCycles = 0; return }
-        state.missingCycles++
-        if (state.missingCycles === 1) {
-          escalateConnection(peerId, 'renegotiate', 'watchdog-missing')
-        } else if (state.missingCycles === 2) {
-          escalateConnection(peerId, 'ice', 'watchdog-missing')
-        } else if (state.missingCycles >= 3) {
-          if (escalateConnection(peerId, 'rebuild', 'watchdog-missing')) {
-            state.missingCycles = 0
-          }
-        }
-      })
-    }, 5000)
-    return () => clearInterval(interval)
-  }, [joined, remoteCapabilities, remoteStreams, remoteVideoStreams, remoteScreenStreams, remoteSystemAudioStreams, connectionHealth, escalateConnection])
-
-  // RTP stats-based stalled media detector (per peer bytes delta)
-  useEffect(() => {
-    if (!joined) return
-    const interval = setInterval(() => {
-      Object.keys(peerConnections.current).forEach(peerId => {
-        const caps = remoteCapabilities[peerId]
-        if (!caps) return
-        const liveness = (inboundLivenessRef.current[peerId] ||= { audioBytes: 0, videoBytes: 0, stagnantAudio: 0, stagnantVideo: 0 })
-        const pc = peerConnections.current[peerId]
-        if (!pc || pc.signalingState === 'closed') return
-        pc.getStats().then(stats => {
-          interface InboundRtpLike { type: string; kind?: 'audio' | 'video'; bytesReceived?: number }
-          let audioBytes = 0, videoBytes = 0
-            stats.forEach(r => {
-              const rep = r as unknown as InboundRtpLike
-              if (rep.type === 'inbound-rtp' && rep.kind === 'audio' && typeof rep.bytesReceived === 'number') audioBytes += rep.bytesReceived
-              if (rep.type === 'inbound-rtp' && rep.kind === 'video' && typeof rep.bytesReceived === 'number') videoBytes += rep.bytesReceived
-            })
-          if (caps.mic || caps.systemAudio) {
-            if (audioBytes === liveness.audioBytes) liveness.stagnantAudio++; else liveness.stagnantAudio = 0
-          } else liveness.stagnantAudio = 0
-          if (caps.camera || caps.screen) {
-            if (videoBytes === liveness.videoBytes) liveness.stagnantVideo++; else liveness.stagnantVideo = 0
-          } else liveness.stagnantVideo = 0
-          liveness.audioBytes = audioBytes
-          liveness.videoBytes = videoBytes
-          if ((liveness.stagnantAudio >= 3 || liveness.stagnantVideo >= 3) && connectionHealth[peerId] === 'connected') {
-            escalateConnection(peerId, 'renegotiate', 'stall-bytes')
-          }
-          if ((liveness.stagnantAudio >= 5 || liveness.stagnantVideo >= 5) && connectionHealth[peerId] === 'connected') {
-            escalateConnection(peerId, 'ice', 'stall-bytes')
-          }
-          if ((liveness.stagnantAudio >= 7 || liveness.stagnantVideo >= 7) && connectionHealth[peerId] === 'connected') {
-            if (escalateConnection(peerId, 'rebuild', 'stall-bytes')) {
-              liveness.stagnantAudio = 0; liveness.stagnantVideo = 0
-            }
-          }
-        }).catch(() => {})
-      })
-    }, 5000)
-    return () => clearInterval(interval)
-  }, [joined, remoteCapabilities, connectionHealth, escalateConnection])
-
-  // Audio energy silence detector (complements byte-level stall detection)
-  useEffect(() => {
-    if (!joined) return
-    const interval = setInterval(() => {
-      Object.entries(remoteAudioAnalyserRef.current).forEach(([peerId, entry]) => {
-        const caps = remoteCapabilities[peerId]
-  if (!caps || !(caps.mic || caps.systemAudio)) return
-  const analyser: AnalyserNode = entry.analyser
-  const data: Uint8Array = entry.data
-  ;(analyser.getByteTimeDomainData as unknown as (arr: Uint8Array) => void)(data)
-        let sum = 0
-        for (let i = 0; i < data.length; i++) {
-          const v = (data[i] - 128) / 128
-          sum += v * v
-        }
-        const rms = Math.sqrt(sum / data.length)
-        if (rms < 0.005) entry.silentCycles++; else entry.silentCycles = 0
-        if (entry.silentCycles === 5) {
-          escalateConnection(peerId, 'renegotiate', 'silence')
-        } else if (entry.silentCycles === 7) {
-          escalateConnection(peerId, 'ice', 'silence')
-        } else if (entry.silentCycles === 9) {
-          if (escalateConnection(peerId, 'rebuild', 'silence')) entry.silentCycles = 0
-        }
-      })
-    }, 2000)
-    return () => clearInterval(interval)
-  }, [joined, remoteCapabilities, escalateConnection])
-
-  // Exposed manual force sync (can be wired to a UI button later)
-  const forceResyncAll = useCallback(() => {
-    Object.entries(peerConnections.current).forEach(([peerId, pc]) => {
-      if (pc.signalingState === 'stable') {
-        escalateConnection(peerId, 'ice', 'force-resync')
-      }
-    })
-  }, [escalateConnection])
-  // Reference forceResyncAll so linter knows it's intentionally retained for future UI binding
-  useEffect(() => { /* keep */ }, [forceResyncAll])
-
-  // AUTOMATIC GLOBAL FORCE SYNC: trigger if majority of peers degraded or relayed for prolonged period
-  useEffect(() => {
-    if (!joined) return
-    const interval = setInterval(() => {
-      const entries = Object.values(remoteNetworkStats)
-      if (entries.length < 2) return // avoid single-peer noise
-      const poorBad = entries.filter(s => s.quality === 'poor' || s.quality === 'bad').length
-      const relay = entries.filter(s => s.path === 'relay').length
-      const ratioDegraded = poorBad / entries.length
-      const ratioRelay = relay / entries.length
-      const now = Date.now()
-      const COOLDOWN = 45000 // 45s between auto global force syncs
-      // Additional guard: skip if any peer had rebuild in last 15s to avoid stacking actions
-      const recentRebuild = Object.values(lastEscalationRef.current).some(t => now - t.lastRebuild < 15000)
-      if (!recentRebuild && (ratioDegraded >= 0.5 || ratioRelay >= 0.7) && (now - lastAutoForceSyncRef.current) > COOLDOWN) {
-        console.log('🛡️ [AutoForceSync] Triggering global forceResyncAll due to network degradation', { ratioDegraded, ratioRelay })
-        lastAutoForceSyncRef.current = now
-        setLastAutoForceSyncAt(now)
-        forceResyncAll()
-      } else if (recentRebuild && (ratioDegraded >= 0.5 || ratioRelay >= 0.7)) {
-        console.log('🛡️ [AutoForceSync] Suppressed due to recent rebuild action')
-      }
-    }, 10000)
-    return () => clearInterval(interval)
-  }, [joined, remoteNetworkStats, forceResyncAll])
+  }, [roomId, currentUser]) // Dependencies for useCallback
 
 // Join call room with UNIVERSAL CONNECTION PROTOCOL
   const joinCall = async () => {
-  // Preflight removed: proceed immediately
     setConnecting(true)
     setConnectionSequenceProgress(0)
     setError("")
@@ -1894,8 +994,6 @@ export default function CallPage() {
           if (!pc) {
             console.log(`🔗 Creating new ROBUST peer connection for ${newPeer}`)
             pc = createPeerConnection(newPeer)
-            // Initialize remote capabilities placeholder
-            updateRemoteCapabilities(newPeer, {})
           }
           
           // ROBUST CONNECTION: Always check for ANY tracks (including arbitrary)
@@ -1915,25 +1013,40 @@ export default function CallPage() {
           })
           
           // Perfect negotiation with GUARANTEED connection establishment
-          const polite = currentUser < newPeer
-          if (negotiationStateRef.current[newPeer]) {
-            negotiationStateRef.current[newPeer].polite = polite
-          }
-          // Impolite side proactively offers; polite waits briefly
-          if (!polite) {
-            setTimeout(() => {
-              if (peerConnections.current[newPeer]?.signalingState === 'stable') {
-                createAndSendOffer(newPeer, peerConnections.current[newPeer], 'new-peer-impolite')
+          const isImpolite = currentUser > newPeer
+          const shouldCreateOffer = !actualIsListener && isImpolite
+          
+          if (shouldCreateOffer) {
+            console.log(`🔗 ${currentUser} is IMPOLITE - will create offer for ${newPeer}`)
+            // Add a small delay to let the polite peer potentially start negotiation first
+            setTimeout(async () => {
+              // Check if negotiation hasn't started yet
+              if (pc && pc.signalingState === 'stable') {
+                try {
+                  console.log(`🔗 ✅ Creating ROBUST offer for new peer ${newPeer}`)
+                  const offer = await pc.createOffer()
+                  await pc.setLocalDescription(offer)
+                  ws.send(JSON.stringify({ type: "call-offer", roomId, from: currentUser, to: newPeer, payload: pc.localDescription }))
+                } catch (error) {
+                  console.error(`🔗 ❌ Error creating offer for new peer ${newPeer}:`, error)
+                }
               }
-            }, 50)
+            }, 100) // Small delay to prevent race conditions
           } else {
-            // Backup in case we never get an offer (peer crashed before sending)
-            setTimeout(() => {
-              if (peerConnections.current[newPeer]?.signalingState === 'stable' && !negotiationStateRef.current[newPeer]?.isMakingOffer) {
-                console.log(`🔗 ⏱️ Backup offer (polite) for ${newPeer}`)
-                createAndSendOffer(newPeer, peerConnections.current[newPeer], 'new-peer-backup')
+            console.log(`🔗 ${currentUser} is POLITE - waiting for offer from ${newPeer}`)
+            // If we're the polite peer but no offer comes, create one anyway after a longer delay
+            setTimeout(async () => {
+              if (pc && pc.signalingState === 'stable') {
+                try {
+                  console.log(`🔗 🔄 Polite peer ${currentUser} creating BACKUP offer for ${newPeer} to ensure connection`)
+                  const offer = await pc.createOffer()
+                  await pc.setLocalDescription(offer)
+                  ws.send(JSON.stringify({ type: "call-offer", roomId, from: currentUser, to: newPeer, payload: pc.localDescription }))
+                } catch (error) {
+                  console.error('Error creating backup offer:', error)
+                }
               }
-            }, 800)
+            }, 500) // Longer delay for backup offer
           }
           break
         }case "call-offer": {
@@ -1942,45 +1055,33 @@ export default function CallPage() {
           if (!pc) {
             pc = createPeerConnection(from)
           }
-          const negotiation = negotiationStateRef.current[from]
-          if (negotiation) {
-            negotiation.polite = currentUser < from
-            const offerCollision = negotiation.isMakingOffer || pc.signalingState !== 'stable'
-            if (offerCollision) {
-              if (!negotiation.polite) {
-                // Impolite side ignores
-                console.log(`⚔️ Offer collision from ${from}, impolite side ignoring`)
-                return
-              }
-              console.log(`⚔️ Offer collision from ${from}, polite side performing rollback`)
-              try {
-                await pc.setLocalDescription({ type: 'rollback' })
-              } catch {
-                console.warn('Rollback failed; recreating PC')
-                await recreatePeerConnection(from)
-                pc = peerConnections.current[from]
-              }
-            }
-          }
-          const result = await safeSetRemoteDescription(pc, msg.payload, negotiation?.polite)
+          
+          // Perfect negotiation: determine politeness based on username comparison
+          const isPolite = currentUser < from // Lexicographically smaller username is polite
+          
+          // Use safeSetRemoteDescription with politeness info
+          const result = await safeSetRemoteDescription(pc, msg.payload, isPolite)
           if (result === 'recreate') {
+            // Recreate the peer connection and try again
             await recreatePeerConnection(from)
             pc = peerConnections.current[from]
-            if (pc) await safeSetRemoteDescription(pc, msg.payload, negotiation?.polite)
+            if (pc) {
+              await safeSetRemoteDescription(pc, msg.payload, isPolite)
+            }
           } else if (result === 'ignored') {
-            console.log(`Offer from ${from} ignored after collision handling`)
+            // Offer was ignored due to collision, don't create answer
+            console.log(`Offer from ${from} was ignored due to collision`)
             break
           }
-          if (pc.signalingState === 'stable') {
-            // Remote description probably not applied; skip
-          }
-          if (pc.signalingState === 'have-remote-offer') {
+          
+          // Only proceed if we have a valid peer connection and didn't ignore
+          if (pc && pc.signalingState !== 'closed' && result === 'success') {
             try {
               const answer = await pc.createAnswer()
               await pc.setLocalDescription(answer)
-              sendCallSignal({ type: 'call-answer', to: from, payload: pc.localDescription })
-            } catch (e) {
-              console.error('Answer creation failed:', e)
+              ws.send(JSON.stringify({ type: "call-answer", roomId, from: currentUser, to: from, payload: pc.localDescription }))
+            } catch (error) {
+              console.error('Error creating answer:', error)
             }
           }
           break
@@ -2054,12 +1155,6 @@ export default function CallPage() {
             delete copy[left]
             return copy
           })
-          // Cleanup data channel & capability state
-          if (dataChannelsRef.current[left]) {
-            try { dataChannelsRef.current[left].close() } catch {}
-            delete dataChannelsRef.current[left]
-          }
-          setRemoteCapabilities(prev => { const copy = { ...prev }; delete copy[left]; return copy })
             // Reset expanded participant if they left
           setExpandedParticipants(prev => {
             const newSet = new Set(prev)
@@ -2096,15 +1191,12 @@ export default function CallPage() {
   const leaveCall = () => {
     // Send leave message to server
     if (wsRef.current && currentUser) {
-  sendCallSignal({ type: 'call-peer-left' })
+      wsRef.current.send(JSON.stringify({ type: "call-peer-left", roomId, username: currentUser }))
     }
     
     // Close all peer connections
     Object.values(peerConnections.current).forEach(pc => pc.close())
     peerConnections.current = {}
-  // Close data channels
-  Object.values(dataChannelsRef.current).forEach(dc => { try { dc.close() } catch {} })
-  dataChannelsRef.current = {}
     
     // Clean up connection timeouts and health monitoring
     Object.values(connectionTimeouts.current).forEach(timeout => clearTimeout(timeout))
@@ -2156,7 +1248,6 @@ export default function CallPage() {
     setRemoteVideoStreams({})
     setRemoteScreenStreams({})
     setRemoteSystemAudioStreams({})
-  setRemoteCapabilities({})
     setParticipants(new Set()) // Clear participants list
     setVideoEnabled(false)    
     setScreenSharing(false)
@@ -2169,82 +1260,47 @@ export default function CallPage() {
 // Add local tracks to all peer connections when available
   useEffect(() => {
     if (actualIsListener) return
+    
     Object.values(peerConnections.current).forEach(pc => {
-      const senders = pc.getSenders()
-      // Helper finders by role
-      const micSender = senders.find(s => s.track && s.track.kind === 'audio' && !s.track.label.toLowerCase().includes('system'))
-      const systemSender = senders.find(s => s.track && s.track.kind === 'audio' && s.track.label.toLowerCase().includes('system'))
-      const cameraSender = senders.find(s => (s as TaggedSender).__camera) || senders.find(s => s.track && s.track.kind === 'video' && !s.track.label.toLowerCase().includes('screen') && !(s as TaggedSender).__screen)
-      const screenSender = senders.find(s => (s as TaggedSender).__screen) || senders.filter(s => s.track && s.track.kind === 'video').slice(1,2)[0]
-
-      // Microphone audio
-      const micTrack = localStreamRef.current?.getAudioTracks()[0]
-      if (micTrack) {
-        if (micSender && micSender.track !== micTrack) {
-          micSender.replaceTrack(micTrack).catch(()=>{})
-        } else if (!micSender) {
-          try { pc.addTrack(micTrack, localStreamRef.current!) } catch { /* duplicate safe */ }
-        }
+      // Add audio tracks if available
+      if (localStreamRef.current) {
+        localStreamRef.current.getTracks().forEach(track => {
+          if (!pc.getSenders().some(sender => sender.track === track)) {
+            pc.addTrack(track, localStreamRef.current!)
+            console.log(`Added audio track to existing PC: ${track.label}, enabled: ${track.enabled}`)
+          }
+        })
       }
-
-      // System audio
-      const sysTrack = localSystemAudioStreamRef.current?.getAudioTracks()[0]
-      if (sysTrack) {
-        if (systemSender && systemSender.track !== sysTrack) {
-          systemSender.replaceTrack(sysTrack).catch(()=>{})
-        } else if (!systemSender) {
-          try { pc.addTrack(sysTrack, localSystemAudioStreamRef.current!) } catch {}
-        }
+      
+      // Also add video tracks if enabled
+      if (localVideoStreamRef.current) {
+        localVideoStreamRef.current.getTracks().forEach(track => {
+          if (!pc.getSenders().some(sender => sender.track === track)) {
+            pc.addTrack(track, localVideoStreamRef.current!)
+          }
+        })
       }
-
-      // Camera video
-      const camTrack = localVideoStreamRef.current?.getVideoTracks()[0]
-      if (camTrack) {
-        if (cameraSender && cameraSender.track !== camTrack) {
-          cameraSender.replaceTrack(camTrack).catch(()=>{})
-        } else if (!cameraSender) {
-          try { pc.addTrack(camTrack, localVideoStreamRef.current!) } catch {}
-        }
+      
+      // Also add screen tracks if enabled  
+      if (localScreenStreamRef.current) {
+        localScreenStreamRef.current.getTracks().forEach(track => {
+          if (!pc.getSenders().some(sender => sender.track === track)) {
+            pc.addTrack(track, localScreenStreamRef.current!)
+          }
+        })
       }
-
-      // Screen video (real screen track only; skip placeholder logic here)
-      const screenTrack = localScreenStreamRef.current?.getVideoTracks()[0]
-      if (screenTrack) {
-        if (screenSender && screenSender.track !== screenTrack) {
-          screenSender.replaceTrack(screenTrack).catch(()=>{})
-        } else if (!screenSender) {
-          try { pc.addTrack(screenTrack, localScreenStreamRef.current!) } catch {}
-        }
+      
+      // Also add system audio tracks if enabled
+      if (localSystemAudioStreamRef.current) {
+        localSystemAudioStreamRef.current.getTracks().forEach(track => {
+          if (!pc.getSenders().some(sender => sender.track === track)) {
+            pc.addTrack(track, localSystemAudioStreamRef.current!)
+            console.log(`Added system audio track to existing PC: ${track.label}, enabled: ${track.enabled}`)
+          }
+        })
       }
     })
-  }, [joined, actualIsListener, videoEnabled, screenSharing, muted])
-
-  // Detect local camera upgrade (from arbitrary placeholder to real device) and push replaceTrack + forced negotiation to peers
-  useEffect(() => {
-    if (!joined || !videoEnabled) return
-    const realCamTrack = localVideoStreamRef.current?.getVideoTracks()[0]
-    if (!realCamTrack) return
-    const isArbitrary = (realCamTrack as unknown as { isArbitraryTrack?: boolean }).isArbitraryTrack
-    if (isArbitrary) return // still placeholder
-    // For each peer ensure camera transceiver sender has this real track; if not replace and negotiate once.
-    Object.entries(peerConnections.current).forEach(([remote, pc]) => {
-      try {
-        const camSender = pc.getTransceivers().filter(t => t.receiver.track.kind === 'video')[0]?.sender
-        if (camSender && camSender.track !== realCamTrack) {
-          camSender.replaceTrack(realCamTrack).then(async () => {
-            if (pc.signalingState === 'stable') {
-              try {
-                const offer = await pc.createOffer()
-                await pc.setLocalDescription(offer)
-                wsRef.current?.send(JSON.stringify({ type: 'call-offer', roomId, from: currentUser, to: remote, payload: pc.localDescription }))
-                console.log('📤 Sent camera upgrade offer to', remote)
-              } catch (err) { console.warn('Camera upgrade negotiation failed', err) }
-            }
-          }).catch(()=>{})
-        }
-      } catch {}
-    })
-  }, [joined, videoEnabled, currentUser, roomId, localVideoStreamRef.current?.id])
+  }, [joined, actualIsListener, videoEnabled, screenSharing, muted]) // Added muted as dependency
 
   // Clean up on leave
   useEffect(() => {
@@ -2261,124 +1317,6 @@ export default function CallPage() {
       if (localSystemAudioStreamRef.current) localSystemAudioStreamRef.current.getTracks().forEach(t => t.stop())
     }
   }, [roomId])
-
-  // Broadcast capability changes when local states change
-  useEffect(() => {
-    if (!joined) return
-    broadcastCapabilities()
-  }, [joined, muted, videoEnabled, screenSharing, broadcastCapabilities])
-
-  // Stats-based adaptive ICE restarts & quality monitoring
-  useEffect(() => {
-    if (!joined) return
-    const interval = setInterval(async () => {
-      for (const [peerId, pc] of Object.entries(peerConnections.current)) {
-        if (pc.signalingState === 'closed') continue
-        try {
-          const stats = await pc.getStats()
-          let rtt = 0
-          // Narrow typing for candidate pair reports we care about
-          interface CandidatePairLike { currentRoundTripTime?: number; roundTripTime?: number; state?: string; nominated?: boolean }
-          const candidatePairs: CandidatePairLike[] = []
-          let totalPackets = 0
-            let lostPackets = 0
-          stats.forEach(report => {
-            if (report.type === 'candidate-pair') {
-              const cp = report as unknown as CandidatePairLike
-              if (cp.state === 'succeeded' && cp.nominated) {
-                candidatePairs.push(cp)
-              }
-            }
-            if (report.type === 'remote-inbound-rtp' || report.type === 'inbound-rtp') {
-              const r = report as unknown as { kind?: string; packetsReceived?: number; packetsLost?: number }
-              if ((r.kind === 'audio' || r.kind === 'video') && typeof r.packetsReceived === 'number' && typeof r.packetsLost === 'number') {
-                totalPackets += r.packetsReceived + r.packetsLost
-                lostPackets += r.packetsLost
-              }
-            }
-          })
-          if (candidatePairs.length) {
-            // take best (lowest RTT)
-            rtt = candidatePairs.reduce((min, p) => Math.min(min, (p.currentRoundTripTime ?? p.roundTripTime ?? Infinity)), Infinity)
-          }
-          const lossRatio = totalPackets > 200 ? (lostPackets / totalPackets) : 0 // ignore small samples
-          if ((rtt && rtt > 0.8) || lossRatio > 0.15) {
-            const now = Date.now()
-            const last = lastIceRestartRef.current[peerId] || 0
-            if (now - last > 15000 && pc.signalingState === 'stable') {
-              console.log(`📊 Network degradation detected for ${peerId} (rtt=${(rtt*1000).toFixed(0)}ms loss=${(lossRatio*100).toFixed(1)}%) -> ICE restart`)
-              lastIceRestartRef.current[peerId] = now
-              createAndSendOffer(peerId, pc, 'stats-degraded', true)
-            }
-          }
-        } catch {
-          // ignore stats errors
-        }
-      }
-    }, 5000)
-    return () => clearInterval(interval)
-  }, [joined, createAndSendOffer])
-
-  // Auto track recovery: if real mic/camera track ends unexpectedly, attempt reacquire
-  useEffect(() => {
-    if (!joined) return
-    const micTracks = localStreamRef.current?.getAudioTracks() || []
-    micTracks.forEach(track => {
-      const arbitrary = (track as unknown as { isArbitraryTrack?: boolean }).isArbitraryTrack
-      if (arbitrary) return
-      track.onended = async () => {
-        if (muted) return // user intentionally muted or permission revoked
-        console.log('🎤 Microphone track ended unexpectedly - attempting recovery')
-        try {
-          const newStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false })
-          const newTrack = newStream.getAudioTracks()[0]
-          if (newTrack) {
-            // Replace locally
-            if (localStreamRef.current) {
-              localStreamRef.current.getAudioTracks().forEach(t => t.stop())
-              localStreamRef.current = new MediaStream([newTrack])
-            }
-            if (localAudioRef.current) localAudioRef.current.srcObject = localStreamRef.current
-            // Replace in each pc
-            Object.entries(peerConnections.current).forEach(([, pc]) => {
-              const sender = pc.getSenders().find(s => s.track && s.track.kind === 'audio')
-              if (sender) { sender.replaceTrack(newTrack).catch(() => {}) }
-            })
-            broadcastCapabilities()
-          }
-        } catch (err) {
-          console.warn('Microphone recovery failed:', err)
-        }
-      }
-    })
-    const camTracks = localVideoStreamRef.current?.getVideoTracks() || []
-    camTracks.forEach(track => {
-      const arbitrary = (track as unknown as { isArbitraryTrack?: boolean }).isArbitraryTrack
-      if (arbitrary) return
-      track.onended = async () => {
-        if (!videoEnabled) return
-        console.log('📹 Camera track ended unexpectedly - attempting recovery')
-        try {
-          const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: currentCamera }, audio: false })
-          const newTrack = stream.getVideoTracks()[0]
-          if (newTrack) {
-            if (localVideoStreamRef.current) {
-              localVideoStreamRef.current.getVideoTracks().forEach(t => t.stop())
-              localVideoStreamRef.current = new MediaStream([newTrack])
-            }
-            if (localVideoRef.current) localVideoRef.current.srcObject = localVideoStreamRef.current
-            Object.entries(peerConnections.current).forEach(([, pc]) => {
-              const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video' && !s.track.label.toLowerCase().includes('screen'))
-              if (sender) { sender.replaceTrack(newTrack).catch(() => {}) }
-            })
-            broadcastCapabilities()
-          }
-        } catch (err) {
-          console.warn('Camera recovery failed:', err)
-        }
-      }
-    })
-  }, [joined, muted, videoEnabled, currentCamera, broadcastCapabilities])
 
   // 🔗 ULTRA-ROBUST CONNECTION: Immediate fail detection and aggressive recovery system
   useEffect(() => {
@@ -2823,10 +1761,7 @@ export default function CallPage() {
         )?.track || null
         
         if (currentScreenTrack) {
-          // Instead of going to a null track (which can create an "inactive" m-line in some browsers),
-          // restore a tiny placeholder screen track so late joiners still bind the screen m-line immediately.
-          const placeholder = createArbitraryScreenPlaceholderTrack()
-          await safeReplaceTrack(pc, currentScreenTrack, placeholder, new MediaStream([placeholder]), 'screen')
+          await safeReplaceTrack(pc, currentScreenTrack, null, new MediaStream(), 'screen')
         }
         
         // Remove system audio track safely
@@ -2963,7 +1898,7 @@ export default function CallPage() {
         
         // Add both screen video and system audio tracks to all peer connections
         console.log('🔄 Starting screen sharing track distribution to all peers...')
-  const renegotiationPromises = Object.entries(peerConnections.current).map(async ([remote, pc]) => {
+        const renegotiationPromises = Object.entries(peerConnections.current).map(async ([remote, pc]) => {
           console.log(`📡 Processing screen sharing for peer: ${remote}`)
           
           const screenTrack = stream.getVideoTracks()[0]
@@ -2979,19 +1914,11 @@ export default function CallPage() {
             )
             
             if (existingScreenSender && existingScreenSender.track) {
-              // Replace existing screen track (avoids adding new m-line)
+              // Replace existing screen track (avoids renegotiation)
               try {
                 await existingScreenSender.replaceTrack(screenTrack)
                 console.log(`Replaced screen track for ${remote}`)
-                // Even after replaceTrack, force a negotiation once so late joiners who missed earlier offers get current screen direction attributes
-                if (pc.signalingState === 'stable') {
-                  try {
-                    const offer = await pc.createOffer()
-                    await pc.setLocalDescription(offer)
-                    wsRef.current?.send(JSON.stringify({ type: 'call-offer', roomId, from: currentUser, to: remote, payload: pc.localDescription }))
-                  } catch (e) { console.warn('Forced screen replace negotiation failed:', e) }
-                }
-                return
+                return // No renegotiation needed
               } catch (error) {
                 console.warn(`Failed to replace screen track for ${remote}, falling back to addTrack:`, error)
               }
@@ -3194,14 +2121,7 @@ export default function CallPage() {
           const cleanupPromises = Object.entries(peerConnections.current).map(async ([remote, pc]) => {
             pc.getSenders().forEach(sender => {
               if (sender.track && sender.track.readyState === 'ended') {
-                // For screen sender, restore placeholder instead of removing entirely
-                const tagged = sender as TaggedSender
-                if (tagged.__screen) {
-                  const placeholder = createArbitraryScreenPlaceholderTrack()
-                  try { sender.replaceTrack(placeholder) } catch {}
-                } else {
-                  pc.removeTrack(sender)
-                }
+                pc.removeTrack(sender)
               }
             })
             
@@ -3584,7 +2504,13 @@ export default function CallPage() {
                     console.log(`Reconnect: Creating offer for peer ${newPeer}`)
                     const offer = await pc.createOffer()
                     await pc.setLocalDescription(offer)
-                        sendCallSignal({ type: 'call-offer', to: newPeer, payload: pc.localDescription })
+                    ws.send(JSON.stringify({ 
+                      type: "call-offer", 
+                      roomId, 
+                      from: currentUser, 
+                      to: newPeer, 
+                      payload: pc.localDescription 
+                    }))
                   } catch (error) {
                     console.error('Reconnect: Error creating offer:', error)
                   }
@@ -3620,7 +2546,13 @@ export default function CallPage() {
               try {
                 const answer = await pc.createAnswer()
                 await pc.setLocalDescription(answer)
-                sendCallSignal({ type: 'call-answer', to: from, payload: pc.localDescription })
+                ws.send(JSON.stringify({ 
+                  type: "call-answer", 
+                  roomId, 
+                  from: currentUser, 
+                  to: from, 
+                  payload: pc.localDescription 
+                }))
               } catch (error) {
                 console.error('Reconnect: Error creating answer:', error)
               }
@@ -3745,11 +2677,6 @@ export default function CallPage() {
             <p className="text-xs text-gray-500 truncate max-w-[80px]">/{roomId}</p>
           </div>
           <div className="flex items-center gap-2 flex-shrink-0 min-w-0">
-            {joined && lastAutoForceSyncAt && Date.now() - lastAutoForceSyncAt < 20000 && (
-              <span className="text-[10px] px-2 py-1 rounded-full bg-indigo-100 text-indigo-700 font-medium" title="Automatic force sync recently triggered to improve quality">
-                Auto Sync
-              </span>
-            )}
             {/* Reconnect Button - only show when joined */}
             {joined && (
               <Button
@@ -3762,19 +2689,6 @@ export default function CallPage() {
               >
                 <RotateCcw className={`h-4 w-4 ${reconnecting ? 'animate-spin' : ''}`} />
                 <span className="sm:inline">{reconnecting ? 'Reconnecting...' : 'Reconnect'}</span>
-              </Button>
-            )}
-            {joined && (
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={forceResyncAll}
-                disabled={reconnecting || connecting}
-                className="flex items-center gap-1"
-                title="Force renegotiation with ICE restart for all peers"
-              >
-                <RefreshCw className="h-4 w-4" />
-                <span className="hidden sm:inline">Force Sync</span>
               </Button>
             )}
             
@@ -3889,7 +2803,7 @@ export default function CallPage() {
                     </div>
                   )}
                 </div>
-                <div className="flex items-center gap-2 flex-wrap">{/* Core Controls Only (mobile-friendly) */}
+                <div className="flex items-center gap-2 flex-wrap">{/* Audio Controls */}
                   {!actualIsListener && (
                     <Button
                       size="sm"
@@ -3964,22 +2878,6 @@ export default function CallPage() {
                     <span className="hidden sm:inline">Leave</span>
                   </Button>
                 </div>
-              </div>
-              {/* Compact Diagnostics Toggle (separate row to reduce clutter) */}
-              <div className="mt-2 flex items-center justify-between gap-2 text-xs">
-                <button
-                  onClick={() => setDebugStats(d => !d)}
-                  className={`px-2 py-1 rounded border transition-colors ${debugStats ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-600 border-gray-300'}`}
-                  title="Toggle diagnostics"
-                >
-                  {debugStats ? 'Hide Stats' : 'Show Stats'}
-                </button>
-                {debugStats && (
-                  <div className="font-mono text-[10px] leading-tight bg-gray-100 border border-gray-200 rounded px-2 py-1 flex-1 text-right">
-                    <div>UP {(dataUsage.outbound.total/1024/1024).toFixed(2)} MB • DN {(dataUsage.inbound.total/1024/1024).toFixed(2)} MB</div>
-                    <div className="opacity-70">A {(dataUsage.outbound.audio/1024/1024).toFixed(2)}/{(dataUsage.inbound.audio/1024/1024).toFixed(2)} V {(dataUsage.outbound.video/1024/1024).toFixed(2)}/{(dataUsage.inbound.video/1024/1024).toFixed(2)} S {(dataUsage.outbound.screen/1024/1024).toFixed(2)}/{(dataUsage.inbound.screen/1024/1024).toFixed(2)}</div>
-                  </div>
-                )}
               </div>
                 {/* Local Speaking Indicator */}
               {!actualIsListener && (
@@ -4116,12 +3014,6 @@ export default function CallPage() {
                     const isExpanded = expandedParticipants.has(peer);
                     const hasVideo = remoteVideoStreams[peer];
                     const hasScreenShare = remoteScreenStreams[peer];
-                    const net = remoteNetworkStats[peer]
-                    const pathLetter = net?.path === 'relay' ? 'R' : net?.path === 'srflx' ? 'N' : net?.path === 'direct' ? 'D' : undefined
-                    const pathTitle = net?.path ? (
-                      net.path === 'relay' ? 'Relay (TURN in use)' : net.path === 'srflx' ? 'Server-reflexive (likely behind NAT)' : net.path === 'direct' ? 'Direct host-to-host' : 'Unknown path'
-                    ) : 'Unknown path'
-                    const recon = reconnectionStateRef.current[peer]
                     
                     return (
                       <div
@@ -4188,30 +3080,6 @@ export default function CallPage() {
                             isExpanded ? 'text-sm sm:text-base' : 'text-xs sm:text-sm'
                           }`}>
                             {peer}
-                            <span className="ml-1 inline-flex gap-1 align-middle">
-                              {remoteCapabilities[peer]?.mic && <Mic className="h-3 w-3 text-green-600" />}
-                              {remoteCapabilities[peer]?.camera && <Video className="h-3 w-3 text-blue-600" />}
-                              {remoteCapabilities[peer]?.screen && <Monitor className="h-3 w-3 text-emerald-600" />}
-                              {remoteCapabilities[peer]?.systemAudio && <Volume2 className="h-3 w-3 text-purple-600" />}
-                              {remoteNetworkStats[peer] && (
-                                <span className={`inline-flex items-center text-[10px] px-1 rounded font-medium border ${
-                                  remoteNetworkStats[peer].quality === 'excellent' ? 'bg-green-100 text-green-700 border-green-300' :
-                                  remoteNetworkStats[peer].quality === 'good' ? 'bg-lime-100 text-lime-700 border-lime-300' :
-                                  remoteNetworkStats[peer].quality === 'fair' ? 'bg-yellow-100 text-yellow-700 border-yellow-300' :
-                                  remoteNetworkStats[peer].quality === 'poor' ? 'bg-orange-100 text-orange-700 border-orange-300' :
-                                  'bg-red-100 text-red-700 border-red-300'
-                                }`} title={`RTT ${remoteNetworkStats[peer].rttMs}ms • Loss ${remoteNetworkStats[peer].lossPct}%${pathLetter ? ' • Path ' + pathLetter : ''}`}>
-                                  {remoteNetworkStats[peer].quality[0].toUpperCase()}
-                                </span>
-                              )}
-                              {pathLetter && (
-                                <span className={`inline-flex items-center text-[10px] px-1 rounded font-medium border ml-0.5 ${
-                                  pathLetter === 'R' ? 'bg-purple-100 text-purple-700 border-purple-300' :
-                                  pathLetter === 'N' ? 'bg-blue-100 text-blue-700 border-blue-300' :
-                                  'bg-gray-100 text-gray-700 border-gray-300'
-                                }`} title={pathTitle}>{pathLetter}</span>
-                              )}
-                            </span>
                             {/* Enhanced Connection Health Indicator with detailed feedback */}
                             <span className={`ml-2 inline-flex items-center gap-1`}>
                               <span className={`inline-block w-2 h-2 rounded-full ${
@@ -4220,35 +3088,17 @@ export default function CallPage() {
                                 connectionHealth[peer] === 'failed' ? 'bg-red-500 animate-bounce' :
                                 connectionHealth[peer] === 'disconnected' ? 'bg-orange-500' :
                                 'bg-gray-400'
-                              }`} title={`Connection: ${connectionHealth[peer] || 'unknown'}${recon ? ` • Phase ${recon.phase} Attempt ${recon.attempts}` : ''}`}></span>
+                              }`} title={`Connection: ${connectionHealth[peer] || 'unknown'}`}></span>
                               {/* Show state text for failed/problematic connections */}
                               {(connectionHealth[peer] === 'failed' || connectionHealth[peer] === 'disconnected') && (
                                 <span className="text-xs text-red-600 font-medium">
                                   {connectionHealth[peer] === 'failed' ? 'Reconnecting...' : 'Lost'}
                                 </span>
                               )}
-                              {recon && recon.phase === 2 && connectionHealth[peer] !== 'connected' && (
-                                <Button size="sm" variant="outline" className="h-5 px-1 text-[10px] leading-none" onClick={(e) => { e.stopPropagation(); delete reconnectionStateRef.current[peer]; scheduleReconnection(peer, 'manual-force') }}>Force</Button>
-                              )}
                             </span>
                           </div>
                           
                           <div className="flex items-center gap-1">
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              onClick={(e) => {
-                                e.stopPropagation()
-                                const pc = peerConnections.current[peer]
-                                if (pc && pc.signalingState === 'stable') {
-                                  createAndSendOffer(peer, pc, 'manual-ice-restart', true)
-                                }
-                              }}
-                              className={`p-1 h-6 w-6 sm:h-7 sm:w-7 ${!isExpanded ? 'hidden sm:inline-flex' : 'inline-flex'}`}
-                              title="Manual ICE restart"
-                            >
-                              <RefreshCw className="h-2.5 w-2.5 sm:h-3 sm:w-3" />
-                            </Button>
                             {/* Fullscreen Button */}
                             <Button
                               size="sm"
@@ -4257,7 +3107,7 @@ export default function CallPage() {
                                 e.stopPropagation()
                                 enterFullscreen(peer)
                               }}
-                              className={`p-1 h-6 w-6 sm:h-7 sm:w-7 ${!isExpanded ? 'hidden sm:inline-flex' : 'inline-flex'}`}
+                              className="p-1 h-6 w-6 sm:h-7 sm:w-7"
                               title={`Enter fullscreen for ${peer}`}
                             >
                               <Maximize className="h-2.5 w-2.5 sm:h-3 sm:w-3" />
@@ -4286,15 +3136,6 @@ export default function CallPage() {
                           <Volume2 className="h-2.5 w-2.5 sm:h-3 sm:w-3 mr-1" />
                           <span className="text-xs">Speaking</span>
                         </div>
-                        {debugStats && remoteNetworkStats[peer] && (
-                          <div className="mt-1 text-[10px] text-gray-500 leading-tight">
-                            <div>RTT: {remoteNetworkStats[peer].rttMs}ms</div>
-                            <div>Loss: {remoteNetworkStats[peer].lossPct}%</div>
-                            <div>Q: {remoteNetworkStats[peer].quality}</div>
-                            {pathLetter && <div>Path: {pathLetter}</div>}
-                            {recon && recon.phase < 2 && connectionHealth[peer] !== 'connected' && <div>Reconn: P{recon.phase} #{recon.attempts}</div>}
-                          </div>
-                        )}
                         
                         {/* Hidden audio element */}
                         <audio
@@ -4334,8 +3175,6 @@ export default function CallPage() {
           </div>
         )}
       </main>
-  {/* Preflight dialog removed per user request */}
     </div>
   )
 }
-
