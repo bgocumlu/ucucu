@@ -2219,6 +2219,33 @@ export default function CallPage() {
     })
   }, [joined, actualIsListener, videoEnabled, screenSharing, muted])
 
+  // Detect local camera upgrade (from arbitrary placeholder to real device) and push replaceTrack + forced negotiation to peers
+  useEffect(() => {
+    if (!joined || !videoEnabled) return
+    const realCamTrack = localVideoStreamRef.current?.getVideoTracks()[0]
+    if (!realCamTrack) return
+    const isArbitrary = (realCamTrack as unknown as { isArbitraryTrack?: boolean }).isArbitraryTrack
+    if (isArbitrary) return // still placeholder
+    // For each peer ensure camera transceiver sender has this real track; if not replace and negotiate once.
+    Object.entries(peerConnections.current).forEach(([remote, pc]) => {
+      try {
+        const camSender = pc.getTransceivers().filter(t => t.receiver.track.kind === 'video')[0]?.sender
+        if (camSender && camSender.track !== realCamTrack) {
+          camSender.replaceTrack(realCamTrack).then(async () => {
+            if (pc.signalingState === 'stable') {
+              try {
+                const offer = await pc.createOffer()
+                await pc.setLocalDescription(offer)
+                wsRef.current?.send(JSON.stringify({ type: 'call-offer', roomId, from: currentUser, to: remote, payload: pc.localDescription }))
+                console.log('📤 Sent camera upgrade offer to', remote)
+              } catch (err) { console.warn('Camera upgrade negotiation failed', err) }
+            }
+          }).catch(()=>{})
+        }
+      } catch {}
+    })
+  }, [joined, videoEnabled, currentUser, roomId, localVideoStreamRef.current?.id])
+
   // Clean up on leave
   useEffect(() => {
     const pcs = peerConnections.current
